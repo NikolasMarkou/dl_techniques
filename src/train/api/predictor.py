@@ -191,7 +191,8 @@ from the OPTIONAL ``variant_overrides``.
     shape; a denoiser's is ``(None, None, channels)``, a free height and width), ``check(record, format, shape)``
     raises a :class:`ConfigError` for a cell of the task's export table that is refused (denoising and forecasting
     only, :data:`train.api.denoising_predictor.EXPORT_REFUSALS`, :data:`train.api.forecast_predictor.EXPORT_REFUSALS`)
-    and ``note(record)`` is the sentence logged beside an export. ``served`` is ``None`` for the image tasks (the file
+    and, for forecasting and depth, for a traced shape that is not the record's (a depth model exports every format at
+    its trained size only, :func:`train.api.depth_predictor.check_export`), and ``note(record)`` is the sentence logged beside an export. ``served`` is ``None`` for the image tasks (the file
     is the model) and, for forecasting, the layer that standardizes a raw window, runs the model, decodes and
     de-standardizes (:class:`train.common.forecast_run.ServedForecaster`); the rank of ``shape_of(record)`` is the
     rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster). A row in every table of
@@ -1930,7 +1931,8 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     # A forecaster's file takes RAW windows ``(lookback, channels)`` (rank 2) and returns a forecast in the series' units: it
     # runs ``served``; the cells of its table that do not convert are refused by ``check`` (D-011, D-026).
     FORECASTING: ExportRule(_forecast_input_shape, _forecast_export_check, _forecast_export_note, _forecast_served),
-    # A depth model's file takes ImageNet-standardized images at the trained size (D-009): the record's own input shape.
+    # A depth model's file takes ImageNet-standardized images at the trained size (D-009): the record's own input shape;
+    # every format is written, and ``check`` refuses any other size by name (D-018).
     DEPTH: ExportRule(_segmentation_input_shape, _depth_export_check, _depth_export_note),
 }
 

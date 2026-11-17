@@ -48,9 +48,11 @@ Interface contract
     :raises ConfigError: for two files with one stem (naming both), or any error of ``predict``.
 
 ``check_export(record, format, shape)`` / ``export_note(record)``
-    The ``EXPORT_RULES`` row. Until its cells are wired with their measured tolerances (D-018, the next step of the plan
-    that added this task), every format is refused by name before anything is written. The note says what an exported
-    file takes and returns.
+    The ``EXPORT_RULES`` row (its ``shape_of`` is the record's ``(height, width, channels)``). Every format exports at the
+    trained size: ``keras``, ``saved_model``, ``tflite`` and ``onnx`` each give the Keras map within a band measured
+    relative to its scale (D-018: keras exactly, saved_model 1e-5, onnx 3e-5, tflite 5e-5; the test of this module holds
+    the bands). :raises ConfigError: from ``check_export`` for a ``shape`` that is not the record's, before anything is
+    written. ``export_note`` is the sentence logged beside the file: what it takes and returns.
 
 Import rule
 -----------
@@ -216,11 +218,20 @@ def write_predictions(predictor: DepthPredictor, files: Sequence[Path], out: Pat
 
 
 def check_export(record: Mapping[str, Any], format: str, shape: Sequence[Optional[int]]) -> None:
-    """Refuse every cell until the depth export cells are wired with their measured tolerances; see the module contract."""
-    raise ConfigError(
-        f"Invalid value for 'format': a {DEPTH} model is not exported to {format} yet; its export cells are added with "
-        "the tolerances measured at the trained size (D-018)"
-    )
+    """Raise :class:`ConfigError` unless ``shape`` is the trained size; see the module contract."""
+    # DECISION plan-2026-11-17T110935-9c7b9096/D-018
+    # Every format is exported, at the trained size ONLY, refused by name for any other. Do NOT leave another size to
+    # the converters: asked at 42 or 30 px for a 28 px model, saved_model, tflite and onnx all WRITE a file (measured,
+    # D-027): the 42 px file fails when it is run at 42, and the 30 px file answers a 30 px image with a 28 x 28 map,
+    # with no error. Do NOT refuse a format here (all four are within their bands at 252 and 28 px). The model is never
+    # rebuilt at another size (D-020).
+    wanted = (*record["input_size"], record["channels"])
+    if tuple(shape) != wanted:
+        raise ConfigError(
+            f"Invalid value for 'input_shape': {tuple(shape)} is not the trained size {wanted} (height, width, "
+            f"channels) of this {DEPTH} model; a Depth Anything takes only the size it was built at, so it is "
+            "exported at that size and a file of another size would be a new model"
+        )
 
 
 def export_note(record: Mapping[str, Any]) -> str:

@@ -7,8 +7,14 @@ returns a ``DepthPredictor``; an image of another size, a grey and an RGBA image
 the image's own size; the model is fed what training feeds it (a numpy oracle of the ImageNet standardization, and the
 loader's own crop of a file at the trained size); a moved ``.keras``, a record of another family or variant and a
 record whose size is not the model's are named ``ConfigError``s; ``python -m train predict`` writes one ``.npy`` per
-image and ``index.json`` last, and refuses an existing ``out``. Every export cell is refused until its cells are
-measured (the second part, Step 10).
+image and ``index.json`` last, and refuses an existing ``out``.
+
+Second part (Step 10): ``python -m train export`` of the run writes each of the four formats at the trained size with
+the run's record beside it, and each file, read by its own runtime, answers the Keras model's map on the run's 4 test
+crops within its D-018 band relative to the map's scale (keras exactly); the bands are held against the gaps measured
+at 252 px (Step 1(f)) and at this file's 28 px; a request at another size (42 px, one patch more, as 266 px is to
+252 px; and 30 px, the same patch grid) is refused by name before anything is written; the exported ``.keras`` loads
+as a ``DepthPredictor``; the note, the export help and the run's notes say what export does.
 
 One vit_s is trained here, once, in a module fixture: from random weights at 28 px (a 2 x 2 patch grid), one epoch of
 one batch on the synthetic MegaDepth tree, TensorBoard, figures, the analysis, the final model and the warm-up off
@@ -407,16 +413,145 @@ def test_a_run_that_fails_half_way_leaves_its_arrays_and_no_index(loaded, tmp_pa
 
 
 # ---------------------------------------------------------------------
-# Export: every cell refused until the cells are measured (Step 10)
+# Export at the trained size (second part, Step 10)
 # ---------------------------------------------------------------------
 
+#: D-018: the largest difference between an exported file, read by its own runtime, and the Keras model on the CPU, as a
+#: share of the largest |value| of the Keras map. Each band is about 4 times the worst gap measured at 252 px (Step 1(f));
+#: the ``keras`` file is the model itself and must answer exactly.
+EXPORT_BAND = {"keras": 0.0, "saved_model": 1e-5, "tflite": 5e-5, "onnx": 3e-5}
+#: The gaps the bands answer for, as a share of the scale: at 252 px a pretrained and a trained vit_s (Step 1(f),
+#: scratch_measure/f_export_*.json), and at 28 px this file's own model (scratch_step10/probe_export.py, the re-measure
+#: D-018 names; the 28 px numbers are this file's setting: the trained tiny run on its 4 test crops).
+MEASURED_GAP = {
+    "saved_model": {"252 pretrained": 2.90e-6, "252 trained": 1.82e-6, "28 tiny": 7.76e-7},
+    "tflite": {"252 pretrained": 1.25e-5, "252 trained": 6.54e-6, "28 tiny": 1.16e-6},
+    "onnx": {"252 pretrained": 7.23e-6, "252 trained": 2.20e-6, "28 tiny": 8.62e-7},
+}
+FORMATS = ("keras", "saved_model", "tflite", "onnx")
+NAMES = {"keras": "m.keras", "saved_model": "m_saved_model", "tflite": "m.tflite", "onnx": "m.onnx"}
+#: Another size: one patch more than the trained 28 px (as 266 px is to 252 px), and 30 px, which gives the same
+#: 2 x 2 patch grid. Asked without the size check, saved_model, tflite and onnx each WRITE a file at both (measured,
+#: D-027): the 42 px file fails when run at 42 and the 30 px file answers a 30 px image with a 28 x 28 map, no error.
+OTHER_SIDES = (42, 30)
 
-@pytest.mark.parametrize("format", ["keras", "saved_model", "tflite", "onnx"])
-def test_every_export_cell_is_refused_until_its_cells_are_measured(format):
+
+@pytest.fixture(scope="module")
+def test_crops(trained, megadepth_tree):
+    """The 4 test crops of the trained run (its seed, its tree, its counts): ImageNet-standardized, 28 px."""
+    from train.common.depth_data import load_depth_batches
+
+    data = load_depth_batches(
+        str(megadepth_tree), seed=read_json(trained / "config.json")["seed"], batch_size=4, image_size=SIZE,
+        steps_per_epoch=1, n_select=TINY["n_select"], n_test=TINY["n_test"], layout_samples=TINY["layout_samples"],
+        workers=0, train_split=TINY["train_split"],
+    )
+    return np.array(data.x_test, np.float32)
+
+
+class Exports:
+    """``python -m train export`` of the trained run, once per format."""
+
+    def __init__(self, run, root):
+        self.run, self.root, self.written = run, Path(root), {}
+
+    def of(self, format):
+        if format == "onnx":
+            pytest.importorskip("tf2onnx")
+            pytest.importorskip("onnxruntime")
+        if format not in self.written:
+            out = self.root / NAMES[format]
+            assert cli.main(["export", f"model={self.run}", f"out={out}", f"format={format}"]) == 0
+            self.written[format] = out
+        return self.written[format]
+
+
+@pytest.fixture(scope="module")
+def exports(trained, tmp_path_factory):
+    return Exports(trained, tmp_path_factory.mktemp("depth_export"))
+
+
+def test_each_band_covers_twice_every_measured_gap_and_is_within_ten_times_the_largest():
+    assert set(MEASURED_GAP) == set(EXPORT_BAND) - {"keras"}
+    for format, gaps in MEASURED_GAP.items():
+        worst = max(gaps.values())
+        assert 2 * worst <= EXPORT_BAND[format] <= 10 * worst, f"{format}: band {EXPORT_BAND[format]:.3g}, gaps {gaps}"
+
+
+@pytest.mark.parametrize("format", FORMATS)
+def test_the_export_rule_takes_the_trained_size_in_every_format_and_refuses_any_other(format):
     rule = predictor.EXPORT_RULES[TASK]
     record = depth_record()
     assert rule.shape_of(record) == (SIZE, SIZE, 3) and rule.served is None
-    with pytest.raises(ConfigError, match=rf"{TASK}.*{format}"):
-        rule.check(record, format, (SIZE, SIZE, 3))
-    note = rule.note(record)
-    assert "relative disparity" in note and "scale and shift" in note and "[28, 28]" in note
+    assert rule.check(record, format, (SIZE, SIZE, 3)) is None
+    for shape in [(42, 42, 3), (30, 30, 3), (SIZE, 42, 3), (SIZE, SIZE, 1), (None, None, 3)]:
+        with pytest.raises(ConfigError, match=rf"'input_shape': .* is not the trained size \({SIZE}, {SIZE}, 3\)"):
+            rule.check(record, format, shape)
+
+
+@pytest.mark.parametrize("format", FORMATS)
+def test_each_format_is_written_at_the_trained_size_and_answers_the_keras_map_within_its_band(
+        format, exports, trained, loaded, test_crops):
+    import tensorflow as tf
+
+    from tests.test_train.test_api.test_segmentation_export import read_back
+
+    path = exports.of(format)
+    assert path.exists()
+    assert read_json(f"{path}.task.json") == read_json(trained / "task.json")
+    with tf.device("/CPU:0"):
+        expected = np.asarray(loaded.model(test_crops, training=False), np.float64)
+    assert expected.shape == (4, SIZE, SIZE, 1)
+    scale = float(np.abs(expected).max())
+    assert expected.std() > 1e-2 * scale, "a near-constant map would match a wrong file"
+    got = np.asarray(read_back(format, path, test_crops), np.float64)
+    assert got.shape == expected.shape
+    gap = float(np.abs(got - expected).max()) / scale
+    print(f"[export gap at {SIZE} px] {format}: {gap:.3g} of the scale {scale:.4g} (band {EXPORT_BAND[format]:.3g})")
+    assert gap <= EXPORT_BAND[format], f"{format}: {gap:.3g} of the scale against the band {EXPORT_BAND[format]:.3g}"
+
+
+def test_the_exported_keras_file_loads_as_a_depth_predictor_and_answers_the_runs_maps(exports, loaded):
+    images = [rgb(33, 47, seed=60), rgb(SIZE, SIZE, seed=61)]
+    exported = load_model(exports.of("keras"))
+    assert type(exported) is dp().DepthPredictor
+    for got, wanted in zip(exported.predict(images)["disparity"], loaded.predict(images)["disparity"]):
+        np.testing.assert_array_equal(got, wanted)
+
+
+@pytest.mark.parametrize("side", OTHER_SIDES)
+@pytest.mark.parametrize("format", ["saved_model", "tflite", "onnx"])
+def test_another_size_is_refused_by_name_before_anything_is_written(format, side, loaded, tmp_path):
+    from train.api.exporting import export
+
+    root = tmp_path / "other"
+    with pytest.raises(ConfigError, match=rf"'input_shape': \({side}, {side}, 3\) is not the trained size "
+                                          rf"\({SIZE}, {SIZE}, 3\)"):
+        export(model=loaded.model, out=root / NAMES[format], format=format, input_shape=(side, side, 3),
+               record=loaded.record)
+    assert not root.exists(), sorted(str(p) for p in root.rglob("*"))
+
+
+def test_a_keras_file_asked_at_another_size_is_the_trained_model_with_its_record(loaded, tmp_path):
+    # A .keras archive is the model itself: export traces nothing for it and does not read input_shape (the rule's check
+    # runs where a function is traced), so no file of another size can come out of it.
+    from train.api.exporting import export
+
+    out = export(model=loaded.model, out=tmp_path / "m.keras", format="keras", input_shape=(42, 42, 3),
+                 record=loaded.record)
+    assert read_json(f"{out}.task.json") == loaded.record
+    assert type(load_model(out)) is dp().DepthPredictor  # the built-size check holds: the file is at 28 px
+
+
+def test_the_note_the_help_and_the_run_notes_say_what_export_does(trained):
+    note = predictor.EXPORT_RULES[TASK].note(depth_record())
+    for phrase in ("relative disparity", "scale and shift", f"[{SIZE}, {SIZE}]", "only", "ImageNet",
+                   f"(batch, {SIZE}, {SIZE}, 1)"):
+        assert phrase in note, phrase
+    help_text = " ".join(" ".join(cli.EXPORT_NOTES).split())
+    for phrase in ("a depth model takes float32 images (batch, height, width, 3)", "input_size in <out>.task.json",
+                   "another size is refused", "ImageNet mean and std", "(batch, height, width, 1) relative disparity",
+                   "scale and shift"):
+        assert phrase in help_text, phrase
+    notes = " ".join(read_json(trained / "results_summary.json")["notes"])
+    assert "`export` writes keras, saved_model, tflite or onnx at that size only" in notes, notes

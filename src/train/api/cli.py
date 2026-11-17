@@ -322,6 +322,14 @@ EXPORT_NOTES = (
     ),
     "The forecaster's .keras file names ServedForecaster, a class of the train package, which the wheel does not ship:",
     "it loads only where the train package is importable (the source tree on the path, or an editable install).",
+    "",
+    "a depth model takes float32 images (batch, height, width, 3) at the input_size in <out>.task.json only: the",
+    "file is written at the size the model trained at, another size is refused (the batch is free). Scale the pixels",
+    "to [0, 1] and standardize them with the ImageNet mean and std, (x - mean) / std, after resizing the picture to",
+    "that size. It returns (batch, height, width, 1) relative disparity: larger is nearer, defined up to scale and",
+    "shift per image, not metric depth; resize the map back to the picture yourself (predict does both resizes).",
+    "Every format is written; measured against Keras on a vit_s at 252 px, the files differ by at most 1.3e-5 of",
+    "the map's largest value (tflite; saved_model and onnx less).",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
