@@ -1283,9 +1283,38 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   never saw, not that it generalizes beyond MegaDepth.
 * **Gate numbers.**
 <!-- depth-gate:begin -->
-  The GPU gate of this task (a `vit_s` run of the recipe, a run killed inside an epoch and resumed, and `predict` and `export` of the
-  first run's directory on the CPU) has not run yet. Its numbers, each derived by script from the runs' own files, replace this
-  paragraph.
+  The gate ran on the code HEAD `4b095dca8b8cadb08d0bd8f7fb20d7161799af8a` of the branch `train-api/phase-4f`; the commits after it
+  change no file under `src/` but this README. One job at a time on GPU 0, an RTX 4090, with `CUDA_VISIBLE_DEVICES=0` and no `--gpu`;
+  each log names the HEAD and the worktree `src` as the origin of `dl_techniques` and `train`, and each GPU log the device. Every number
+  below is read by script from the runs' `results_summary.json`, `training_log.csv` and logs.
+  **G1, the recipe** (`python -m train depth_estimation out=<dir> model=depth_anything/vit_s data.format=builtin seed=42`: `vit_s` at
+  252 px, batch 8, 30 epochs of 100 steps, the official DINOv2-small start, seed 42). The threshold terms on the 128 selection crops are
+  the constant 1.0, the layout 1.0194 and epoch zero 1.5539, so the threshold is 1.0, the constant's. The best selection `val_loss` is
+  0.6022, at epoch 23 of 30: the bar is met, exit 0. The 256 test crops of 9 test scenes, scored once on the best weights: loss 0.5937
+  +- 0.0229, Pearson 0.7817 +- 0.0169; on the same crops the constant scores 1.0 and the layout 1.0687 +- 0.0270 (layout Pearson
+  0.4022); paired model minus layout -0.4750 +- 0.0285 (+- one standard error, n 256). A step took 247 ms: the median epoch after the
+  first divided by its 100 steps, an epoch including the 16-batch selection pass and the callbacks. The first epoch, which builds the
+  graph, took 151.4 s, and the early epochs were slower while the disk cache warmed (61.0 s for the second, 22.6 s for the last). Peak
+  GPU memory 3382.7 MiB as TensorFlow counts it (4506 MiB for the process in `nvidia-smi`, the CUDA context included); wall time 1,264 s
+  (21.1 minutes) from start to exit.
+  **G2, a kill and a resume** (the G1 command with `epochs=6`). SIGKILL of the recorded process at batch 38 of 100 of epoch 3 of 6,
+  after the backup taken at the end of epoch 2; its 8 data worker processes ended with it (0 left). The same command with
+  `resume_interrupted=true` resumed after epoch 2 and trained on stream seed 3735533950 (`derive_stream_seed(42, 200)`) where the killed
+  process had trained on 42; no digest of a train batch of the resumed process occurs in the killed one, so the first batches differ. It
+  finished: `training_log.csv` holds 6 rows, the 2 written before the kill unchanged; the best selection `val_loss` is 0.7102, at epoch
+  6 of 6, under the threshold 1.0, exit 0; test loss 0.6908 +- 0.0221, Pearson 0.7418, model minus layout -0.3779 +- 0.0259 (n 256); 252
+  ms a step, peak GPU memory 3787.7 MiB, the resumed process's wall time 276 s.
+  **GPU numbers are not bit-reproducible.** A run is reproducible in its samples, not in its weights: G1 and G2 have one seed, their
+  baselines are the same floats, and the untrained model's `val_loss` on the same selection crops is 1.55387 in G1 and 1.55389 in G2;
+  after the first epoch it is 0.9489 and 0.9375. A rerun of the recipe gives close numbers, not equal ones.
+  **P, `predict` and `export` of the G1 run directory on the CPU.** `python -m train predict` on 4 images, one from each of 4 test
+  scenes, exited 0 and wrote 4 float32 maps, each at its image's own size and equal to `DepthPredictor.predict` on the same file.
+  `python -m train export` exited 0 in all four formats, and on those images at 252 px each file matched the Keras model within its
+  band, as a share of the map's largest value (6539.3): `keras` 0.0 (exact), `saved_model` 7.5e-7 (band 1e-5), `tflite` 1.9e-6 (band
+  5e-5), `onnx` 1.2e-6 (band 3e-5).
+  Beside the legacy gate quoted above (held-out loss 0.570 to 0.593 and Pearson 0.802 to 0.813 over three seeds, on other crops of its
+  validation scenes, layout 1.045 there), G1's test loss is 0.5937 and its Pearson 0.7817, on scenes that neither trained nor selected,
+  with one seed (layout 1.0687 here); the crops differ, so the two are not a paired comparison and no parity is claimed.
 <!-- depth-gate:end -->
 
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
