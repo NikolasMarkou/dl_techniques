@@ -1456,6 +1456,11 @@ class TestTheFlatDecisionHasNoSquaresGuard:
         x, _ = standardize_tf(tf.constant(np.concatenate([context, np.zeros((3, 2, 1))], axis=1)), LOOKBACK, floor)
         assert np.abs(x.numpy()).max() < 1e-35, "a flat window stays in its own tiny unit"
 
+    def test_the_keras_ops_function_takes_an_empty_batch_in_eager_mode(self):
+        """Review pass 6 N2: ``ops.max`` of an empty batch asserts in eager mode (a ``.keras`` file called as ``model(x)`` on zero windows)."""
+        anchor, offset, scale = fd.context_stats_ops(tf.zeros((0, LOOKBACK, 2)), 1e-6)
+        assert tuple(anchor.shape) == tuple(offset.shape) == tuple(scale.shape) == (0, 1, 2)
+
     @pytest.mark.parametrize("dtype", [np.float32, np.float64])
     def test_an_all_zero_context_is_flat_and_finite_in_the_keras_ops_function(self, dtype):
         """D-040 (the all-zero context): ``span`` is exactly 0, ``0 / 0`` must not reach the std (NaN <= x is False and the scale would be NaN)."""

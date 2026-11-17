@@ -894,6 +894,14 @@ def test_every_working_cell_equals_the_predictor_on_raw_windows(case, fmt, world
         assert share_of_std(quantiles, want["quantiles"], windows) <= TOLERANCE[fmt]
 
 
+@pytest.mark.parametrize("case, fmt", cell_params([("nbeats", fmt) for fmt in FORMATS]))
+def test_every_file_takes_an_empty_batch_and_gives_an_empty_forecast(case, fmt, world, tmp_path_factory):
+    """Review pass 6 N2: the keras-ops standardization took ``ops.max`` of an empty batch, which Keras's TensorFlow backend asserts is non-empty in
+    eager mode, so a ``.keras`` file called as ``model(x)`` on zero windows raised where the three other files gave ``(0, horizon, channels)``."""
+    point, _, _ = run_file(export_cell(case, fmt, tmp_path_factory), fmt, np.zeros((0, LOOKBACK, 1)))
+    assert point.shape == (0, HORIZON, 1), (case, fmt, point.shape)
+
+
 @pytest.mark.parametrize("case, fmt", cell_params(WORKING))
 def test_every_working_cell_takes_raw_windows_so_a_scaled_and_shifted_window_gives_a_scaled_and_shifted_forecast(case, fmt, world, tmp_path_factory):
     path = export_cell(case, fmt, tmp_path_factory)

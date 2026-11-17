@@ -171,7 +171,7 @@ def context_stats_ops(context: Any, scale_floor: float) -> Tuple[Any, Any, Any]:
     anchor = context[..., :1, :]
     shifted = context - anchor
     offset = ops.mean(shifted, axis=-2, keepdims=True)
-    span = ops.max(ops.abs(shifted), axis=-2, keepdims=True)
+    span = ops.max(ops.abs(shifted), axis=-2, keepdims=True, initial=0.0)   # `initial`: Keras's TF backend asserts on the max of an EMPTY batch (D-050)
     unit = shifted / ops.maximum(span, FLOAT32_TINY)
     std = span * ops.sqrt(ops.mean(ops.square(unit - ops.mean(unit, axis=-2, keepdims=True)), axis=-2, keepdims=True))
     flat = std <= ops.maximum(scale_floor * ops.mean(ops.abs(context), axis=-2, keepdims=True), FLOAT32_TINY)
