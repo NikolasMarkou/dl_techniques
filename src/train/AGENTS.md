@@ -680,7 +680,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   `check_data_unchanged` were made against the original. `TaskTrainer.resume_order` (a class variable, default `None`) is the clause
   that says what a resume does to the data order, for the summary's resume note and, through `config.resume_help(order=)`, the help of
   `resume_interrupted`: the default text is the older tasks' ("replays epoch 0's"), a task whose `resume_stream` trains on another
-  stream sets it (`pretrain`, `time_series_forecasting` and `depth_estimation` do). Both hooks have three users today, `pretrain`,
+  stream sets it (`pretrain`, `time_series_forecasting` and `depth_estimation` do). `resume_help(backup=)` is the
+  help's clause on `checkpoint_args.backup_every_steps`: the default (`config.BACKUP_HELP`) says the key bounds the lost
+  work, and `depth_estimation`, which refuses the key, passes a clause saying so. Both hooks have three users today, `pretrain`,
   `time_series_forecasting` and `depth_estimation`; the language tasks are the next.
 - **A sixth seam, for a per-variable learning rate** (plan 9c7b9096; a no-op by default, proven in
   `test_the_sequence_seams_default_to_nothing.py`, with the goldens EXACT after the shared edit).

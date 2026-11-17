@@ -150,7 +150,12 @@ class DepthEstimationConfig(StrictConfig):
     )
     resume_interrupted: bool = dataclasses.field(
         default=False,
-        metadata={"help": resume_help("an epoch of 100 batches takes about half a minute on a GPU", order=_RESUME_ORDER)},
+        metadata={"help": resume_help(
+            "an epoch of 100 batches takes about half a minute on a GPU", order=_RESUME_ORDER,
+            backup="this task refuses checkpoint_args.backup_every_steps, so a resume restarts the killed epoch from "
+                   "the backup taken at the last epoch end; a backup inside an epoch would make Keras fail the next "
+                   "epoch of this task's train stream",
+        )},
     )
     checkpoint: Optional[str] = dataclasses.field(default=None, metadata={"help": RUN_HELP["checkpoint"]})
     model_args: Dict[str, Any] = dataclasses.field(

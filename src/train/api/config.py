@@ -125,21 +125,29 @@ RUN_HELP: Dict[str, str] = {
 }
 
 
-def resume_help(epoch_cost: str, order: str = "the data order replays epoch 0's") -> str:
+#: The default ``backup`` clause of :func:`resume_help`: what ``checkpoint_args.backup_every_steps`` does to a resume.
+BACKUP_HELP = (
+    "checkpoint_args.backup_every_steps bounds the loss to that many batches "
+    "of training, and the epoch is then continued from the last backup: only the "
+    "batches that backup had not taken run, from a fresh pass of the data, so some "
+    "examples of that epoch repeat and some are missed"
+)
+
+
+def resume_help(epoch_cost: str, order: str = "the data order replays epoch 0's", backup: str = BACKUP_HELP) -> str:
     """Return the help of ``resume_interrupted``; ``epoch_cost`` is the parenthesis' first clause.
 
     :param epoch_cost: what an epoch costs on the task's data, e.g. ``"an ImageNet epoch is hours"``.
     :param order: what the training data order does on a resume; the default is the shipped tasks' (their loader
         replays epoch 0's order), a task whose resume trains on another stream says so here.
+    :param backup: the parenthesis' second clause, what ``checkpoint_args.backup_every_steps`` does to a resume; the
+        default is the tasks' that take the key, a task that refuses it says so here.
     """
     return (
         "continue a killed run of the same out with the same request (devices "
         f"may differ); {order}; a killed epoch is lost and a "
         f"half-done epoch is trained again from its first batch ({epoch_cost}; "
-        "checkpoint_args.backup_every_steps bounds the loss to that many batches "
-        "of training, and the epoch is then continued from the last backup: only the "
-        "batches that backup had not taken run, from a fresh pass of the data, so some "
-        "examples of that epoch repeat and some are missed); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
+        f"{backup}); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
         "between the best checkpoint's save and the backup can leave best_model.keras one "
         "epoch LATER than the resumed state's best (the epoch that is then trained again; "
         "never an earlier one); a run with no epoch left to train and no results_summary.json "

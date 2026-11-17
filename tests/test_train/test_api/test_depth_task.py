@@ -1074,6 +1074,18 @@ def test_a_backup_inside_an_epoch_is_refused_by_the_function_before_the_claim(wo
     assert not (tmp_path / "run").exists(), "a refusal claims no run directory"
 
 
+def test_the_resume_help_names_the_refusal_of_the_backup_inside_an_epoch_and_does_not_recommend_it():
+    """The shared ``resume_interrupted`` help says ``checkpoint_args.backup_every_steps`` bounds the lost work and
+    continues the epoch from that backup; this task refuses the key, so its help says so instead."""
+    fields = {f.name: f for f in dataclasses.fields(task_module().DepthEstimationConfig)}
+    text = fields["resume_interrupted"].metadata["help"]
+    assert "backup_every_steps bounds the loss" not in text, text
+    assert "continued from the last backup" not in text, text
+    assert "this task refuses checkpoint_args.backup_every_steps" in text, text
+    assert "the backup taken at the last epoch end" in text, text
+    assert "a killed epoch is lost" in text and "trained again from its first batch" in text, text
+
+
 # -- why a backup inside an epoch is refused: Keras 3.8 cannot cut an epoch of a PyDataset ------------------------
 
 
