@@ -23,7 +23,7 @@ refusals that need a stream (a mismatched ``steps_per_epoch``, an infinite ``tra
 the ``resume_stream`` call, among them that a fresh run never asks for a new stream, that a ``None`` answer
 leaves the data and that the default hook answers ``None``, are in ``test_the_stream_contract.py``.
 
-Plan 9c7b9096 step 2 (D-003) adds ``TaskTrainer.optimizer_options(config, model)`` (default ``{}``), called
+Plan 9c7b9096 (D-003) adds ``TaskTrainer.optimizer_options(config, model)`` (default ``{}``), called
 once with the built model and handed to ``build_optimizer_and_schedule(..., options=)``, which merges a
 closed key set (``lr_multipliers`` only) into the builder's config. The default arm spies on
 ``optimizer_builder`` and compares the config it receives with literals read at the commit before the
@@ -664,7 +664,7 @@ def test_a_resume_inside_the_window_keeps_the_best_epoch_and_its_file(killed_ins
 
 
 # ---------------------------------------------------------------------
-# The optimizer seam (plan 9c7b9096 step 2, D-003)
+# The optimizer seam (plan 9c7b9096, D-003)
 # ---------------------------------------------------------------------
 
 #: What ``optimizer_builder`` received at f6f15bedf, the commit before the seam, in key order: the
@@ -716,7 +716,7 @@ def test_no_existing_task_overrides_the_optimizer_options(task_class):
 
 
 def test_the_depth_task_is_the_one_task_that_overrides_the_optimizer_options():
-    """Plan 9c7b9096 step 6 (D-003): the seam's one user is the depth task (the DPT head at 10x). Read over every
+    """Plan 9c7b9096 (D-003): the seam's one user is the depth task (the DPT head at 10x). Read over every
     built-in task, so a seventh task that overrides it is a new row to review, not a silent second user."""
     from train.api.tasks import BUILTIN_TASKS
     from train.api.tasks.depth_estimation import DepthEstimationTrainer

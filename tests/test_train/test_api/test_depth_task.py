@@ -43,17 +43,6 @@ SIZE = 28
 WEIGHTS_ENV = "DL_TECHNIQUES_DINOV2_WEIGHTS_DIR"
 
 
-def write_scene_tree(root: Path, scenes: int, pairs: int = 2) -> Path:
-    """A MegaDepth-shaped listing with empty files: discovery matches names, it reads no pixel."""
-    for s in range(scenes):
-        for kind, suffix in (("imgs", ".png"), ("depths", ".h5")):
-            folder = root / f"s{s:02d}" / "dense0" / kind
-            folder.mkdir(parents=True, exist_ok=True)
-            for p in range(pairs):
-                (folder / f"p{p}{suffix}").touch()
-    return root
-
-
 def context(model_args=None, variant="vit_s"):
     spec = depth_models.builtin_depth_models()[0]
     return AutoContext(
@@ -139,13 +128,17 @@ def test_the_facts_refuse_a_missing_root(tmp_path):
 
 
 def test_the_facts_refuse_a_tree_that_deals_fewer_than_three_validation_scenes(tmp_path):
-    root = write_scene_tree(tmp_path / "small", scenes=4)
+    from tests.test_train.test_common_depth_data import write_megadepth_tree
+
+    root = write_megadepth_tree(tmp_path / "small", scenes=4)
     with pytest.raises(ConfigError, match=r"'data\.(root|train_split)'.*2 validation scenes.*at least 3"):
         depth_facts(DepthData(root=str(root), train_split=0.5))
 
 
 def test_the_facts_of_a_tree_that_deals_three_validation_scenes(tmp_path):
-    root = write_scene_tree(tmp_path / "ok", scenes=6)
+    from tests.test_train.test_common_depth_data import write_megadepth_tree
+
+    root = write_megadepth_tree(tmp_path / "ok", scenes=6)
     facts = depth_facts(DepthData(root=str(root), train_split=0.5))
     assert (facts.dataset, facts.num_classes, facts.image_size) == ("megadepth", None, None)
 
@@ -522,7 +515,7 @@ def write_sidecar(run_dir: Path, loss: float) -> Path:
 
 
 @pytest.mark.parametrize("constant, layout, epoch_zero, expected", [
-    (1.0, 1.02, 1.55, 1.0),     # Step 1 measured: the constant binds
+    (1.0, 1.02, 1.55, 1.0),     # measured: the constant binds
     (1.0, 0.93, 1.55, 0.93),    # the layout binds
     (1.0, 1.02, 0.81, 0.81),    # the untrained model binds
 ])

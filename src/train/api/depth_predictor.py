@@ -56,7 +56,7 @@ Interface contract
 
 Import rule
 -----------
-Module scope imports the standard library and ``train.api`` only (D-012 of plan 2faf890a); ``tensorflow``, ``numpy``,
+Module scope imports the standard library and ``train.api`` only; ``tensorflow``, ``numpy``,
 ``PIL`` and ``train.common`` are imported inside functions.
 """
 

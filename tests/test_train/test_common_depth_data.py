@@ -499,7 +499,7 @@ def test_a_list_where_three_files_in_five_give_no_crop_still_yields_every_sample
     assert max(tries) > 8, f"no sample needed more than 8 tries ({max(tries)}): the test has no power"
 
 
-#: The most files per train sample measured on the MegaDepth train list at 252 px (Step 1(c) of the plan).
+#: The most files per train sample measured on the MegaDepth train list at 252 px.
 MEASURED_FILES_PER_SAMPLE = 1.272
 
 

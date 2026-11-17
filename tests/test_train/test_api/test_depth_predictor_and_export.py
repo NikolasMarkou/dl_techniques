@@ -1,15 +1,15 @@
 """The ``depth_estimation`` record, ``DepthPredictor``, its rows in the predictor tables and ``predict``.
 
-First part (Step 9 of plan-2026-11-17T110935-9c7b9096): a depth run writes the fifth record kind (``input_size``,
-``channels``, ``normalize`` ``"imagenet"``, ``output`` ``"relative_disparity"``) and has a row in every table of
-``predictor.TASK_TABLES`` and in ``cli.DATA_LISTERS`` and ``cli.PREDICT_WRITERS``; ``load_model`` of a trained tiny run
+First part: a depth run writes the fifth record kind (``input_size``, ``channels``, ``normalize`` ``"imagenet"``,
+``output`` ``"relative_disparity"``) and has a row in every table of ``predictor.TASK_TABLES`` and in
+``cli.DATA_LISTERS`` and ``cli.PREDICT_WRITERS``; ``load_model`` of a trained tiny run
 returns a ``DepthPredictor``; an image of another size, a grey and an RGBA image give a ``(H, W)`` float32 disparity at
 the image's own size; the model is fed what training feeds it (a numpy oracle of the ImageNet standardization, and the
 loader's own crop of a file at the trained size); a moved ``.keras``, a record of another family or variant and a
 record whose size is not the model's are named ``ConfigError``s; ``python -m train predict`` writes one ``.npy`` per
 image and ``index.json`` last, and refuses an existing ``out``.
 
-Second part (Step 10): ``python -m train export`` of the run writes each of the four formats at the trained size with
+Second part: ``python -m train export`` of the run writes each of the four formats at the trained size with
 the run's record beside it, and each file, read by its own runtime, answers the Keras model's map on the run's 4 test
 crops within half its D-018 band relative to the map's scale (keras exactly); a request at another size (42 px, one
 patch more, as 266 px is to 252 px; and 30 px, the same patch grid) is refused by name before anything is written in
@@ -413,7 +413,7 @@ def test_a_run_that_fails_half_way_leaves_its_arrays_and_no_index(loaded, tmp_pa
 
 
 # ---------------------------------------------------------------------
-# Export at the trained size (second part, Step 10)
+# Export at the trained size (second part)
 # ---------------------------------------------------------------------
 
 #: D-018: the largest difference between an exported file, read by its own runtime, and the Keras model on the CPU, as a
@@ -494,7 +494,6 @@ def test_each_format_is_written_at_the_trained_size_and_answers_the_keras_map_wi
     got = np.asarray(read_back(format, path, test_crops), np.float64)
     assert got.shape == expected.shape
     gap = float(np.abs(got - expected).max()) / scale
-    print(f"[export gap at {SIZE} px] {format}: {gap:.3g} of the scale {scale:.4g} (band {EXPORT_BAND[format]:.3g})")
     assert 2 * gap <= EXPORT_BAND[format], (
         f"{format}: {gap:.3g} of the scale is above half the band {EXPORT_BAND[format]:.3g}")
 

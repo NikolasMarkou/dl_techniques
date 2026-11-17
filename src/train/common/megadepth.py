@@ -105,8 +105,18 @@ def _take_across_scenes(
 
     Every scene gets the same quota, a scene smaller than the quota gives up
     the rest to the others (a water-fill), and a scene's share is taken evenly
-    spaced through its sorted pairs. ``None`` takes every pair. The result
-    stays grouped by scene, in scene order.
+    spaced through its sorted pairs. The result stays grouped by scene, in
+    scene order.
+
+    Contract (shared: this module and :mod:`train.common.depth_data` call it):
+
+    * ``scenes``: ``(name, rgb_paths, depth_paths)`` per scene, the two lists
+      paired by index, as :func:`discover_megadepth_scenes` returns them.
+    * ``max_files``: a positive int caps the pairs taken; a falsy value
+      (``None`` or ``0``) takes every pair of every scene, and a cap at or
+      above the total also takes every pair.
+    * Returns ``(rgb_paths, depth_paths)``, two lists of equal length, still
+      paired by index. An empty ``scenes`` gives ``([], [])``. Raises nothing.
     """
     if not max_files:
         quota = {name: len(rgb) for name, rgb, _ in scenes}

@@ -260,7 +260,7 @@ class DepthOptimArgs(OptimArgs):
 
     # DECISION plan-2026-11-17T110935-9c7b9096/D-022
     # From random weights an "auto" lr is the legacy from-scratch 2e-4, not the recipe's 5e-6: 5e-6 is the paper's rate for
-    # a PRETRAINED encoder and trains a random one measurably slower (legacy D-115). The rule reads model_args.pretrained,
+    # a PRETRAINED encoder and trains a random one measurably slower (D-115 of plan 81938e81). The rule reads model_args.pretrained,
     # the request's over the recipe's, through pretrained_start, the same rule the head table and the weights check
     # follow. Do NOT put it in OptimArgs.resolve_auto (the other tasks' recipes name their own rates) and do NOT refuse an
     # auto lr from scratch instead (a from-scratch control is a supported run whose bar miss is reported).

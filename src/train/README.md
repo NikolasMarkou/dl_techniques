@@ -1284,9 +1284,10 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
 * **Gate numbers.**
 <!-- depth-gate:begin -->
   The gate ran on the code HEAD `4b095dca8b8cadb08d0bd8f7fb20d7161799af8a` of the branch `train-api/phase-4f`; the commits after it
-  change no file under `src/` but this README. One job at a time on GPU 0, an RTX 4090, with `CUDA_VISIBLE_DEVICES=0` and no `--gpu`;
-  each log names the HEAD and the worktree `src` as the origin of `dl_techniques` and `train`, and each GPU log the device. Every number
-  below is read by script from the runs' `results_summary.json`, `training_log.csv` and logs.
+  change only this README, comments and docstrings under `src/` (each changed `.py` file parses to the gate HEAD's syntax tree
+  once docstrings are dropped, so its code is the gate's), tests, and a roadmap note under `research/`. One job at a time on GPU 0,
+  an RTX 4090, with `CUDA_VISIBLE_DEVICES=0` and no `--gpu`; each log names the HEAD and the worktree `src` as the origin of
+  `dl_techniques` and `train`, and each GPU log the device. Every number below is read by script from the runs' `results_summary.json`, `training_log.csv` and logs.
   **G1, the recipe** (`python -m train depth_estimation out=<dir> model=depth_anything/vit_s data.format=builtin seed=42`: `vit_s` at
   252 px, batch 8, 30 epochs of 100 steps, the official DINOv2-small start, seed 42). The threshold terms on the 128 selection crops are
   the constant 1.0, the layout 1.0194 and epoch zero 1.5539, so the threshold is 1.0, the constant's. The best selection `val_loss` is

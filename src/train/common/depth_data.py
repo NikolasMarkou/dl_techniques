@@ -59,7 +59,7 @@ from train.common.pretrain_data import derive_stream_seed
 # ---------------------------------------------------------------------
 
 #: Salts of the four keyed draws. Ints: a numpy ``SeedSequence`` takes int entropy only, so the string salts of
-#: ``pretrain_data`` cannot key a ``default_rng``. These are the values the Step 1 measurements used.
+#: ``pretrain_data`` cannot key a ``default_rng``.
 TRAIN_SALT, SELECT_SALT, TEST_SALT, LAYOUT_SALT = 1, 2, 3, 4
 #: A fixed set of ``n`` crops is drawn from ``POOL_FACTOR * n`` files of its group (D-014).
 POOL_FACTOR = 4

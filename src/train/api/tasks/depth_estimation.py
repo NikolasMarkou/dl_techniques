@@ -389,7 +389,7 @@ class DepthEstimationTrainer(TaskTrainer):
         # DECISION plan-2026-11-17T110935-9c7b9096/D-006
         # The MINIMUM of the three terms, all on the selection crops: a constant output scores the first, an average-layout
         # output the second (the from-scratch model's measured end point), and the untrained model the third. Do NOT drop
-        # a term because it "never binds" (Step 1 measured the constant binding, a smaller tree can make the layout bind).
+        # a term because it "never binds" (the constant was measured binding, a smaller tree can make the layout bind).
         return float(min(self._baselines["constant"], self._baselines["layout"], self._epoch_zero))
 
     def bar_is_met(self, config: DepthEstimationConfig, reached: float, threshold: float) -> bool:
@@ -462,7 +462,7 @@ class DepthEstimationTrainer(TaskTrainer):
     # -- the figures ----------------------------------------------------
 
     def figure_callbacks(self, config: DepthEstimationConfig, data: Any, vis_dir: Path) -> List[Any]:
-        """Return the prediction grid of the first fixed selection crops (rgb, target, aligned prediction)."""
+        """Return the prediction grid of selection crops spread evenly over the set (rgb, target, aligned prediction)."""
         from train.common import depth_run
 
         return [depth_run.prediction_grid(data, vis_dir)]

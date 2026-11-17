@@ -46,8 +46,8 @@ Interface contract
 
 Recipe
 ------
-Every variant trains the legacy trainer's pretrained recipe at 252 px, batch 8 (Step 1 measured vit_b at 9.5 GiB and
-vit_l at 16.7 GiB, both at batch 8): AdamW at 5e-6 for the encoder (the head at 10x through the task's
+Every variant trains the legacy trainer's pretrained recipe at 252 px, batch 8 (measured: vit_b 9.5 GiB and
+vit_l 16.7 GiB, both at batch 8): AdamW at 5e-6 for the encoder (the head at 10x through the task's
 ``optimizer_options``), weight decay 1e-5, a GLOBAL clip of 1.0, one warmup epoch, cosine over the whole run to 1
 percent, 30 epochs of 100 steps (D-019: comparable with the legacy 3,000 steps), no early stop inside the default run.
 
