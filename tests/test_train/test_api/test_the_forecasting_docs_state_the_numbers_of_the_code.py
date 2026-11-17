@@ -189,7 +189,8 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     # D-049 (review pass 5): ONE decision for the flag, the count, the scale, the training function and the file, and the measured band it leaves
     assert "read ONE decision (D-049)" in text and "counts exactly the windows that were scored in the series' own unit" in text
     assert "3 counted against 0 scored on a csv with 5 windows 0.1 percent above the threshold" in text, "review pass 5 W2"
-    assert "disagree on at most 1 window of 4,000 at any of twelve distances from 1e-7 to 3e-5 of the threshold" in text, "the measured band (r4_rel_fine.log)"
+    assert "disagree only within about 1e-5 of the threshold, as a relative distance of the window's std measured on the float32 values" in text, "the measured band (t3_band_distance.log)"
+    assert "the largest distance of a disagreement in any cell was 1.0e-5, at 3 channels and lookback 1,024" in text and "1 window of 4,000" not in text, "review pass 6 N3"
     assert "`standardize_tf` agrees with it on 3,600 of 3,600 windows at three levels" in text
     assert "within 4e-6 of a window std of `predict` at window spreads from 1e-19 to 1e-30" in text and "0.09 to 0.23 window std from `predict` on float64 windows" in text
     assert "7e15 window stds apart" in text and "forecast about 2.6e8 times its own level" in text

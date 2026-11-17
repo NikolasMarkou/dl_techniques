@@ -481,7 +481,7 @@ def export_note(record: Mapping[str, Any]) -> str:
         f"{record['channels']}) in the same units{heads}{one}; a window whose std is not above max(1.18e-38, {record['scale_floor']:g} * mean|x|) is "
         "flat: it has no scale, so it is forecast in the series' raw units (the model's output at about zero input added to the last level, which "
         "means little where the series' unit is far from 1); the file and predict decide on the float32 value of the window, in which a denormal (a value "
-        "below float32's smallest normal number 1.18e-38) reads 0, and agree on it except within 3e-5 of the threshold (at most 1 window in 4,000 measured) "
+        "below float32's smallest normal number 1.18e-38) reads 0, and agree on it except within about 1e-5 of the threshold (a relative distance, measured on the float32 values of the window) "
         "and, in the onnx file, which keeps a denormal, for a window whose spread is within 1.3 times 1.18e-38; the keras, saved_model and tflite files also "
         "flush the cells below 1.18e-38 that predict keeps, so they forecast such a window differently; the .keras file names ServedForecaster, a class of the train package, "
 "which the wheel does not ship, so it loads only where the train package is importable (the source tree on the path, or "

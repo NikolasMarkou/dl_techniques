@@ -70,7 +70,8 @@ Interface contract
     (``(n, 2)`` ``(series, start)`` into ``bank`` ``(series, rows, channels)``); ``segment_windows`` is every window of every series whose targets
     are ``stride`` apart inside a ``segment``. The tf and keras-ops twins in ``train.common.forecast_data`` write the same comparison with
     ``FLOAT32_TINY``, a test holds them equal at the threshold and one float32 ulp either side, and the float32 export and ``flat_contexts`` (same
-    values, float32 against float64 arithmetic) disagree on at most 1 window of 4,000 within 3e-5 of the threshold (none beyond 1e-4). A float32 value
+    values, float32 against float64 arithmetic) disagree only within about 1e-5 of the threshold, a relative distance of the std measured on the float32 values
+    (1 and 3 channels, lookbacks up to 1,024; D-050: not stated as a rate, which depends on the channels and on how many windows sit at the threshold). A float32 value
     below ``FLOAT32_TINY`` (a denormal) reads 0 in ``served_values``, as TensorFlow's cast gives it and its arithmetic reads it (D-050): training, scoring,
     the count, the flag and ``predict``'s scale decide on that, and so do the keras, saved_model and tflite files; onnxruntime keeps a denormal and decides
     differently within 1.3 times ``FLOAT32_TINY`` of it (measured, D-050).

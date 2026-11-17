@@ -1350,26 +1350,28 @@ def test_the_requirement_of_the_keras_file_is_stated_in_the_note_the_help_and_th
 
 def test_the_note_the_help_and_the_readme_say_what_is_flat_and_where_the_file_and_predict_can_differ(one):
     """D-047, D-048, D-049 (review pass 5 W1, NOTE 8): a window with std not above max(1.18e-38, floor * mean|x|) is flat in file and
-    ``predict`` and has no scale; both decide on the float32 value of the window and agree except within 3e-5 of the threshold (at most 1
-    window in 4,000, ``scratch_review6/r4_rel_fine.log``) and, at float32's smallest normal number, in the onnx file (D-050: a denormal reads 0 in the
+    ``predict`` and has no scale; both decide on the float32 value of the window and agree except within about 1e-5 of the threshold (a relative distance
+    measured on the float32 values, 1 and 3 channels, ``scratch_review6b/t3_band_distance.log``; review pass 6 N3 replaced the rate "1 window in 4,000") and, at float32's smallest normal number, in the onnx file (D-050: a denormal reads 0 in the
     decision of training, scoring, the count, the flag, ``predict`` and the three TensorFlow-based files, and onnxruntime keeps it). The claim of
     "two float32 steps" was measured false near the old absolute guard (7e15 window stds apart) and is not repeated anywhere."""
     from train.api import forecast_predictor
     from train.api.forecast_series import FLOAT32_TINY
 
     assert FLOAT32_TINY == 1.1754943508222875e-38, "vacuity guard: the number the documents print"
-    words = ("max(1.18e-38,", "flat", "float32 value of the window", "3e-5 of the threshold", "at most 1 window in 4,000", "no scale",
+    words = ("max(1.18e-38,", "flat", "float32 value of the window", "within about 1e-5 of the threshold (a relative distance, measured on the float32 values", "no scale",
              "a denormal (a value below float32's smallest normal number 1.18e-38) reads 0", "in the onnx file, which keeps a denormal",
              "within 1.3 times 1.18e-38", "flush the cells below 1.18e-38 that predict keeps", "means little where the series' unit is far from 1")
     note = forecast_predictor.export_note(one.record)
     assert all(word in note for word in words), note
     help_text = " ".join(" ".join(cli.EXPORT_NOTES).split())
-    assert all(word in help_text for word in ("max(1.18e-38,", "float32 value of the window", "3e-5 of the threshold", "at most 1 window in 4,000", "no scale",
+    assert all(word in help_text for word in ("max(1.18e-38,", "float32 value of the window", "within about 1e-5 of the threshold (a relative distance, measured on the float32 values", "no scale",
                                               "which means little where the series' unit is far from 1", "a denormal (a value below float32's smallest normal number 1.18e-38) reads 0",
                                               "in the onnx file, which keeps a denormal", "within 1.3 times 1.18e-38", "flush the cells below 1.18e-38 that predict keeps")), help_text
     readme = " ".join((SRC / "train" / "README.md").read_text().split())
     assert "`max(1.18e-38, scale_floor * mean|x|)` is flat in the file and in `predict` alike" in readme
-    assert "disagree on at most 1 window of 4,000 within 3e-5 of the threshold, except that the onnx file, which keeps a denormal, decides differently for a window whose spread is within 1.3 times 1.18e-38" in readme
+    assert "disagree only within about 1e-5 of the threshold (a relative distance of the std, measured on the float32 values), except that the onnx file, which keeps a denormal, decides differently for a window whose spread is within 1.3 times 1.18e-38" in readme
+    for text in (note, help_text, readme):
+        assert "1 window in 4,000" not in text and "1 window of 4,000" not in text, "review pass 6 N3: a rate that holds for one channel only; the band is a distance"
     for text in (note, help_text, readme):
         assert "two float32 steps" not in text and "max(1e-18" not in text, "the claim and the guard of the squares design"
     assert "1e-18" not in note and "1e-18" not in help_text
