@@ -31,8 +31,10 @@ Interface contract
         an option the chosen optimizer does not take, a constant schedule with
         a warmup, a ``post_warmup`` decay with no steps left after warmup, an
         ``options`` key outside :data:`OPTION_KEYS` or an ``options`` that is not
-        a mapping, or a non-empty ``lr_multipliers`` with an optimizer other
-        than adamw.
+        a mapping, a non-empty ``lr_multipliers`` with an optimizer other
+        than adamw, or a table entry ``LRMultiplierAdamW`` would refuse (a key
+        that is not a non-empty variable path, a multiplier that is not a
+        finite number ``> 0``), naming the entry's key and value.
 
 Where each field goes
 ---------------------
@@ -203,11 +205,22 @@ def _option_problems(options: Any, optimizer: str) -> List[str]:
             "Invalid optimizer option 'lr_multipliers': expected a mapping of variable path "
             f"to learning-rate multiplier, got {table!r}"
         )
-    elif table and optimizer != "adamw":
-        lines.append(
-            "Invalid optimizer option 'lr_multipliers': only the adamw optimizer takes a "
-            f"per-variable rate table, got 'optim_args.optimizer'={optimizer!r}"
-        )
+    elif table:
+        from dl_techniques.optimization.lr_multiplier_adamw import lr_multiplier_problem
+
+        # The optimizer's own rule, asked here so a bad entry is a ConfigError naming
+        # it, not the optimizer's ValueError from inside the builder.
+        for key, value in table.items():
+            problem = lr_multiplier_problem(key, value)
+            if problem is not None:
+                lines.append(
+                    f"Invalid optimizer option 'lr_multipliers' entry {key!r}: {value!r}: {problem}"
+                )
+        if optimizer != "adamw":
+            lines.append(
+                "Invalid optimizer option 'lr_multipliers': only the adamw optimizer takes a "
+                f"per-variable rate table, got 'optim_args.optimizer'={optimizer!r}"
+            )
     return lines
 
 

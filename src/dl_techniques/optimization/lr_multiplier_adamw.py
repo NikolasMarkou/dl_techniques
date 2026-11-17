@@ -44,6 +44,27 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
+def lr_multiplier_problem(key: Any, value: Any) -> Optional[str]:
+    """Say what is wrong with one entry of a multiplier table, or ``None`` when it is good.
+
+    The one rule for a table entry: :class:`LRMultiplierAdamW` raises its
+    ``ValueError`` with this sentence, and ``train.api.optim`` refuses a task's
+    table with it before the optimizer is built.
+
+    Interface contract: ``key`` must be a ``str`` that is more than slashes, and
+    ``value`` a real number (not a ``bool``) that is finite and ``> 0``. Returns
+    one sentence naming the key (and the value, for a bad value), or ``None``.
+    Never raises.
+    """
+    if not isinstance(key, str) or not key.strip("/"):
+        return f"lr_multipliers keys must be non-empty variable paths, got {key!r}"
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return f"lr_multipliers[{key!r}] must be a number, got {value!r}"
+    if not math.isfinite(value) or value <= 0:
+        return f"lr_multipliers[{key!r}] must be finite and > 0, got {value!r}"
+    return None
+
+
 @register_dl_technique("dl_techniques.optimization.lr_multiplier_adamw")
 class LRMultiplierAdamW(keras.optimizers.AdamW):
     """AdamW whose learning rate is scaled per variable by a path-keyed table.
@@ -76,15 +97,9 @@ class LRMultiplierAdamW(keras.optimizers.AdamW):
         super().__init__(**kwargs)
         table: Dict[str, float] = {}
         for key, value in dict(lr_multipliers or {}).items():
-            if not isinstance(key, str) or not key.strip("/"):
-                raise ValueError(
-                    f"lr_multipliers keys must be non-empty variable paths, got {key!r}")
-            if isinstance(value, bool) or not isinstance(value, numbers.Real):
-                raise ValueError(
-                    f"lr_multipliers[{key!r}] must be a number, got {value!r}")
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(
-                    f"lr_multipliers[{key!r}] must be finite and > 0, got {value!r}")
+            problem = lr_multiplier_problem(key, value)
+            if problem is not None:
+                raise ValueError(problem)
             table[key.rstrip("/")] = float(value)
         self.lr_multipliers = table
         self._variable_multipliers: List[float] = []

@@ -44,6 +44,7 @@ import copy
 import dataclasses
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -788,6 +789,47 @@ def test_an_option_outside_the_closed_set_is_refused_by_name(options, named):
         with pytest.raises(ConfigError, match=named):
             build_optimizer_and_schedule(args, 351, 10, options=options)
     assert seen == [], "refused before the builder is called"
+
+
+#: Table entries ``LRMultiplierAdamW`` refuses; each must be a ``ConfigError`` naming the entry's key and
+#: value, raised before the builder is called, not the optimizer's own ``ValueError``.
+BAD_ENTRIES = {
+    "a key that is not a string": (3, 2.0),
+    "an empty key": ("", 2.0),
+    "a key that is only a slash": ("/", 2.0),
+    "a value that is a string": ("m/dec", "10"),
+    "a value that is a bool": ("m/dec", True),
+    "a value that is None": ("m/dec", None),
+    "a zero multiplier": ("m/dec", 0.0),
+    "a negative multiplier": ("m/dec", -1.0),
+    "an infinite multiplier": ("m/dec", float("inf")),
+    "a nan multiplier": ("m/dec", float("nan")),
+}
+
+
+@pytest.mark.parametrize("entry", list(BAD_ENTRIES))
+def test_a_bad_rate_table_entry_is_refused_naming_its_key_and_value(entry):
+    key, value = BAD_ENTRIES[entry]
+    args, _ = optim_arm("adamw_global_clip")
+    with spying_on_the_optimizer_builder() as seen:
+        with pytest.raises(ConfigError) as raised:
+            build_optimizer_and_schedule(args, 351, 10, options={"lr_multipliers": {"m/enc": 0.5, key: value}})
+    text = str(raised.value)
+    assert re.search(rf"lr_multipliers.*{re.escape(repr(key))}", text), text
+    assert repr(value) in text, text
+    assert "'m/enc'" not in text, "a good entry beside the bad one is not named"
+    assert seen == [], "refused before the builder is called"
+
+
+def test_a_task_handing_a_bad_rate_table_entry_stops_the_run_with_a_config_error(world, tmp_path):
+    class BadEntry(Scripted):
+        def optimizer_options(self, config, model):
+            return {"lr_multipliers": {model.trainable_variables[-1].path: 0.0}}
+
+    run_dir = tmp_path / "run"
+    with pytest.raises(ConfigError, match=r"lr_multipliers.*0\.0"):
+        BadEntry(config_for(run_dir, epochs=1)).run()
+    assert not (run_dir / "training_log.csv").exists(), "refused before fit"
 
 
 @pytest.mark.parametrize("arm", ["sgd_momentum", "adam_constant"])
