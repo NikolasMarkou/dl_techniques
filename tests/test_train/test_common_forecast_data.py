@@ -1470,6 +1470,14 @@ class TestTheFlatDecisionHasNoSquaresGuard:
         anchor, offset, scale = fd.context_stats_ops(tf.zeros((0, LOOKBACK, 2)), 1e-6)
         assert tuple(anchor.shape) == tuple(offset.shape) == tuple(scale.shape) == (0, 1, 2)
 
+    def test_the_keras_ops_function_states_float32_or_float64_and_float16_is_not_held(self):
+        """Review pass 6 N7: the docstring said "the dtype of ``context``", but in float16 ``FLOAT32_TINY`` underflows to 0 and a constant window has a
+        NaN scale. The task refuses any precision but float32 (and the Keras layer casts to it), so the contract is narrowed to the two dtypes held."""
+        doc = fd.context_stats_ops.__doc__
+        assert "float32 or float64" in doc and "float16" in doc and "NaN" in doc, doc
+        scale = np.asarray(fd.context_stats_ops(np.zeros((1, LOOKBACK, 1), np.float16), 1e-6)[2])
+        assert np.isnan(scale).all(), "vacuity: float16 does give the NaN the docstring names"
+
     @pytest.mark.parametrize("dtype", [np.float32, np.float64])
     def test_an_all_zero_context_is_flat_and_finite_in_the_keras_ops_function(self, dtype):
         """D-040 (the all-zero context): ``span`` is exactly 0, ``0 / 0`` must not reach the std (NaN <= x is False and the scale would be NaN)."""

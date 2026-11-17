@@ -150,9 +150,11 @@ def standardize_tf(window: "tf.Tensor", lookback: int, scale_floor: float) -> Tu
 
 
 def context_stats_ops(context: Any, scale_floor: float) -> Tuple[Any, Any, Any]:
-    """The ``keras.ops`` twin of :func:`context_stats_np` (the dtype of ``context``, any backend): the one the exported function runs.
+    """The ``keras.ops`` twin of :func:`context_stats_np` (float32 or float64, any backend): the one the exported function runs.
 
-    ``context`` is ``(..., lookback, channels)``; returns ``(anchor, offset, scale)`` as ``(..., 1, channels)``, rule for rule.
+    ``context`` is ``(..., lookback, channels)`` (any batch, an empty one included); returns ``(anchor, offset, scale)`` as ``(..., 1, channels)``,
+    rule for rule. Not float16: ``FLOAT32_TINY`` underflows to 0 in it and a constant window then has a NaN scale (the task refuses any precision
+    but float32, and the Keras layer casts its input to it).
     """
     # DECISION plan-2026-11-13T105600-3a8319ef/D-011
     # DECISION plan-2026-11-13T105600-3a8319ef/D-040
