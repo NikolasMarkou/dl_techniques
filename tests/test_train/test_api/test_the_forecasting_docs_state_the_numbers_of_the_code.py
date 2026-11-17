@@ -198,6 +198,7 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert "the summary said 0 flat and the scoring treated 38 as flat" in text and "1,153 of 2,000 windows at 1.0001 times it at lookback 168" in text, "s11b and t2"
     assert "8.7 window stds at a spread of 0.9 times 1.18e-38, 5.9 at 1.0001 times, 3.9 at 1.5 times, 1.8 at 3.5 times, 0.32 at 10 times, 0.028 at 100 times, 0.047 at 1e-36 and 3e-6 at 1e-33" in text
     assert "flush a float32 value below 1.18e-38 to 0 and" not in text and "297 of 2,000 windows at 0.9 times it" not in text, "the pass-5 sentence, measured false in pass 6"
+    assert "after the UTF-8 byte-order mark of a spreadsheet's \"CSV UTF-8\", if the file has one" in text, "review pass 6 N5"
     assert "A flat window has no scale" in text and "forecast about 2.6e8 times its own level" in text, "review pass 5 NOTE 8"
     assert "which means little where the series' unit is far from 1" in text
     for gone in ("within two float32 steps", "0 disagreements at every distance", "squares deviations in float32"):
@@ -213,7 +214,7 @@ def test_the_readme_states_what_a_blank_line_does_in_a_csv():
     after the last row shifts nothing and is ignored, and a text cell is refused with its row and the cell as written."""
     text = " ".join(README.read_text().split())
     assert "a blank line INSIDE the series is a missing cell refused with its row" in text
-    assert "blank lines before the header and after the last row shift nothing and are ignored" in text
+    assert "blank lines before the header (after the UTF-8 byte-order mark of a spreadsheet's \"CSV UTF-8\", if the file has one) and after the last row shift nothing and are ignored" in text
     assert "a text cell, a whitespace-only line included, is refused with its row and the cell as written" in text
 
 

@@ -253,7 +253,7 @@ def read_csv_series(
     # D-048); a blank line before the header or after the last row shifts nothing, so those are dropped here and the rest is read with
     # `skip_blank_lines=False`. Do NOT hand pandas the whole file with `skip_blank_lines=False`: the first blank line is then the header (review pass 5
     # NOTE 1: "has no value column") and a final newline pair is a NaN row. The sha256 is of the bytes as written.
-    body = re.sub(rb"\A(?:[ \t]*\r?\n)+", b"", raw).rstrip()
+    body = re.sub(rb"\A(\xef\xbb\xbf)?(?:[ \t]*\r?\n)+", rb"\1", raw).rstrip()   # a UTF-8 byte-order mark stays (pandas decodes it) and does not hide the blank lines (D-050)
     try:
         frame = pd.read_csv(io.BytesIO(body), skip_blank_lines=False)
     except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:

@@ -861,10 +861,12 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         assert got[1] == want[1] and got[2] == fs.read_csv_series(str(padded), None, None)[2] != want[2], "the hash is of the file bytes as written"
 
     @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
-    @pytest.mark.parametrize("head", ["\n", "\n\n\n", "\r\n", "  \n"], ids=["one", "several", "crlf", "spaces"])
+    @pytest.mark.parametrize("head", ["\n", "\n\n\n", "\r\n", "  \n", "\ufeff", "\ufeff\n", "\ufeff\r\n\r\n", "\ufeff  \n"],
+                             ids=["one", "several", "crlf", "spaces", "bom", "bom then one", "bom then crlf blanks", "bom then spaces"])
     def test_blank_lines_before_the_header_are_ignored_as_pandas_did(self, tmp_path, columns, head):
         """Review pass 5 NOTE 1a: a blank line BEFORE the header was refused as 'has no value column' (the empty header line became the
-        header). Nothing precedes the series, so it shifts nothing; pandas' default reader skipped it and so does this one."""
+        header). Nothing precedes the series, so it shifts nothing; pandas' default reader skipped it and so does this one. Review pass 6
+        NOTE 5: a UTF-8 byte-order mark ("CSV UTF-8" from a spreadsheet) before the blank line hid it from the pattern: the blank line was the header."""
         text = self.csv_text(columns)
         clean = tmp_path / "clean.csv"
         clean.write_text(text)
@@ -875,7 +877,14 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         np.testing.assert_array_equal(got[0], want[0])
         assert got[1] == want[1]
 
-    @pytest.mark.parametrize("body", ["v\n\n", "v\n\n\n", "v\r\n\r\n", "v\n   \n", "v\n"], ids=["lf", "lf2", "crlf", "spaces", "no blank"])
+    def test_a_file_of_a_byte_order_mark_alone_is_a_named_error(self, tmp_path):
+        path = tmp_path / "bom_only.csv"
+        path.write_bytes("\ufeff".encode())
+        with pytest.raises(ConfigError, match="is not a readable csv"):
+            fs.read_csv_series(str(path), None, None)
+
+    @pytest.mark.parametrize("body", ["v\n\n", "v\n\n\n", "v\r\n\r\n", "v\n   \n", "v\n", "\ufeffv\n\n", "\ufeff\nv\n"],
+                             ids=["lf", "lf2", "crlf", "spaces", "no blank", "bom", "bom then blank"])
     def test_a_header_with_only_blank_lines_after_it_has_no_rows(self, tmp_path, body):
         """Review pass 5 NOTE 1c: the header and one blank line gave 'non-finite cell ... at row 0' instead of 'has no rows'."""
         path = tmp_path / "header_only.csv"
