@@ -8,7 +8,9 @@ its first batches:
   TEST scenes (positions 1, 3, ...), so the three groups are pairwise disjoint;
 * a selection or test crop is the crop of pool file ``j`` under ``default_rng([seed, salt, j])``, the pool
   being ``POOL_FACTOR * n`` files taken evenly across the group's scenes; the crops are loaded once, into memory,
-  and never depend on the stream seed;
+  and never depend on the stream seed; the read-only arrays ``x_select``, ``y_select``, ``x_test`` and ``y_test``
+  are their only copy, and ``select_ds`` and ``test_ds`` read batches from them in place (a ``from_tensor_slices``
+  stream held a second copy of every crop, about 465 MiB at the defaults);
 * train sample ``counter`` draws its file (uniformly from the train list), its crop and its flip from
   ``default_rng([stream_seed, TRAIN_SALT, counter])``, trying up to ``MAX_TRAIN_TRIES`` files; batch ``i`` of the
   stream is the samples of counters ``i * batch .. i * batch + batch - 1``;
@@ -268,10 +270,11 @@ class DepthBatches:
 
     :param train_ds: the infinite :class:`DepthStream` (the task passes ``steps_per_epoch`` to ``fit``).
     :param select_ds, test_ds: finite ``tf.data`` streams of ``n_select // batch_size`` and
-        ``n_test // batch_size`` whole batches of the in-memory crops, in order.
+        ``n_test // batch_size`` whole batches of the in-memory crops, in order, read from the arrays below in place.
     :param steps_per_epoch, n_train, n_select, n_test: batches in an epoch, ``steps_per_epoch * batch_size``, and
         the crops each fixed set scores (whole batches).
-    :param x_select, y_select, x_test, y_test: the fixed crops (standardized rgb, ``[disparity, mask]``).
+    :param x_select, y_select, x_test, y_test: the fixed crops (standardized rgb, ``[disparity, mask]``),
+        read-only, the one copy of them in the process.
     :param select_files, test_files, select_keys, test_keys: the rgb file and the pool index of each crop.
     :param select_pool, test_pool: the rgb files of each group's pool.
     :param layout: the average layout map, ``(image_size, image_size, 1)``.
@@ -346,7 +349,30 @@ def _whole_batches(name: str, n: int, batch_size: int) -> int:
 
 
 def _batched(x: np.ndarray, y: np.ndarray, batch_size: int) -> "tf.data.Dataset":
-    return tf.data.Dataset.from_tensor_slices((x, y)).batch(batch_size, drop_remainder=True)
+    """One finite pass of ``len(x) // batch_size`` whole batches of ``(x, y)``, in order, read from the arrays in place.
+
+    The arrays are made read-only and are the only copy of the crops: batch ``i`` is the slice
+    ``[i * batch_size, (i + 1) * batch_size)`` of each, read when the stream asks for it.
+    """
+    # DECISION plan-2026-11-17T110935-9c7b9096/D-015: the fixed crops have ONE holder, these arrays. Do NOT
+    # build the stream with from_tensor_slices (or a tf.constant of the arrays): TensorFlow copies them, so
+    # the 465 MiB of crops are held twice (measured on 484 MiB of crops, freed memory returned to the
+    # system: 973 MiB held that way, 490 MiB this way).
+    x.flags.writeable = False
+    y.flags.writeable = False
+    size = int(batch_size)
+
+    def take(index: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        lo = int(index) * size
+        return x[lo:lo + size], y[lo:lo + size]
+
+    def element(index: "tf.Tensor") -> Tuple["tf.Tensor", "tf.Tensor"]:
+        bx, by = tf.numpy_function(take, [index], (tf.float32, tf.float32), stateful=False)
+        bx.set_shape((size,) + x.shape[1:])
+        by.set_shape((size,) + y.shape[1:])
+        return bx, by
+
+    return tf.data.Dataset.range(len(x) // size).map(element)
 
 
 def load_depth_batches(

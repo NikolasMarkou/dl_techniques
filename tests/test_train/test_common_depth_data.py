@@ -9,11 +9,19 @@ What is held: the scene groups are pairwise disjoint; the selection and test cro
 ``(seed, salt, pool index)`` (bit-equal across builds, stream seeds, a resume and a fresh interpreter); a train
 batch is a function of ``(stream seed, global batch index)`` and ``fit(steps_per_epoch=)`` hands the stream a
 global index that carries across epochs; the target is ``[disparity, mask]``; the input is ImageNet-standardized;
-a horizontal flip is the only augmentation; the layout map is the mask-weighted mean of the layout targets.
+a horizontal flip is the only augmentation; the layout map is the mask-weighted mean of the layout targets; the
+fixed crops have one holder, the arrays, which the selection and test streams read in place.
+
+The second part holds the scoring (``train.common.depth_run``) to float64 oracles written here: the constant
+baseline through the compiled masked loss is 1.0; the layout baseline is the oracle of the same loss on the
+selection crops; per-crop Pearson is over valid pixels only; the compiled metrics read the whole target; the
+held-out report on the test crops holds loss, Pearson, constant, layout, layout Pearson, the paired difference
+with its SEM, and n.
 """
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -271,6 +279,71 @@ def test_the_fingerprint_changes_with_the_listing_and_with_n_select(tree, data, 
     assert load_depth_batches(str(copy), **KEYS).fingerprint != data.fingerprint
 
 
+def test_the_fixed_crops_have_one_holder_that_the_streams_read_in_place(tree):
+    """The arrays are the only copy of the crops: read-only, and a value written into them is what the next pass of
+    the stream yields (a stream holding its own copy would yield the old value)."""
+    d = load_depth_batches(tree, **{**KEYS, "layout_samples": 2})
+    for name, ds, x, y in (("selection", d.select_ds, d.x_select, d.y_select),
+                           ("test", d.test_ds, d.x_test, d.y_test)):
+        assert not x.flags.writeable and not y.flags.writeable, f"the {name} crops are read-only"
+        x.flags.writeable = True
+        y.flags.writeable = True
+        x[0, 0, 0, 0] = 1234.5
+        y[-1, -1, -1, 0] = -77.0
+        xs, ys = zip(*[(bx.numpy(), by.numpy()) for bx, by in ds])
+        xs, ys = np.concatenate(xs), np.concatenate(ys)
+        assert xs[0, 0, 0, 0] == 1234.5 and ys[-1, -1, -1, 0] == -77.0, f"the {name} stream reads its own copy"
+        np.testing.assert_array_equal(xs, x)
+        np.testing.assert_array_equal(ys, y)
+
+
+_ONE_HOLDER = """
+import gc
+import numpy as np
+from train.common.depth_data import _batched
+
+def rss_mib():
+    with open("/proc/self/status") as f:
+        return next(int(l.split()[1]) for l in f if l.startswith("VmRSS:")) / 1024.0
+
+def one_pass(ds):
+    total = 0.0
+    for bx, by in ds:
+        total += float(bx.numpy()[0, 0, 0, 0]) + float(by.numpy()[0, 0, 0, 0])
+    return total
+
+rng = np.random.default_rng(0)
+# Warm the runtime (thread pools, the op and function caches) on a small pair first.
+one_pass(_batched(rng.random((16, 32, 32, 3), dtype=np.float32), rng.random((16, 32, 32, 2), dtype=np.float32), 8))
+gc.collect()
+x = rng.standard_normal((192, 160, 160, 3), dtype=np.float32)
+y = rng.random((192, 160, 160, 2), dtype=np.float32)
+gc.collect()
+before = rss_mib()
+ds = _batched(x, y, 8)
+one_pass(ds)
+one_pass(ds)
+gc.collect()
+print("ARRAYS_MIB", (x.nbytes + y.nbytes) / 2 ** 20, "EXTRA_MIB", rss_mib() - before)
+"""
+
+
+def test_a_fixed_stream_holds_no_second_copy_of_its_crops(tmp_path):
+    """Resident memory after two passes over a stream of 94 MiB of crops grows by under half of them (a stream that
+    copied the arrays grew by all of them). Fresh interpreter, glibc's mmap threshold fixed so freed batches return
+    to the system and the count is the memory still held."""
+    src = str(Path(dl_techniques.__file__).resolve().parents[1])
+    env = dict(os.environ, PYTHONPATH=src, CUDA_VISIBLE_DEVICES="", TF_CPP_MIN_LOG_LEVEL="3",
+               MALLOC_MMAP_THRESHOLD_="65536")
+    out = subprocess.run([sys.executable, "-c", _ONE_HOLDER], capture_output=True, text=True, env=env,
+                         cwd=str(tmp_path), timeout=300)
+    assert out.returncode == 0, out.stderr[-2000:]
+    words = [l for l in out.stdout.splitlines() if l.startswith("ARRAYS_MIB ")][0].split()
+    arrays, extra = float(words[1]), float(words[3])
+    assert arrays > 90
+    assert extra < 0.5 * arrays, f"the stream holds {extra:.0f} MiB beside {arrays:.0f} MiB of crops"
+
+
 # ---------------------------------------------------------------------
 # The train stream
 # ---------------------------------------------------------------------
@@ -433,3 +506,162 @@ def test_the_layout_is_the_mask_weighted_mean_of_the_layout_targets(data):
     # tell the two apart.
     plain = total / KEYS["layout_samples"]
     assert np.abs(plain - oracle).max() > 1e-2
+
+
+# ---------------------------------------------------------------------
+# Scoring (train.common.depth_run)
+# ---------------------------------------------------------------------
+
+#: The masked loss's floor on the mean absolute deviation (``AffineInvariantLoss(epsilon=1e-6)``).
+EPSILON = 1e-6
+#: float32 compiled loss against the float64 oracle: values near 1, means over a few hundred pixels.
+LOSS_ATOL = 1e-5
+
+
+@pytest.fixture(scope="module")
+def scoring():
+    import train.common.depth_run as depth_run
+
+    return depth_run
+
+
+def oracle_loss(y, pred):
+    """Per-crop masked affine-invariant loss in float64 (arXiv 2401.10891, eq. 1-3): over the valid pixels, each map
+    minus its median, over its mean absolute deviation from it (floored at ``EPSILON``), then the mean |difference|."""
+    out = []
+    for yi, pi in zip(y, pred):
+        valid = yi[..., 1] > 0
+
+        def normalized(d):
+            d = np.asarray(d, np.float64)[valid]
+            t = np.median(d)
+            return (d - t) / max(np.mean(np.abs(d - t)), EPSILON)
+
+        out.append(np.mean(np.abs(normalized(pi[..., 0]) - normalized(yi[..., 0]))))
+    return np.asarray(out)
+
+
+def oracle_pearson(y, pred, valid_only=True):
+    """Per-crop Pearson of prediction and disparity by ``np.corrcoef`` (float64), nan where either is constant."""
+    out = []
+    for yi, pi in zip(y, pred):
+        keep = yi[..., 1] > 0 if valid_only else np.ones(yi.shape[:-1], bool)
+        a, b = np.asarray(pi[..., 0], np.float64)[keep], np.asarray(yi[..., 0], np.float64)[keep]
+        out.append(np.nan if np.ptp(a) == 0 or np.ptp(b) == 0 else np.corrcoef(a, b)[0, 1])
+    return np.asarray(out)
+
+
+def mean_and_sem(values):
+    values = np.asarray(values, np.float64)
+    values = values[np.isfinite(values)]
+    return values.mean(), values.std(ddof=1) / math.sqrt(len(values)), len(values)
+
+
+def layout_prediction(data, y):
+    return np.broadcast_to(data.layout, y.shape[:-1] + (1,))
+
+
+def a_prediction(y, seed=0):
+    """A non-trivial prediction: the disparity, tilted and noisy, and wild values on the invalid pixels."""
+    rng = np.random.default_rng(seed)
+    pred = 0.6 * y[..., :1] + 0.3 * rng.random(y.shape[:-1] + (1,)) + 0.01 * np.arange(y.shape[2])[None, None, :, None]
+    pred = np.where(y[..., 1:] > 0, pred, 50.0 * rng.standard_normal(pred.shape))
+    return pred.astype(np.float32)
+
+
+def test_the_constant_baseline_through_the_compiled_loss_is_one(data, scoring):
+    for ds in (data.select_ds, data.test_ds):
+        assert abs(scoring.constant_baseline(ds) - 1.0) <= LOSS_ATOL
+    zeros = np.zeros(data.y_select.shape[:-1] + (1,), np.float32)
+    np.testing.assert_allclose(oracle_loss(data.y_select, zeros), 1.0, rtol=0, atol=1e-12)
+
+
+def test_the_layout_baseline_equals_a_float64_oracle_of_the_same_loss(data, scoring):
+    oracle = oracle_loss(data.y_select, layout_prediction(data, data.y_select)).mean()
+    assert abs(scoring.layout_baseline(data.layout, data.select_ds) - oracle) <= LOSS_ATOL
+    np.testing.assert_allclose(scoring.per_crop_loss(data.y_select, layout_prediction(data, data.y_select)),
+                               oracle_loss(data.y_select, layout_prediction(data, data.y_select)), rtol=0, atol=LOSS_ATOL)
+
+
+def test_the_selection_block_scores_both_baselines_on_the_selection_crops(data, scoring):
+    block = scoring.selection_baselines(data)
+    assert set(block) == {"constant", "layout"}
+    on_selection = oracle_loss(data.y_select, layout_prediction(data, data.y_select)).mean()
+    on_test = oracle_loss(data.y_test, layout_prediction(data, data.y_test)).mean()
+    assert abs(on_selection - on_test) > 10 * LOSS_ATOL, "the two crop sets give different layouts, so the test has power"
+    assert abs(block["layout"] - on_selection) <= LOSS_ATOL
+    assert abs(block["constant"] - 1.0) <= LOSS_ATOL
+
+
+def test_per_crop_pearson_is_over_the_valid_pixels_only(data, scoring):
+    y = data.y_test
+    pred = a_prediction(y)
+    got = scoring.per_crop_pearson(y, pred)
+    assert got.dtype == np.float64 and got.shape == (len(y),)
+    np.testing.assert_allclose(got, oracle_pearson(y, pred), rtol=0, atol=1e-12)
+    # The invalid pixels hold wild values: over every pixel the coefficient is another number.
+    assert np.abs(oracle_pearson(y, pred, valid_only=False) - got).max() > 0.1
+    # Changing only the invalid pixels changes nothing.
+    other = np.where(y[..., 1:] > 0, pred, -pred).astype(np.float32)
+    np.testing.assert_allclose(scoring.per_crop_pearson(y, other), got, rtol=0, atol=1e-12)
+    # A prediction constant over the valid pixels has no correlation.
+    flat = np.where(y[..., 1:] > 0, 0.25, pred).astype(np.float32)
+    assert np.isnan(scoring.per_crop_pearson(y, flat)).all()
+
+
+def test_the_compiled_metrics_read_the_whole_target(data, scoring):
+    """D-100 of plan 81938e81: the metrics read the mask from ``y[..., 1:]``, so a model compiled with them and
+    fed the whole ``y`` scores a non-trivial prediction non-zero, and the same metrics fed the disparity alone read 0
+    (the instrument that caught the sliced mask)."""
+    from train.common.pretrain_run import ConstantPredictor
+
+    loss, metrics = scoring.loss_and_metrics()
+    names = [m.name for m in metrics]
+    assert names == ["abs_rel", "sq_rel", "rmse", "rmse_log", "delta_1.25"]
+    model = ConstantPredictor(data.layout, data.layout.shape)
+    model.compile(optimizer="sgd", loss=loss, metrics=metrics, jit_compile=False)
+    scores = model.evaluate(data.select_ds, verbose=0, return_dict=True)
+    assert all(scores[name] != 0.0 for name in names), scores
+    _, sliced = scoring.loss_and_metrics()
+    for metric in sliced:
+        metric.update_state(data.y_select[..., :1], layout_prediction(data, data.y_select))
+        assert float(metric.result()) == 0.0, metric.name
+
+
+class Disparity(keras.Model):
+    """A model whose prediction for crop ``i`` of the test set is ``a_prediction(y_test)[i]``, read off the input
+    by matching it to the test crops, so the report is held to oracles on a known prediction."""
+
+    def __init__(self, x, pred):
+        super().__init__()
+        self._key = np.asarray(x[:, 0, 0, 0], np.float32)
+        self._pred = np.asarray(pred, np.float32)
+
+    def call(self, inputs, training=None):
+        key = keras.ops.convert_to_tensor(self._key)
+        index = keras.ops.argmin(keras.ops.abs(inputs[:, :1, 0, 0] - key[None, :]), axis=-1)
+        return keras.ops.take(keras.ops.convert_to_tensor(self._pred), index, axis=0)
+
+
+def test_the_held_out_report_holds_the_test_block(data, scoring):
+    y = data.y_test
+    assert len(set(data.x_test[:, 0, 0, 0].tolist())) == len(y), "the key pixel tells the test crops apart"
+    pred = a_prediction(y, seed=3)
+    report = scoring.held_out_report(Disparity(data.x_test, pred), data)
+    assert set(report) == {"n", "loss", "loss_sem", "pearson", "pearson_sem", "pearson_n", "constant", "layout",
+                           "layout_sem", "layout_pearson", "layout_pearson_sem", "layout_pearson_n",
+                           "model_minus_layout", "model_minus_layout_sem"}
+    assert report["n"] == data.n_test == len(y)
+    loss = oracle_loss(y, pred)
+    layout = oracle_loss(y, layout_prediction(data, y))
+    for key, values, tol in (("loss", loss, LOSS_ATOL), ("layout", layout, LOSS_ATOL),
+                             ("model_minus_layout", loss - layout, LOSS_ATOL),
+                             ("pearson", oracle_pearson(y, pred), 1e-9),
+                             ("layout_pearson", oracle_pearson(y, layout_prediction(data, y)), 1e-9)):
+        mean, sem, n = mean_and_sem(values)
+        assert abs(report[key] - mean) <= tol, (key, report[key], mean)
+        assert abs(report[f"{key}_sem"] - sem) <= tol, (key, report[f"{key}_sem"], sem)
+        if key.endswith("pearson"):
+            assert report[f"{key}_n"] == n
+    assert abs(report["constant"] - 1.0) <= LOSS_ATOL
+    assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in report.values())
