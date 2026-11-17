@@ -152,7 +152,7 @@ def _window(item: Any, index: int, record: Mapping[str, Any]) -> Any:
         row, col = int(beyond[0][0]), int(beyond[0][1])
         bound = f"{high:.0e}".replace("e+", "e")
         _refuse_window(
-            f"window {index} holds a value of magnitude {abs(float(window[row, col])):.3g} at row {row}, column {col}, above {bound}, "
+            f"window {index} holds a value of magnitude {abs(float(window[row, col])):.9g} at row {row}, column {col}, above {bound}, "
             "the largest max |x| a training column may have (the model and its exported files read float32 windows)"
         )
     return window

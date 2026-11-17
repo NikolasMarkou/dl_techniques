@@ -1117,8 +1117,10 @@ def test_a_window_above_the_bound_of_a_training_column_is_refused_by_name(value,
     every file while ``predict`` answered). One bound, the training column's, by name, whatever the failing point of the files is now."""
     window = raw_windows(1, 1, seed=3)[0].copy()
     window[5, 0] = value
-    with pytest.raises(ConfigError, match=r"window 0 holds a value of magnitude \S+ at row 5, column 0, above 1e15, the largest max \|x\| a training column may have"):
+    with pytest.raises(ConfigError, match=r"window 0 holds a value of magnitude \S+ at row 5, column 0, above 1e15, the largest max \|x\| a training column may have") as raised:
         one.predictor.predict(window)
+    shown = float(re.search(r"magnitude (\S+) at row", str(raised.value))[1])
+    assert shown == pytest.approx(abs(value), rel=1e-8) and shown > 1e15, "the sentence shows a magnitude that IS above the bound (1.0000001e15, not '1e+15 above 1e15')"
 
 
 def test_a_window_at_the_bound_is_forecast_by_predict_and_by_a_file_alike(world, tmp_path_factory):
