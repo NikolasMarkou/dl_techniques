@@ -430,7 +430,8 @@ class DepthEstimationTrainer(TaskTrainer):
             "`task.json` records the size the model is built at: `predict` resizes each image to it, standardizes it as "
             "training did and resizes the map back to the image's size; a map is relative disparity, defined up to scale "
             "and shift per image; `export` writes keras, saved_model, tflite or onnx at that size only (another size is "
-            "refused), a file that takes ImageNet-standardized images of that size and returns the map at it",
+            "refused in saved_model, tflite and onnx; a keras file is the trained model itself and ignores input_shape), "
+            "a file that takes ImageNet-standardized images of that size and returns the map at it",
         ]
         notes.append(
             "the model analysis is data-free (weights and spectral only; `analyzer.analyzers` lists them): the stock "

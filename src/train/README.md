@@ -1190,9 +1190,13 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
 * **The crops and the stream.** A selection or test crop is the crop of pool file `j` under a generator keyed on `(seed, salt, j)`,
   the pool being 4 files per crop (512 for the selection crops, 1,024 for the test crops) taken evenly across the group's scenes; a
   file whose crop has too few valid pixels or a constant valid depth is passed over (41.8 and 31.4 percent of the files read at these
-  counts). The crops are read once into read-only arrays (465 MiB; two builds gave equal sha256), and never depend on the stream seed.
-  Train sample `counter` draws its file, crop and flip from a generator keyed on `(stream seed, train salt, counter)`, trying up to 8
-  files, and train batch `i` is samples `i * batch` to `i * batch + batch - 1`: an infinite `PyDataset` read by `data.workers`
+  counts). Crop `i` scans forward from pool file `i * pool / n`; once that scan has passed the last pool file, a crop takes the lowest
+  unused file whose crop qualifies, so a group is refused (when the data is built, naming the count) only when fewer of its pool
+  files qualify than the crops asked for. The crops are read once into read-only arrays (465 MiB; two builds gave equal sha256), and
+  never depend on the stream seed. Train sample `counter` draws its file, crop and flip from a generator keyed on
+  `(stream seed, train salt, counter)`, trying up to 64 files: with 18 to 21 percent of draws giving no crop (measured on the train
+  list, 1.22 to 1.27 files per sample) a sample fails with odds of at most 0.21^64, about 4e-44, and a list in which no file
+  qualifies raises an error naming the counter and the stream seed. Train batch `i` is samples `i * batch` to `i * batch + batch - 1`: an infinite `PyDataset` read by `data.workers`
   processes, so a batch is a function of its key and not of the process that read it. The layout is the mask-weighted per-pixel mean
   of `data.layout_samples` train targets (46 s to build). Every RGB input is ImageNet-standardized, the input the official DINOv2 was
   trained on.
@@ -1223,7 +1227,9 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   `{"lr_multipliers": table}` from `TaskTrainer.optimizer_options(config, model)`, the table built by the legacy trainer's own
   `decoder_lr_multipliers`, and the shared `build_optimizer_and_schedule` builds an `LRMultiplierAdamW` from it, so the schedule, the
   warmup and the clip are the ones every task gets. From random weights the table is empty and the optimizer is the plain AdamW of the
-  other tasks. The table is saved with the optimizer, so a resume restores it.
+  other tasks. The table is not saved: every process, resumed or not, builds it again from its own model through
+  `optimizer_options`, and a resume then loads the backup (`checkpoints/backup/latest.weights.h5`) into that optimizer, which restores
+  its slot values and its step count.
 * **The stream seed on a resume.** The train stream is infinite and a resumed `fit` asks it for batch 0 again, which would replay
   epoch 0's samples. `DepthEstimationTrainer.resume_stream` returns the data on a stream seed of
   `int.from_bytes(sha256(f"{seed}:{completed_steps}")[:4], "big")` (`derive_stream_seed`, the pretrain task's function), with
@@ -1233,7 +1239,9 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   `checkpoint_args.backup_every_steps` bounds the loss. The summary's `stream` block records `seed`, `stream_seed` and the rule.
 * **`predict`.** `python -m train predict model=<run dir or .keras> data=<image or directory> out=<new directory>` writes one
   `<stem>.npy` per image, the float32 relative-disparity map at the image's own size, and, LAST, `index.json`. Each image is resized
-  bilinearly to the trained size in `task.json` and standardized as in training, and the map is resized back bilinearly. From Python,
+  bilinearly to the trained size in `task.json` and standardized as in training, and the map is resized back bilinearly. The trained
+  size is square (`transform_args.image_size` on each side), so a non-square image is squashed to it, its aspect ratio not kept, and
+  its map is stretched back to the image's own height and width. From Python,
   `load_model(...)` returns a `DepthPredictor`, and `DepthPredictor.predict(x)` (a path, a PIL image, an array or a list of them)
   returns `{"disparity": [...]}`, always a list. Two images with one stem are refused before the model is loaded, and a model whose
   size or output disagrees with the record is refused at load. A map is relative: compare maps after a per-image scale and shift,
@@ -1241,7 +1249,10 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
 * **`export`.** All four formats, `keras`, `saved_model`, `tflite` and `onnx`, at the trained size ONLY. The file takes float32 images
   `(batch, height, width, 3)` at the `input_size` of `<out>.task.json`, pixels scaled to [0, 1] and then ImageNet-standardized, and
   returns `(batch, height, width, 1)` relative disparity at that size; resizing to and from the picture is the caller's (`predict` does
-  both). Any other size is refused by name before anything is written (`depth_predictor.check_export`), for two measured reasons. The
+  both). A `keras` file is the trained model itself and traces nothing, so it ignores `input_shape`: from Python,
+  `export(format="keras", input_shape=<another size>)` writes the trained-size model and its record without a word (the command line
+  always passes the record's size). In `saved_model`, `tflite` and `onnx`, any other size is refused by name before anything is
+  written (`depth_predictor.check_export`), for two measured reasons. The
   encoder's position embedding is built for the grid of the trained size (325 tokens at 252 px: 18 x 18 patches and the class token),
   so the model itself raises at 266 px (362 tokens). And asked for another size, the `saved_model`, `tflite` and `onnx` converters
   WRITE a file anyway: for a 28 px model asked at 42 px, a file that fails when it is run, and at 30 px a file that answers a 30 px
@@ -1479,7 +1490,7 @@ or resumed (its files are not touched, and `best_model.keras` still loads in Ker
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints
 only the path on stdout. Input contract: float32 `(batch, height, width, channels)` pixels scaled
 to `[0, 1]` then standardized, `(x - mean) / std`, with the mean and std in `<out>.task.json`;
-the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A forecasting run** exports raw windows `(batch, lookback, channels)` and returns the forecast in the series' own units, and refuses five of its 36 cells by name (`time_series_forecasting` above). **A depth run** exports all four formats at its trained size and refuses any other size by name (`depth_estimation` above). **A segmentation run**
+the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A forecasting run** exports raw windows `(batch, lookback, channels)` and returns the forecast in the series' own units, and refuses five of its 36 cells by name (`time_series_forecasting` above). **A depth run** exports all four formats at its trained size and refuses any other size by name in the three traced formats (a `keras` file is the trained model and ignores `input_shape`; `depth_estimation` above). **A segmentation run**
 (D-081) exports the same four formats and the output is one score per class per pixel, `(batch, height, width, classes)`,
 at the `input_size` of `<out>.task.json` (a version 2 record, the run's own, byte for byte): height and width are fixed
 to it and may differ, only the batch is free, and the mask is the argmax over the last axis after the caller resizes the

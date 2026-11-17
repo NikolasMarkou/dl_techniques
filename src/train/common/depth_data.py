@@ -63,8 +63,14 @@ from train.common.pretrain_data import derive_stream_seed
 TRAIN_SALT, SELECT_SALT, TEST_SALT, LAYOUT_SALT = 1, 2, 3, 4
 #: A fixed set of ``n`` crops is drawn from ``POOL_FACTOR * n`` files of its group (D-014).
 POOL_FACTOR = 4
+# DECISION plan-2026-11-17T110935-9c7b9096/D-029: 64 tries, not 8. A draw fails with probability p ** tries,
+# p the share of tries that give no crop (0.18 to 0.21 measured on the MegaDepth train list at 252 px). Do NOT
+# lower it toward 8: p ** 8 is 1.1e-6 at p 0.18 and 6.6e-5 at p 0.3, so at p 0.18 a run of 240,000 samples crashes with
+# odds 23 percent and 1e9 samples are expected to crash about 1,100 and 65,600 times; p ** 64 is 2.2e-48 and
+# 3.4e-34 (2.2e-39 and 3.4e-25 expected crashes in 1e9 samples). A draw that qualified within 8 tries is
+# unchanged (the same generator, read the same way).
 #: Files a train or layout draw tries before it raises.
-MAX_TRAIN_TRIES = 8
+MAX_TRAIN_TRIES = 64
 #: Validation scenes needed to deal selection and test scenes (D-005).
 MIN_VALIDATION_SCENES = 3
 
@@ -121,9 +127,13 @@ def _draw(
                                     augment=augment, rng=rng)
         if out is not None:
             return out[0], out[1], tuple(tried)
+    distinct = sorted(set(tried))
     raise RuntimeError(
-        f"{what}: no qualifying MegaDepth crop (enough valid pixels, depth with spread) in "
-        f"{MAX_TRAIN_TRIES} files; tried {[rgb_paths[k] for k in tried]}"
+        f"{what}: no qualifying MegaDepth crop (enough valid pixels, depth with spread) in {MAX_TRAIN_TRIES} files "
+        f"drawn ({len(distinct)} distinct of the {len(rgb_paths)} listed) at image_size {image_size} with "
+        f"min_valid_ratio {min_valid_ratio}; a list with a usable share of qualifying files fails this way with "
+        f"negligible odds, so most likely none of its files qualifies; files tried (up to 8 shown): "
+        f"{[rgb_paths[k] for k in distinct[:8]]}"
     )
 
 
@@ -200,9 +210,11 @@ def _fixed_crops(
     keep: int,
 ) -> Tuple[np.ndarray, np.ndarray, List[str], List[int], List[str]]:
     """``n`` crops of a group: slot ``i`` starts at pool file ``i * pool // n`` (or the next unused file) and
-    takes the first file whose keyed crop qualifies.
+    takes the first file whose keyed crop qualifies; once that forward scan has run past the last pool file, a
+    slot takes the lowest unused pool file whose crop qualifies. Each pool file is read at most once.
 
     Returns the first ``keep`` of them as ``(x standardized, y, files, pool indices)``, and the pool files.
+    :raises ValueError: when fewer than ``n`` pool files qualify, with the count the scan made.
     """
     pool_rgb, pool_depth = _take_across_scenes(list(scenes), POOL_FACTOR * n)
     pool = len(pool_rgb)
@@ -212,20 +224,41 @@ def _fixed_crops(
                                      augment=False, rng=np.random.default_rng([seed, salt, j]))
 
     xs, ys, keys = [], [], []
-    next_free = 0
+    rejected = set()  # pool files read whose crop does not qualify
+    next_free = 0  # where the forward scan goes on from; the pool size once it has run out
+    lowest = 0  # every pool file below it is taken or rejected
     for i in range(n):
+        out = None
         for j in range(max((i * pool) // n, next_free), pool):
             out = crop(j)
             if out is not None:
                 break
+            rejected.add(j)
+        if out is not None:
+            next_free = j + 1
         else:
-            qualifying = sum(crop(j) is not None for j in range(pool))
-            raise ValueError(
-                f"the {group} group cannot give {n} crops: only {qualifying} of the {pool} files of its pool "
-                f"({len(scenes)} scenes) give a qualifying crop at image_size {image_size} with min_valid_ratio "
-                f"{min_valid_ratio}; ask for fewer crops"
-            )
-        next_free = j + 1
+            # DECISION plan-2026-11-17T110935-9c7b9096/D-030: a slot whose forward scan ran out takes the LOWEST
+            # unused qualifying pool file, so its crop is still the one keyed on (seed, salt, j). Do NOT refuse here
+            # (unused qualifying files earlier in the pool were skipped, and the refusal said "only 12 of 16 qualify"
+            # for 4 crops) and do NOT wrap the scan to the slot's own start or redraw with a new key. A set the
+            # forward scan alone fills is the set it was before this rule, crop for crop.
+            next_free = pool
+            taken = set(keys)
+            for j in range(lowest, pool):
+                if j in taken or j in rejected:
+                    continue
+                out = crop(j)
+                if out is not None:
+                    break
+                rejected.add(j)
+            if out is None:
+                # Every pool file has now been read once and each qualifying one is taken: len(keys) is the count.
+                raise ValueError(
+                    f"the {group} group cannot give {n} crops: only {len(keys)} of the {pool} files of its pool "
+                    f"({len(scenes)} scenes) give a qualifying crop at image_size {image_size} with min_valid_ratio "
+                    f"{min_valid_ratio}; ask for fewer crops"
+                )
+            lowest = j + 1
         xs.append(standardize_imagenet(out[0]))
         ys.append(out[1])
         keys.append(j)

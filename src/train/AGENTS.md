@@ -787,12 +787,13 @@ classification task calls the same `train.common.classification_run` helpers as 
   imports them inside functions only. Rules a change must keep: the selection and test crops are keyed on `(seed, salt, pool
   index)`, never on the stream seed, and a resume moves only the stream seed (`DepthBatches.with_stream(completed_steps)`); the
   train stream is an infinite `PyDataset` whose batch `i` is a pure function of `(stream_seed, i)`, so `fit_kwargs` passes
-  `steps_per_epoch` and `validation_steps`; the bar is `min(constant, layout, epoch-zero)` on the selection crops, the epoch-zero
+  `steps_per_epoch` and `validation_steps`; a train draw tries up to `MAX_TRAIN_TRIES` (64) files from one generator, and a
+  fixed-crop slot whose forward scan has run out takes the lowest unused qualifying pool file; the bar is `min(constant, layout, epoch-zero)` on the selection crops, the epoch-zero
   term read from the fit sidecar, met through `forecast_run.beats_bar`; the weights check and the optimizer refusal run in
   `DepthEstimationTrainer.check_model_args`, before the claim; `compile_options` returns `jit_compile` false explicitly; `run_analysis` is the data-free
   analysis. The record is the fifth kind: a `DEPTH` row in every table of `TASK_TABLES`, in `PREDICT_WRITERS` and in `DATA_LISTERS`,
-  and `export` refuses any shape but the record's (`depth_predictor.check_export`), because the converters write a file of the wrong
-  size without an error. The user-facing description, with the measured numbers, is in [`README.md`](README.md). Tests:
+  and `export` refuses any traced shape but the record's (`depth_predictor.check_export`), because the converters write a file of
+  the wrong size without an error; a `keras` file traces nothing, is the trained model and ignores `input_shape`. The user-facing description, with the measured numbers, is in [`README.md`](README.md). Tests:
   `tests/test_train/test_api/test_depth_task.py`, `test_depth_resume.py` (with the child `_depth_child.py`),
   `test_depth_predictor_and_export.py` and `tests/test_train/test_common_depth_data.py`.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task

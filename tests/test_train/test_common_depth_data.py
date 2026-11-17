@@ -268,6 +268,53 @@ def test_too_few_qualifying_crops_is_a_named_error_naming_the_group_and_counts(t
         load_depth_batches(tree, **{**KEYS, "n_select": 12})
 
 
+def fake_group(monkeypatch, n, rejected):
+    """A group of two scenes of ``2 * n`` files each, so its pool is all ``POOL_FACTOR * n = 4 * n`` of them in scene
+    order, read by a stand-in loader that rejects the pool positions in ``rejected`` and otherwise returns a crop
+    filled with the first draw of its generator (so a crop shows the key it was drawn under). Returns the scenes, the
+    pool and the list of files the loader read."""
+    assert depth_data.POOL_FACTOR == 4
+    pool = [f"/fake/scene{i // (2 * n)}/img{i:03d}.png" for i in range(4 * n)]
+    scenes = [(f"scene{s}", [p for p in pool if f"/scene{s}/" in p], [p[:-4] + ".h5" for p in pool if f"/scene{s}/" in p])
+              for s in range(2)]
+    reads = []
+
+    def load(rgb, depth, size, min_valid_ratio=0.1, augment=False, rng=None):
+        reads.append(rgb)
+        if pool.index(rgb) in rejected:
+            return None
+        value = rng.random()
+        return np.full((size, size, 3), value, np.float32), np.full((size, size, 2), value, np.float32)
+
+    monkeypatch.setattr(depth_data, "load_and_process_pair", load)
+    return scenes, pool, reads
+
+
+@pytest.mark.parametrize("rejected, keys", [
+    (set(), [0, 4, 8, 12]),           # the control: no slot runs out, every slot at its own start
+    (set(range(12, 16)), [0, 4, 8, 1]),  # the last scene's last 4 files: the last slot runs out
+    (set(range(8, 16)), [0, 4, 1, 2]),   # the last 8: two slots run out, each takes the lowest unused one
+], ids=["none", "last_4", "last_8"])
+def test_a_slot_whose_scan_runs_out_takes_the_lowest_unused_qualifying_file(monkeypatch, rejected, keys):
+    """A pool with enough qualifying files fills every slot even when its last files reject, each crop keyed on its
+    own pool index, and no file is read twice."""
+    scenes, pool, reads = fake_group(monkeypatch, 4, rejected)
+    x, y, files, got, pool_files = depth_data._fixed_crops(scenes, 4, seed=1, salt=2, image_size=14,
+                                                           min_valid_ratio=0.1, group="selection", keep=4)
+    assert got == keys and files == [pool[j] for j in keys] and pool_files == pool
+    for crop, j in zip(y, keys):
+        assert (crop == np.float32(np.random.default_rng([1, 2, j]).random())).all(), f"slot of pool file {j}"
+    assert len(reads) == len(set(reads)), f"a pool file was read twice: {reads}"
+
+
+def test_a_group_with_fewer_qualifying_files_than_crops_is_refused_with_the_count_its_scan_made(monkeypatch):
+    scenes, pool, reads = fake_group(monkeypatch, 4, set(range(16)) - {0, 5, 9})
+    with pytest.raises(ValueError, match=r"selection group cannot give 4 crops: only 3 of the 16 files"):
+        depth_data._fixed_crops(scenes, 4, seed=1, salt=2, image_size=14, min_valid_ratio=0.1, group="selection",
+                                keep=4)
+    assert sorted(reads) == sorted(pool), "every pool file read once: the count is the scan's, not a second pass"
+
+
 def test_the_fingerprint_changes_with_the_listing_and_with_n_select(tree, data, tmp_path):
     assert load_depth_batches(tree, **{**KEYS, "n_select": 4}).fingerprint != data.fingerprint
     copy = write_megadepth_tree(tmp_path / "copy")
@@ -401,6 +448,61 @@ def test_a_counter_whose_files_all_fail_raises_a_named_error_within_the_bound(da
     with pytest.raises(RuntimeError, match=rf"counter 4 of stream 1.*{MAX_TRAIN_TRIES} files"):
         stream.sample(4)
     assert len(reads) == MAX_TRAIN_TRIES
+
+
+def bad_and_good_files(tree, data, bad_entries, good_entries):
+    """A train list of ``bad_entries`` files no crop of which qualifies (the four of ``BAD``, cycled) and the first
+    ``good_entries`` qualifying train files: ``(rgb, depth)``."""
+    bad = [str(Path(tree) / f"s{s:02d}" / "dense0" / "imgs" / f"{p:03d}.png") for s, p in sorted(BAD)]
+    good = [p for p in data.train_rgb if scene_and_pair(p) not in BAD][:good_entries]
+    rgb = good + [bad[i % len(bad)] for i in range(bad_entries)]
+    return rgb, [p.replace("/imgs/", "/depths/")[:-4] + ".h5" for p in rgb]
+
+
+#: Recorded at 2c6969a91, whose draw tried at most 8 files: the fixed sets and layout of ``data`` (``fixed_digest``),
+#: its fingerprint, and the first 64 train samples of stream seed 3 with the files each tried (``stream_samples_digest``),
+#: each recorded by running the code before the bound was raised. A higher bound only adds tries after the eighth.
+BEFORE_THE_BOUND_WAS_RAISED = {
+    "fixed": "31dbd3258a8bb96a0032494b92b806c1bfec2a4b873578a4a35ee5a4b314b460",
+    "fingerprint": "0bdd5ed8a31aa04061181b23b352151d4e6b393302576d558229f508115fb003",
+    "stream": "02ef984b8149139eac926bf0df6fdc67dce03b5c379c60f3b93218bbcad7c008",
+}
+
+
+def stream_samples_digest(stream, n):
+    h, tries = hashlib.sha256(), []
+    for counter in range(n):
+        x, y, tried = stream.sample(counter)
+        h.update(digest(x, y).encode())
+        h.update(repr(tried).encode())
+        tries.append(len(tried))
+    return h.hexdigest(), tries
+
+
+def test_a_draw_that_qualified_within_eight_tries_is_the_sample_it_was_before_the_bound_was_raised(data):
+    got, tries = stream_samples_digest(stream_of(data, 3), 64)
+    assert max(tries) <= 8 and max(tries) > 1, f"tries {tries}: the retry path is exercised, within the old bound"
+    assert got == BEFORE_THE_BOUND_WAS_RAISED["stream"]
+    assert fixed_digest(data) == BEFORE_THE_BOUND_WAS_RAISED["fixed"]
+    assert data.fingerprint == BEFORE_THE_BOUND_WAS_RAISED["fingerprint"]
+
+
+def test_a_list_where_three_files_in_five_give_no_crop_still_yields_every_sample(tree, data):
+    rgb, depth = bad_and_good_files(tree, data, bad_entries=6, good_entries=4)
+    stream = stream_of(data, 5, rgb=rgb, depth=depth)
+    tries = []
+    for counter in range(400):
+        _, y, tried = stream.sample(counter)
+        assert scene_and_pair(rgb[tried[-1]]) not in BAD and y[..., 1].mean() >= KEYS["min_valid_ratio"]
+        assert all(scene_and_pair(rgb[k]) in BAD for k in tried[:-1])
+        tries.append(len(tried))
+    assert max(tries) > 8, f"no sample needed more than 8 tries ({max(tries)}): the test has no power"
+
+
+def test_the_readme_states_the_try_bound_of_the_code():
+    readme = Path(depth_data.__file__).resolve().parents[1] / "README.md"
+    text = " ".join(readme.read_text().split())
+    assert f"trying up to {MAX_TRAIN_TRIES} files" in text
 
 
 def test_a_horizontal_flip_is_the_only_augmentation(data):

@@ -11,9 +11,9 @@ image and ``index.json`` last, and refuses an existing ``out``.
 
 Second part (Step 10): ``python -m train export`` of the run writes each of the four formats at the trained size with
 the run's record beside it, and each file, read by its own runtime, answers the Keras model's map on the run's 4 test
-crops within its D-018 band relative to the map's scale (keras exactly); the bands are held against the gaps measured
-at 252 px (Step 1(f)) and at this file's 28 px; a request at another size (42 px, one patch more, as 266 px is to
-252 px; and 30 px, the same patch grid) is refused by name before anything is written; the exported ``.keras`` loads
+crops within half its D-018 band relative to the map's scale (keras exactly); a request at another size (42 px, one
+patch more, as 266 px is to 252 px; and 30 px, the same patch grid) is refused by name before anything is written in
+the three traced formats, and a keras file asked at another size is the trained model; the exported ``.keras`` loads
 as a ``DepthPredictor``; the note, the export help and the run's notes say what export does.
 
 One vit_s is trained here, once, in a module fixture: from random weights at 28 px (a 2 x 2 patch grid), one epoch of
@@ -417,17 +417,11 @@ def test_a_run_that_fails_half_way_leaves_its_arrays_and_no_index(loaded, tmp_pa
 # ---------------------------------------------------------------------
 
 #: D-018: the largest difference between an exported file, read by its own runtime, and the Keras model on the CPU, as a
-#: share of the largest |value| of the Keras map. Each band is about 4 times the worst gap measured at 252 px (Step 1(f));
-#: the ``keras`` file is the model itself and must answer exactly.
+#: share of the largest |value| of the Keras map; the ``keras`` file is the model itself and must answer exactly. Each
+#: band is about 4 times the worst gap measured at 252 px on a pretrained and a trained vit_s (saved_model 2.90e-6,
+#: tflite 1.25e-5, onnx 7.23e-6) and 10 to 40 times the gap of this file's 28 px model (7.76e-7, 1.16e-6, 8.62e-7). The
+#: runtime test below holds the gap it measures to half its band, so a band can be checked only against a real file.
 EXPORT_BAND = {"keras": 0.0, "saved_model": 1e-5, "tflite": 5e-5, "onnx": 3e-5}
-#: The gaps the bands answer for, as a share of the scale: at 252 px a pretrained and a trained vit_s (Step 1(f),
-#: scratch_measure/f_export_*.json), and at 28 px this file's own model (scratch_step10/probe_export.py, the re-measure
-#: D-018 names; the 28 px numbers are this file's setting: the trained tiny run on its 4 test crops).
-MEASURED_GAP = {
-    "saved_model": {"252 pretrained": 2.90e-6, "252 trained": 1.82e-6, "28 tiny": 7.76e-7},
-    "tflite": {"252 pretrained": 1.25e-5, "252 trained": 6.54e-6, "28 tiny": 1.16e-6},
-    "onnx": {"252 pretrained": 7.23e-6, "252 trained": 2.20e-6, "28 tiny": 8.62e-7},
-}
 FORMATS = ("keras", "saved_model", "tflite", "onnx")
 NAMES = {"keras": "m.keras", "saved_model": "m_saved_model", "tflite": "m.tflite", "onnx": "m.onnx"}
 #: Another size: one patch more than the trained 28 px (as 266 px is to 252 px), and 30 px, which gives the same
@@ -471,13 +465,6 @@ def exports(trained, tmp_path_factory):
     return Exports(trained, tmp_path_factory.mktemp("depth_export"))
 
 
-def test_each_band_covers_twice_every_measured_gap_and_is_within_ten_times_the_largest():
-    assert set(MEASURED_GAP) == set(EXPORT_BAND) - {"keras"}
-    for format, gaps in MEASURED_GAP.items():
-        worst = max(gaps.values())
-        assert 2 * worst <= EXPORT_BAND[format] <= 10 * worst, f"{format}: band {EXPORT_BAND[format]:.3g}, gaps {gaps}"
-
-
 @pytest.mark.parametrize("format", FORMATS)
 def test_the_export_rule_takes_the_trained_size_in_every_format_and_refuses_any_other(format):
     rule = predictor.EXPORT_RULES[TASK]
@@ -508,7 +495,8 @@ def test_each_format_is_written_at_the_trained_size_and_answers_the_keras_map_wi
     assert got.shape == expected.shape
     gap = float(np.abs(got - expected).max()) / scale
     print(f"[export gap at {SIZE} px] {format}: {gap:.3g} of the scale {scale:.4g} (band {EXPORT_BAND[format]:.3g})")
-    assert gap <= EXPORT_BAND[format], f"{format}: {gap:.3g} of the scale against the band {EXPORT_BAND[format]:.3g}"
+    assert 2 * gap <= EXPORT_BAND[format], (
+        f"{format}: {gap:.3g} of the scale is above half the band {EXPORT_BAND[format]:.3g}")
 
 
 def test_the_exported_keras_file_loads_as_a_depth_predictor_and_answers_the_runs_maps(exports, loaded):
@@ -534,7 +522,8 @@ def test_another_size_is_refused_by_name_before_anything_is_written(format, side
 
 def test_a_keras_file_asked_at_another_size_is_the_trained_model_with_its_record(loaded, tmp_path):
     # A .keras archive is the model itself: export traces nothing for it and does not read input_shape (the rule's check
-    # runs where a function is traced), so no file of another size can come out of it.
+    # runs where a function is traced), so no file of another size can come out of it. The docs, the export help and
+    # the run notes say so (the test below); a refusal here would need a change to the shared export gate.
     from train.api.exporting import export
 
     out = export(model=loaded.model, out=tmp_path / "m.keras", format="keras", input_shape=(42, 42, 3),
@@ -550,8 +539,10 @@ def test_the_note_the_help_and_the_run_notes_say_what_export_does(trained):
         assert phrase in note, phrase
     help_text = " ".join(" ".join(cli.EXPORT_NOTES).split())
     for phrase in ("a depth model takes float32 images (batch, height, width, 3)", "input_size in <out>.task.json",
-                   "another size is refused", "ImageNet mean and std", "(batch, height, width, 1) relative disparity",
-                   "scale and shift"):
+                   "another size is refused in saved_model, tflite and onnx",
+                   "a keras file is the trained model itself and ignores input_shape", "ImageNet mean and std",
+                   "(batch, height, width, 1) relative disparity", "scale and shift"):
         assert phrase in help_text, phrase
     notes = " ".join(read_json(trained / "results_summary.json")["notes"])
     assert "`export` writes keras, saved_model, tflite or onnx at that size only" in notes, notes
+    assert "a keras file is the trained model itself and ignores input_shape" in notes, notes

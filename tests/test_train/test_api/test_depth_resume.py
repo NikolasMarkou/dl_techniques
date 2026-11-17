@@ -224,6 +224,17 @@ def test_the_summary_says_the_run_resumed_and_finished(chain):
     assert summary["status"] == "ok" and (chain.run / "best_model.keras").is_file()
 
 
+def test_the_bar_of_the_last_process_is_cut_from_the_epoch_zero_value_process_1_wrote(chain):
+    """Only process 1 evaluates the untrained model; the last process reads that value from the fit sidecar, never
+    from a later evaluation, and cuts the threshold from it and its own baselines."""
+    summary = json.loads((chain.run / "results_summary.json").read_text())
+    written = chain.after["p1"]["sidecar"]["initial"]["metrics"]["loss"]
+    assert summary["epoch_zero"]["val_loss"] == written
+    baselines = summary["baselines"]
+    assert summary["success_threshold"] == min(baselines["constant"], baselines["layout"],
+                                               summary["epoch_zero"]["val_loss"])
+
+
 # ---------------------------------------------------------------------
 # Not a replay, and the stream is the one of the settled count
 # ---------------------------------------------------------------------
