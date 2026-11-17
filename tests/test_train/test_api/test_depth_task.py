@@ -698,3 +698,350 @@ def test_list_tasks_and_list_models_name_the_task_and_its_three_variants():
     models = run_cli("list_models", f"task={TASK}")
     assert models.returncode == 0, models.stderr[-2000:]
     assert models.stdout.split() == ["depth_anything/vit_b", "depth_anything/vit_l", "depth_anything/vit_s"], models.stdout
+
+
+# ---------------------------------------------------------------------
+# Third part: stubbed end to end, the real weights, a constant model and the refusals
+# ---------------------------------------------------------------------
+#
+# One request (from random weights, 28 px, E2E_EPOCHS epochs of E2E_STEPS steps, CPU, the synthetic tree) runs twice:
+# through ``train_depth_estimation`` with the real vit_s, then through ``cli.main`` with a constant-output stand-in
+# installed as the family's adapter (the run renamed between the two). The stand-in changes the model, not the request,
+# so the two ``config.json`` must still be byte-equal, and the command line must exit 1 for the reason a constant model
+# misses: it scores the constant baseline. One 1-epoch run starts from the official DINOv2 weights. The refusals run
+# through ``cli.main`` and claim nothing.
+#
+# Cost. A vit_s fit is the unit of cost of this file: Keras traces its train step twice in the first fit (about 21,000
+# graph ops each), on pure-python protobuf (no C extension in this venv), with the warm-up schedule rebuilt for each of
+# the 234 per-variable learning-rate reads of the weight decay in each trace; a whole 2-epoch run took 135 s at a machine load of 4, and two took 440 s at a
+# load of 17 to 37 (measured 2026-11-17). So the file trains exactly two vit_s models, each in one module fixture.
+#
+# On the synthetic tree (a smooth depth gradient plus noise) the average layout scores about 0.33, far below the constant's
+# 1.0, so the layout term sets the bar and a 2-epoch from-scratch run misses it: the tests read the verdict, they do not
+# expect a pass.
+
+import json
+
+import keras
+
+from train.api import cli
+
+E2E_EPOCHS, E2E_STEPS, E2E_BATCH = 2, 3, 4
+E2E_DATA = {"train_split": 0.6, "n_select": 8, "n_test": 8, "layout_samples": 16, "steps_per_epoch": E2E_STEPS,
+            "workers": 0}
+#: A fit that runs more batches than this has an epoch with no length (an infinite stream and no ``steps_per_epoch``):
+#: the spy stops it, so the missing keyword is reported by the tests instead of hanging the file.
+RUNAWAY_BATCHES = 4 * E2E_EPOCHS * E2E_STEPS
+
+
+class FitSpy(keras.callbacks.Callback):
+    """Counts the batches of each epoch of one ``fit`` and stops a fit whose epoch never ends (reported, not hung)."""
+
+    def __init__(self):
+        super().__init__()
+        self.last_batch, self.total, self.epoch = {}, 0, 0
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch = epoch
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.total += 1
+        self.last_batch[self.epoch] = batch
+        if self.total > RUNAWAY_BATCHES:
+            self.model.stop_training = True
+
+
+def unscoped(path):
+    """A variable path without the model's own name (``depth_anything_5/block_0/...`` -> ``block_0/...``)."""
+    return path.partition("/")[2]
+
+
+def spying_fit(fits, snapshot_encoder=False):
+    """A replacement of ``keras.Model.fit`` recording its keywords, the optimizer it trains with and a :class:`FitSpy`."""
+    real_fit = keras.Model.fit
+
+    def fit(self, *args, **keywords):
+        spy = FitSpy()
+        fits.append({
+            "keywords": {k: keywords.get(k) for k in ("steps_per_epoch", "validation_steps")}, "spy": spy,
+            "model": self, "optimizer": self.optimizer,
+            "encoder": [(unscoped(v.path), v.numpy()) for v in self.encoder.weights] if snapshot_encoder else None,
+        })
+        return real_fit(self, *args, **{**keywords, "callbacks": [*keywords.get("callbacks", []), spy]})
+
+    return fit
+
+
+def request(root, tree, **changes):
+    asked = {"out": str(root / "run"), "model": "depth_anything/vit_s", "data": {"root": str(tree), **E2E_DATA},
+             "epochs": E2E_EPOCHS, "batch_size": E2E_BATCH, "model_args": {"pretrained": False},
+             "transform_args": {"image_size": SIZE}, "analysis_args": {"model_analysis": False, "figures": True}}
+    return {**asked, **changes}
+
+
+def cli_tokens(asked):
+    from tests.test_train.test_api.test_forecast_task import flatten_request
+
+    return [TASK, *flatten_request(asked)]
+
+
+def read_json(path):
+    return json.loads(Path(path).read_text())
+
+
+def names(path):
+    return {child.name for child in Path(path).iterdir()}
+
+
+@keras.saving.register_keras_serializable(package="test_depth_task")
+class ConstantDepthModel(keras.Model):
+    """A constant (zero) disparity map as a real, savable model: one trainable scalar times zero, so the optimizer has
+    a variable and a gradient and the output never changes. It IS the constant baseline at every epoch."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.idle = None
+
+    def build(self, input_shape):
+        self.idle = self.add_weight(name="idle", shape=(), initializer="zeros", trainable=True)
+        super().build(input_shape)
+
+    def call(self, inputs):
+        return keras.ops.zeros_like(inputs[..., :1]) + 0.0 * self.idle
+
+
+def create_constant_depth(*, variant, num_classes=None, input_shape, **model_args):
+    """The depth adapter's keywords; a :class:`ConstantDepthModel` built at ``(None, s, s, 3)``."""
+    model = ConstantDepthModel()
+    model.build((None, *input_shape))
+    return model
+
+
+@pytest.fixture(scope="module")
+def ended(world, megadepth_tree, tmp_path_factory):
+    """The request through the function (a real vit_s) and through ``cli.main`` (the constant stand-in), in this process."""
+    root = tmp_path_factory.mktemp("end_to_end")
+    asked = request(root, megadepth_tree)
+    fits = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(keras.Model, "fit", spying_fit(fits))
+        result = task_module().train_depth_estimation(**asked)
+        (root / "run").rename(root / "function")
+        patch.setattr(depth_models, "create_depth_anything", create_constant_depth)
+        code = cli.main(cli_tokens(asked))
+        (root / "run").rename(root / "cli")
+    return SimpleNamespace(root=root, asked=asked, result=result, code=code, fits=fits, function=root / "function",
+                           cli=root / "cli")
+
+
+#: The files of a finished depth run, from the code: the sequence writes the config pair, the log and the lock
+#: (``run_sequence``), the callbacks the csv, the best checkpoint, the backup, the sidecar and tensorboard
+#: (``fit_callbacks``), the reporting the history, the final model and the summary (``report_data_free_run``,
+#: ``write_summary_json``). No ``task.json``: ``task_record`` returns ``None`` until the record exists.
+RUN_FILES = {
+    "best_model.keras", "config.json", "config_requested.json", "final_model.keras", "results_summary.json",
+    "run.lock", "run.log", "training_history.json", "training_log.csv",
+}
+#: ``analysis_args.model_analysis=false`` writes no ``model_analysis/``.
+RUN_DIRS = {"checkpoints", "tensorboard", "visualizations"}
+#: The dashboard of the callbacks; the prediction grid draws every ``monitor_every_n_epochs`` epochs of the legacy
+#: config, which a 2-epoch run does not reach.
+FIGURES = {"training_dashboard.png"}
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_run_directory_holds_the_listing_the_code_writes(ended, which):
+    run_dir = getattr(ended, which)
+    assert names(run_dir) == RUN_FILES | RUN_DIRS, "an added or a missing file is a change of the contract"
+    assert names(run_dir / "checkpoints") == {"backup", "fit_state.json"}
+    assert names(run_dir / "tensorboard") == {"train", "validation"}
+    assert names(run_dir / "visualizations") == FIGURES
+    summary = read_json(run_dir / "results_summary.json")
+    assert summary["visualizations"]["files"] == sorted(FIGURES) and summary["analyzer"]["status"] == "skipped"
+
+
+def test_the_function_and_the_cli_write_the_same_config_bytes(ended):
+    for name in ("config.json", "config_requested.json"):
+        assert (ended.function / name).read_bytes() == (ended.cli / name).read_bytes(), name
+    resolved = read_json(ended.cli / "config.json")
+    assert (resolved["model"], resolved["epochs"], resolved["batch_size"]) == ("depth_anything/vit_s", E2E_EPOCHS,
+                                                                                E2E_BATCH)
+    assert resolved["transform_args"]["image_size"] == SIZE
+    assert resolved["optim_args"]["lr"] == depth_args.FROM_SCRATCH_LR and resolved["model_args"] == {"pretrained": False}
+    assert ended.result.success is read_json(ended.function / "results_summary.json")["success"]
+
+
+def test_an_epoch_is_steps_per_epoch_steps_and_fit_sees_both_lengths(ended):
+    summary = read_json(ended.function / "results_summary.json")
+    assert summary["steps_per_epoch"] == E2E_STEPS and summary["n_train"] == E2E_STEPS * E2E_BATCH
+    assert len(ended.fits) == 2, "one fit per run: the function and the command line"
+    for fit in ended.fits:
+        assert fit["keywords"] == {"steps_per_epoch": E2E_STEPS, "validation_steps": E2E_DATA["n_select"] // E2E_BATCH}
+        # Observed, not read back: each epoch ran batches 0..STEPS-1; a stream with no length would have run away.
+        assert fit["spy"].last_batch == {epoch: E2E_STEPS - 1 for epoch in range(E2E_EPOCHS)}, "an epoch has the wrong length"
+
+
+@pytest.fixture(scope="module")
+def oracle(ended, megadepth_tree, tmp_path_factory):
+    """The request's data built again (a pure function of the request) and the function run's best checkpoint."""
+    from train.common import depth_run
+
+    trainer, resolved, ctx = prepared(tmp_path_factory.mktemp("oracle") / "run", megadepth_tree,
+                                      data={"root": str(megadepth_tree), **E2E_DATA}, model_args={"pretrained": False})
+    data = trainer.build_data(resolved, ctx)
+    best = keras.saving.load_model(ended.function / "best_model.keras", compile=False)
+    return SimpleNamespace(data=data, baselines=depth_run.selection_baselines(data),
+                           held_out=depth_run.held_out_report(best, data))
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_summary_holds_the_selection_block_and_the_test_block_of_the_best_weights(ended, oracle, which):
+    run_dir = getattr(ended, which)
+    summary = read_json(run_dir / "results_summary.json")
+    wanted = {"status", "success_metric", "monitor", "task", "baselines", "epoch_zero", "success_threshold",
+              "success_value", "success", "held_out", "test_metrics_best", "scenes", "stream"}
+    assert wanted <= set(summary), f"the summary lacks {sorted(wanted - set(summary))}"
+    assert (summary["status"], summary["success_metric"], summary["monitor"], summary["task"]) == (
+        "ok", "val_loss", "val_loss", TASK)
+    # The selection block: the two baselines measured again on the same crops, the epoch-zero value of the sidecar, the
+    # threshold the minimum of the three, the value the minimum val_loss, and the verdict the strict float32 bar.
+    assert summary["baselines"] == pytest.approx(oracle.baselines, rel=1e-6)
+    assert abs(summary["baselines"]["constant"] - 1.0) < 1e-5
+    epoch_zero = read_json(run_dir / "checkpoints" / FIT_STATE_NAME)["initial"]["metrics"]["loss"]
+    assert summary["epoch_zero"]["val_loss"] == epoch_zero
+    assert summary["success_threshold"] == min(summary["baselines"]["constant"], summary["baselines"]["layout"], epoch_zero)
+    assert summary["success_threshold"] == summary["baselines"]["layout"], "on the synthetic tree the layout binds"
+    column = [float(v) for v in read_json(run_dir / "training_history.json")["val_loss"]]
+    assert len(column) == E2E_EPOCHS and summary["success_value"] == pytest.approx(min(column), rel=1e-6)
+    batches = E2E_DATA["n_select"] // E2E_BATCH
+    assert summary["success"] is forecast_run.beats_bar(summary["success_value"], summary["success_threshold"], batches)
+    # The test block: every key of the held-out report, n the test crops, the constant 1.0.
+    assert set(summary["held_out"]) == set(oracle.held_out)
+    assert summary["held_out"]["n"] == E2E_DATA["n_test"] and summary["held_out"]["constant"] == pytest.approx(1.0, abs=1e-5)
+    assert summary["test_metrics_best"]["loss"] == pytest.approx(summary["held_out"]["loss"], rel=1e-5)
+    assert summary["scenes"] == {"train": len(oracle.data.train_scenes), "select": len(oracle.data.select_scenes),
+                                 "test": len(oracle.data.test_scenes)}
+
+
+def test_the_test_block_is_the_held_out_report_of_the_best_checkpoint(ended, oracle):
+    # Scored again here from the function run's best_model.keras on the rebuilt test crops: the summary scored the BEST
+    # weights (EarlyStopping restored them before the report), not the last epoch's.
+    summary = read_json(ended.function / "results_summary.json")
+    assert summary["held_out"] == pytest.approx(oracle.held_out, rel=1e-5, nan_ok=True)
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_best_checkpoint_reloads_with_a_gap_of_exactly_zero(ended, which):
+    summary = read_json(getattr(ended, which) / "results_summary.json")
+    assert summary["best_checkpoint_load_error"] is None and summary["best_checkpoint_max_abs_diff"] == 0.0
+    assert summary["model_loading_validated"] is True
+    assert summary["test_metrics_best"] is not None and summary["test_metrics_final"] is not None
+
+
+def test_the_function_run_reports_its_verdict_and_the_cli_exits_by_it(ended):
+    function = read_json(ended.function / "results_summary.json")
+    assert ended.result.success is function["success"]
+    cli_summary = read_json(ended.cli / "results_summary.json")
+    assert ended.code == (0 if cli_summary["success"] else 1)
+
+
+def test_a_constant_output_model_exits_one_because_it_scores_the_constant_and_never_beats_the_bar(ended):
+    summary = read_json(ended.cli / "results_summary.json")
+    assert summary["status"] == "ok", "vacuity guard: the run finished and was judged"
+    constant = summary["baselines"]["constant"]
+    band = 8 * float(np.spacing(np.float32(constant)))
+    # The model is the constant baseline: its val_loss is the constant's to float32 rounding, at epoch zero and after.
+    assert abs(summary["success_value"] - constant) <= band
+    assert abs(summary["epoch_zero"]["val_loss"] - constant) <= band
+    assert summary["success_value"] >= summary["success_threshold"] and summary["success"] is False
+    assert ended.code == 1
+    assert summary["held_out"]["loss"] == pytest.approx(constant, abs=band), "the test block scores the constant too"
+
+
+# -- the official weights, one epoch: the pretrained path and the 10x head table in a real run ----------------------
+
+
+@pytest.fixture(scope="module")
+def pretrained_run(world, megadepth_tree, tmp_path_factory):
+    """One 1-epoch run from the official weights through the function; skipped where the weights file is absent.
+
+    TensorBoard, the two model files and the warm-up are off: this arm proves the start and the optimizer, and those
+    cost seconds a fit (TensorBoard writes the 21,000-op graph; the warm-up schedule builds a ``tf.cond`` for each of the
+    234 per-variable learning-rate reads of the weight decay, in each of the two traces of the step).
+    """
+    try:
+        depth_models.check_weights("vit_s", {})
+    except ConfigError as exc:
+        pytest.skip(f"the official DINOv2 vit_s weights are not on this machine: {exc}")
+    root = tmp_path_factory.mktemp("pretrained")
+    asked = request(root, megadepth_tree, epochs=1, model_args={},
+                    analysis_args={"model_analysis": False, "figures": False}, logger_args={"tensorboard": None},
+                    checkpoint_args={"save_best": False, "save_last": False}, optim_args={"warmup_epochs": 0})
+    fits = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(keras.Model, "fit", spying_fit(fits, snapshot_encoder=True))
+        result = task_module().train_depth_estimation(**asked)
+    return SimpleNamespace(result=result, fits=fits, run=root / "run")
+
+
+def test_a_pretrained_run_trains_the_official_encoder_with_the_head_at_10x(pretrained_run):
+    from dl_techniques.optimization.lr_multiplier_adamw import LRMultiplierAdamW
+    from train.depth_anything.train_depth_anything import DECODER_LR_MULTIPLIER
+
+    (fit,) = pretrained_run.fits
+    model, optimizer = fit["model"], fit["optimizer"]
+    assert isinstance(optimizer, LRMultiplierAdamW)
+    head = {v.path for v in model.decoder.trainable_variables}
+    assert optimizer.lr_multipliers == {path: DECODER_LR_MULTIPLIER for path in head} and DECODER_LR_MULTIPLIER == 10.0
+    # The encoder fit started from is the official one: the library's own strict load, built here at the same size.
+    reference = depth_models.create_depth_anything(variant="vit_s", input_shape=(SIZE, SIZE, 3))
+    official = [(unscoped(v.path), v.numpy()) for v in reference.encoder.weights]
+    assert [path for path, _ in fit["encoder"]] == [path for path, _ in official] and len(official) > 100
+    for (path, started), (_, value) in zip(fit["encoder"], official):
+        np.testing.assert_array_equal(started, value, err_msg=path)
+    resolved = read_json(pretrained_run.run / "config.json")
+    # The request asked nothing of the model; the recipe's start is what the run was built with (`used`).
+    assert resolved["model_args"] == {} and resolved["used"]["model_args"] == {"pretrained": True}
+    assert resolved["optim_args"]["lr"] == depth_models.PRETRAINED_LR == 5e-6
+    summary = read_json(pretrained_run.run / "results_summary.json")
+    assert summary["status"] == "ok" and summary["epochs_run"] == 1
+    assert pretrained_run.result.success is summary["success"]
+    assert fit["spy"].last_batch == {0: E2E_STEPS - 1}
+
+
+# -- the refusals: exit 2 through the command line and no run directory ---------------------------------------------
+
+
+REFUSALS = {
+    "missing_weights": ({"model_args": {}}, (WEIGHTS_ENV, "dinov2-small")),
+    "size_not_a_multiple_of_14": ({"transform_args": {"image_size": 30}}, ("'transform_args.image_size'", "14")),
+    "mixed_precision": ({"precision": "mixed_float16"}, ("'precision'", "float32")),
+    "placeholder_encoder": ({"model_args": {"pretrained": False, "encoder_kind": "placeholder"}},
+                            ("'model_args.encoder_kind'",)),
+    "feature_alignment": ({"model_args": {"pretrained": False, "use_feature_alignment": True}},
+                          ("'model_args.use_feature_alignment'",)),
+    "semi_supervised_key": ({"model_args": {"pretrained": False, "enable_semi_supervised": True}},
+                            ("'model_args.enable_semi_supervised'", "semi-supervised")),
+    "conformal": ({"analysis_args": {"conformal_alpha": 0.1}}, ("'analysis_args.conformal_alpha'", "disparity")),
+    "sgd_on_a_pretrained_start": (
+        {"model_args": {}, "optim_args": {"optimizer": "sgd", "lr": 0.01, "weight_decay": None}},
+        ("'optim_args.optimizer'", "adamw")),
+    "fewer_than_3_validation_scenes": ({"data": {**E2E_DATA, "train_split": 0.8}}, ("at least 3",)),
+}
+
+
+@pytest.mark.parametrize("case", list(REFUSALS))
+def test_a_refused_request_exits_two_and_claims_no_run_directory(world, megadepth_tree, tmp_path, monkeypatch, capsys,
+                                                                 case):
+    changes, fragments = REFUSALS[case]
+    if case == "missing_weights":
+        monkeypatch.setenv(WEIGHTS_ENV, str(tmp_path / "no_weights"))
+    if "data" in changes:
+        changes = {**changes, "data": {"root": str(megadepth_tree), **changes["data"]}}
+    asked = request(tmp_path, megadepth_tree, **changes)
+    code = cli.main(cli_tokens(asked))
+    error = capsys.readouterr().err
+    assert code == 2, error[-2000:]
+    assert not (tmp_path / "run").exists(), "a refusal claims no run directory"
+    for fragment in fragments:
+        assert fragment in error, (case, fragment, error[-2000:])

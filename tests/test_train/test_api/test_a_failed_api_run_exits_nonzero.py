@@ -226,11 +226,13 @@ def install_forecast_failure(kind: str, keras_module, classification_run, patch)
         raise AssertionError(kind)
 
 
-def forecast_driver() -> str:
-    """The child's program: the failure ``install_forecast_failure`` installs, then ``train.__main__`` (the real task and ``sys.exit``)."""
+def forecast_driver(setup: Sequence[str] = ()) -> str:
+    """The child's program: the ``setup`` lines, the failure ``install_forecast_failure`` installs, then ``train.__main__``
+    (the real task and ``sys.exit``)."""
     return "\n".join([
         "import os", "import runpy", "import sys", f"sys.path.insert(0, {str(REPO_ROOT)!r})", "import keras",
-        "import train.common.classification_run as classification_run", f"FORECAST_MESSAGE = {FORECAST_MESSAGE!r}", "",
+        "import train.common.classification_run as classification_run", f"FORECAST_MESSAGE = {FORECAST_MESSAGE!r}",
+        *setup, "",
         inspect.getsource(install_forecast_failure),
         'install_forecast_failure(os.environ["FORECAST_FAILURE"], keras, classification_run, None)',
         'runpy.run_module("train", run_name="__main__")',
@@ -320,4 +322,117 @@ def test_the_stubbed_forecasting_failure_reaches_the_caller_of_the_cli_main(fore
     tokens = [token for token in FORECAST_TOKENS]
     with pytest.raises((RuntimeError, OSError), match=FORECAST_MESSAGE):
         cli.main(["time_series_forecasting", f"out={out}", *tokens])
+    assert (out / "config.json").is_file()
+
+
+# ---------------------------------------------------------------------
+# The depth task: the same five failures, stubbed where the real code reaches them
+# ---------------------------------------------------------------------
+#
+# The same stubs as forecasting (``install_forecast_failure``) in a depth run on the synthetic MegaDepth tree. The model is
+# ``test_depth_task.create_constant_depth``, a savable constant-output stand-in installed as the family's adapter: what fails
+# here is the sequence and the depth task's own reporting (the second ``evaluate_dict`` is the test crops' score in
+# ``evaluate_and_report``, the first the untrained model's in ``initial_loss_check``), and a vit_s would add a graph trace of
+# about 40 s on the CPU to every one of the fifteen runs.
+
+DEPTH_STAND_IN = (
+    "import train.api.depth_models as depth_models",
+    "from tests.test_train.test_api.test_depth_task import create_constant_depth",
+    "depth_models.create_depth_anything = create_constant_depth",
+)
+
+
+def depth_tokens(out: Path, tree: Path) -> list:
+    return [
+        "depth_estimation", f"out={out}", "model=depth_anything/vit_s", f"data.root={tree}", "data.train_split=0.6",
+        "data.n_select=8", "data.n_test=8", "data.layout_samples=16", "data.steps_per_epoch=3", "data.workers=0",
+        "transform_args.image_size=28", "epochs=1", "batch_size=4", 'model_args={"pretrained":false}',
+        "analysis_args.model_analysis=false", "analysis_args.figures=false",
+    ]
+
+
+@pytest.fixture(scope="module")
+def depth_tree(tmp_path_factory):
+    from tests.test_train.test_common_depth_data import write_megadepth_tree
+
+    return write_megadepth_tree(tmp_path_factory.mktemp("depth_failing_tree"))
+
+
+@pytest.fixture(scope="module", params=FORECAST_KINDS)
+def depth_child(request, depth_tree, tmp_path_factory):
+    base = tmp_path_factory.mktemp("depth_failing_" + request.param)
+    (base / "cwd").mkdir()
+    out = base / "run"
+    env = {**os.environ, "FORECAST_FAILURE": request.param, "MPLBACKEND": "Agg"}
+    result = subprocess.run(
+        [sys.executable, "-c", forecast_driver(DEPTH_STAND_IN), *depth_tokens(out, depth_tree)],
+        cwd=base / "cwd", capture_output=True, text=True, timeout=900, env=env,
+    )
+    return request.param, result, out
+
+
+def test_a_failed_depth_run_exits_non_zero_and_not_with_the_configuration_code(depth_child):
+    kind, result, _ = depth_child
+    assert result.returncode != 0, (kind, result.stdout[-1000:])
+    assert result.returncode != 2, (kind, result.stderr[-3000:])
+
+
+def test_the_depth_traceback_names_the_stubbed_failure(depth_child):
+    kind, result, _ = depth_child
+    assert "Traceback" in result.stderr and FORECAST_MESSAGE in result.stderr, (kind, result.stderr[-3000:])
+    assert not [line for line in result.stderr.splitlines() if line.startswith("error:")]
+
+
+def test_the_depth_files_are_the_ones_written_before_the_failure_and_no_summary_claims_success(depth_child):
+    kind, _, out = depth_child
+    assert (out / "config.json").is_file()
+    # What exists is what the code reached, the order of forecasting: fit and the best save fail inside `fit`; a final save
+    # that fails leaves the best; the history is written after both models; the test crops are scored before the final save.
+    expected = {
+        "fit": (False, False), "best_save": (False, False), "final_save": (True, False),
+        "history_write": (True, True), "evaluation": (True, False),
+    }[kind]
+    assert ((out / "best_model.keras").exists(), (out / "final_model.keras").exists()) == expected, kind
+    assert not (out / "training_history.json").exists() or kind != "fit"
+    summary = out / "results_summary.json"
+    if summary.exists():
+        assert json.loads(summary.read_text()).get("success") is not True
+
+
+@pytest.fixture
+def depth_world(monkeypatch):
+    from tests.test_train.test_api.test_depth_task import create_constant_depth
+    import train.api.depth_models as depth_models
+
+    monkeypatch.setattr(registry, "MODELS", {})
+    monkeypatch.setattr(registry, "TASKS", {})
+    recipes.register_builtin_models()
+    register_builtin_tasks()
+    monkeypatch.setattr(depth_models, "create_depth_anything", create_constant_depth)
+
+
+@pytest.mark.parametrize("kind", FORECAST_KINDS)
+def test_the_stubbed_depth_failure_reaches_the_caller_of_the_function(depth_world, depth_tree, monkeypatch, tmp_path, kind):
+    import train.common.classification_run as classification_run
+    from train.api.tasks.depth_estimation import train_depth_estimation
+
+    install_forecast_failure(kind, keras, classification_run, monkeypatch)
+    out = tmp_path / "run"
+    with pytest.raises((RuntimeError, OSError), match=FORECAST_MESSAGE):
+        train_depth_estimation(
+            out=str(out), model="depth_anything/vit_s", epochs=1, batch_size=4, model_args={"pretrained": False},
+            data={"root": str(depth_tree), "train_split": 0.6, "n_select": 8, "n_test": 8, "layout_samples": 16,
+                  "steps_per_epoch": 3, "workers": 0},
+            transform_args={"image_size": 28}, analysis_args={"model_analysis": False, "figures": False})
+    assert (out / "config.json").is_file()
+
+
+@pytest.mark.parametrize("kind", FORECAST_KINDS)
+def test_the_stubbed_depth_failure_reaches_the_caller_of_the_cli_main(depth_world, depth_tree, monkeypatch, tmp_path, kind):
+    import train.common.classification_run as classification_run
+
+    install_forecast_failure(kind, keras, classification_run, monkeypatch)
+    out = tmp_path / "run"
+    with pytest.raises((RuntimeError, OSError), match=FORECAST_MESSAGE):
+        cli.main(depth_tokens(out, depth_tree))
     assert (out / "config.json").is_file()
