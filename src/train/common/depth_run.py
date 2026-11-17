@@ -31,7 +31,8 @@ Interface contract
     each a mean over the test crops with its ``*_sem`` (sample standard deviation over the square root of the
     count); ``pearson_n`` and ``layout_pearson_n`` (crops with a finite coefficient); ``constant``.
 ``prediction_grid(data, vis_dir) -> DepthPredictionGridCallback``
-    The per-epoch figure: rgb, target and aligned prediction of the first :data:`GRID_CROPS` selection crops, every
+    The per-epoch figure: rgb, target and aligned prediction of :data:`GRID_CROPS` selection crops spread evenly over
+    the set (crop ``i * n_select // GRID_CROPS``), every
     ``monitor_every_n_epochs`` epochs of the legacy trainer's config, written under ``vis_dir``; row 1 shows the
     crops un-standardized (the inverse of ``standardize_imagenet``).
 
@@ -147,13 +148,15 @@ def held_out_report(model: "keras.Model", data: Any) -> Dict[str, Any]:
 
 
 def prediction_grid(data: Any, vis_dir: Any) -> Any:
-    """The per-epoch prediction grid of the first selection crops; see the module contract."""
+    """The per-epoch prediction grid of selection crops spread over the set; see the module contract."""
     from dl_techniques.callbacks.depth_visualization import DepthPredictionGridCallback
     from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
     from train.depth_anything.train_depth_anything import DepthAnythingTrainingConfig
 
     n = min(GRID_CROPS, int(data.n_select))
-    x, y = data.x_select[:n], data.y_select[:n]
+    # The crops are in scene order (about 13 a scene at the defaults): crop i * n_select // n, not n of one scene.
+    picked = np.arange(n) * int(data.n_select) // n
+    x, y = data.x_select[picked], data.y_select[picked]
     # Row 1 is drawn in the [-1, 1] convention; the crops are ImageNet-standardized, so the inverse of
     # `standardize_imagenet` gives the picture back.
     display = (x * np.asarray(IMAGENET_STD, np.float32) + np.asarray(IMAGENET_MEAN, np.float32)) * 2.0 - 1.0

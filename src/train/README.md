@@ -1174,8 +1174,9 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   streamed run waits on the disk for much of each step, so the gap shrinks there. `precision` must be `float32`, refused by name before
   the claim (the masked median of the loss was never measured in a mixed precision). `analysis_args.conformal_alpha` is refused (a
   conformal set is a set of classes). `debug_args.smoke` runs one epoch on at most 512 train files and applies no bar. The run
-  directory is the shared one plus `task.json` and, every 5 epochs, `visualizations/epoch_NNN_depth.png` (the first 8 selection crops:
-  image, target and the prediction after its per-crop scale and shift).
+  directory is the shared one plus `task.json` and, every 5 epochs, `visualizations/epoch_NNN_depth.png` (8 selection crops spread evenly
+  over the set, crop `i * n_select // 8`, which at the defaults are 8 of the 10 selection scenes: image, target and the prediction
+  after its per-crop scale and shift).
 * **The scenes, and why the selection numbers are not held out.** `train.common.megadepth.split_megadepth_scenes` deals the 195 scenes
   of MegaDepth by the legacy rule, 176 train and 19 validation scenes at `data.train_split` 0.9, no scene on both sides. The validation
   scenes, sorted by name, are dealt alternately into 10 selection scenes and 9 test scenes (`depth_data.deal_megadepth_scenes`; fewer
@@ -1194,9 +1195,9 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   unused file whose crop qualifies, so a group is refused (when the data is built, naming the count) only when fewer of its pool
   files qualify than the crops asked for. The crops are read once into read-only arrays (465 MiB; two builds gave equal sha256), and
   never depend on the stream seed. Train sample `counter` draws its file, crop and flip from a generator keyed on
-  `(stream seed, train salt, counter)`, trying up to 64 files: with 18 to 21 percent of draws giving no crop (measured on the train
-  list, 1.22 to 1.27 files per sample) a sample fails with odds of at most 0.21^64, about 4e-44, and a list in which no file
-  qualifies raises an error naming the counter and the stream seed. Train batch `i` is samples `i * batch` to `i * batch + batch - 1`: an infinite `PyDataset` read by `data.workers`
+  `(stream seed, train salt, counter)`, trying up to 64 files: measured on the train list at 1.218 to 1.272 files per sample, the
+  share of draws giving no crop is at most p = 1 - 1/1.272 = 0.214, so a sample fails with odds of at most 0.214^64, about 1.3e-43,
+  and a list in which no file qualifies raises an error naming the counter and the stream seed. Train batch `i` is samples `i * batch` to `i * batch + batch - 1`: an infinite `PyDataset` read by `data.workers`
   processes, so a batch is a function of its key and not of the process that read it. The layout is the mask-weighted per-pixel mean
   of `data.layout_samples` train targets (46 s to build). Every RGB input is ImageNet-standardized, the input the official DINOv2 was
   trained on.
@@ -1235,8 +1236,11 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   `int.from_bytes(sha256(f"{seed}:{completed_steps}")[:4], "big")` (`derive_stream_seed`, the pretrain task's function), with
   `completed_steps` the steps the backup holds. Only the stream seed moves: the scenes, the selection and test crops and the layout
   keep `seed`, so no selection or test scene reaches the train stream and the bar stays comparable across a kill. The cost: a resumed
-  run is not the unkilled run's continuation, and a killed epoch is trained again from its first batch unless
-  `checkpoint_args.backup_every_steps` bounds the loss. The summary's `stream` block records `seed`, `stream_seed` and the rule.
+  run is not the unkilled run's continuation, and a killed epoch is trained again from its first batch. A resume of this task uses
+  the backup taken at each epoch end only: `checkpoint_args.backup_every_steps` is refused by name before the run directory is
+  claimed, because a resume from a backup taken inside an epoch ends that epoch early, and Keras 3.8 then fails the next epoch when
+  the train data is a `keras.utils.PyDataset`, as this task's stream is (`on_epoch_begin was called twice`; the other tasks train on
+  `tf.data`, which takes the same early end). The summary's `stream` block records `seed`, `stream_seed` and the rule.
 * **`predict`.** `python -m train predict model=<run dir or .keras> data=<image or directory> out=<new directory>` writes one
   `<stem>.npy` per image, the float32 relative-disparity map at the image's own size, and, LAST, `index.json`. Each image is resized
   bilinearly to the trained size in `task.json` and standardized as in training, and the map is resized back bilinearly. The trained
@@ -1271,7 +1275,8 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   (`build_depth_loss`, `build_depth_metrics`) and the head table (`decoder_lr_multipliers`) are imported from the legacy trainer, and
   the ImageNet standardization and the scene deal from `train.common.megadepth`, which both trainers use.
 * **Limits of the task.** One dataset (MegaDepth, read in place) and one family; no metric depth; one size per model (`predict`
-  resizes, `export` refuses another size); `float32` only; the model analysis is data-free (weights and spectral only, since the stock
+  resizes, `export` refuses another size in `saved_model`, `tflite` and `onnx`, and a `keras` file is the trained model and ignores
+  `input_shape`); `float32` only; the model analysis is data-free (weights and spectral only, since the stock
   analyses read class probabilities); `init_scale_warning` is not judged (a random head on the pretrained encoder starts at 1.55 times
   the constant baseline and then trains). Only `vit_s` was trained; `vit_b` and `vit_l` were built and stepped, and carry no claim. The
   selection and test sets are 10 and 9 scenes of one dataset, so a held-out number says the model learned depth on MegaDepth scenes it
@@ -1362,7 +1367,7 @@ docstring lists what is unchecked.
 | `analysis_args.epoch_analysis_every` | `0` | `N > 0` runs the data-free epoch analyzer (weights and spectral only) before training into `epoch_analysis/epoch_000/` (the untrained model), after epoch 1 into `epoch_001/`, then at epochs N, 2N, ... into `epoch_NNN/`. `0` is off. A failure on a built model stops the fit, so no snapshot is silently missing. A resumed run does not redo `epoch_000` and `epoch_001` |
 | `analysis_args.conformal_alpha` | `null` | A level strictly between 0 and 1 (0.1 aims at 90% coverage) writes `conformal.json` and `conformal_model.keras` (outputs logits, probabilities and set membership), calibrated on the test split. `null` skips it and the summary's `conformal` is null. A level with no test split is skipped with a note |
 | `analysis_args.eval_batch_size` | `"auto"` | Images per pass of the predictions made after training: the figures' predictions (every dataset, folder and csv included), the model analyzer's predictions (it caps its own 32 at this value when this is lower; its information-flow pass sizes its own batch from the analyzer's memory budget and does not read it) and the final-model load check (the same cap), and the validation and test splits of the in-memory datasets (CIFAR, MNIST). The validation and test splits of ImageNet, Imagenette, folder and csv data are batched at `batch_size` and ignore it. `auto` is the recipe's value, and 256 where the recipe says nothing, so a default run evaluates exactly as before. The cliffordnet recipes on ImageNet and Imagenette set the batch they train at (8 for `cliffordnet`, 16 for `cliffordnet_hier`), because 256 images of 224 px ask 18 GB. Those recipe values are keyed to the dataset: folder and csv data take 256 whatever the family or the image size (a run on files of 224 px or more with a family whose ImageNet recipe sets a batch logs a warning naming `batch_size` and this key). It changes no weight, and it may differ when a run is resumed |
-| `checkpoint_args.backup_every_steps` | `null` | `N >= 2` (and below the steps of an epoch) also writes the resume backup after every N-th batch inside an epoch, so a kill loses at most N batches of training; `null` backs up at each epoch end only. A resume continues the killed epoch on the weights of the last copy and runs only the batches that copy had not taken, from a fresh pass of the data (some examples of that epoch repeat and some are missed); the optimizer's step count and the learning rate of every step are the unkilled run's, and that epoch's row holds the train metrics of its remaining batches only. Each copy writes the weights and optimizer state twice (the previous copy is kept); the cost per save is in the backup table of the ImageNet section |
+| `checkpoint_args.backup_every_steps` | `null` | `N >= 2` (and below the steps of an epoch) also writes the resume backup after every N-th batch inside an epoch, so a kill loses at most N batches of training; `null` backs up at each epoch end only. A resume continues the killed epoch on the weights of the last copy and runs only the batches that copy had not taken, from a fresh pass of the data (some examples of that epoch repeat and some are missed); the optimizer's step count and the learning rate of every step are the unkilled run's, and that epoch's row holds the train metrics of its remaining batches only. Each copy writes the weights and optimizer state twice (the previous copy is kept); the cost per save is in the backup table of the ImageNet section. Refused for `depth_estimation` (its section says why) |
 | `logger_args.tensorboard` | `{}` | `{}` writes TensorBoard event files into `tensorboard/` (`train/` and `validation/`); `null` turns them off; a dict with keys is refused, because no TensorBoard option is wired |
 
 Measured cost, one run each, so a difference of a few seconds is inside the noise. Setup: `vit/vit_pico` on 240 fake

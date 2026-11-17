@@ -790,7 +790,10 @@ classification task calls the same `train.common.classification_run` helpers as 
   `steps_per_epoch` and `validation_steps`; a train draw tries up to `MAX_TRAIN_TRIES` (64) files from one generator, and a
   fixed-crop slot whose forward scan has run out takes the lowest unused qualifying pool file; the bar is `min(constant, layout, epoch-zero)` on the selection crops, the epoch-zero
   term read from the fit sidecar, met through `forecast_run.beats_bar`; the weights check and the optimizer refusal run in
-  `DepthEstimationTrainer.check_model_args`, before the claim; `compile_options` returns `jit_compile` false explicitly; `run_analysis` is the data-free
+  `DepthEstimationTrainer.check_model_args`, before the claim; `checkpoint_args.backup_every_steps` is refused in
+  `DepthEstimationConfig.problems`, because a resume from a mid-epoch copy ends that epoch early and Keras 3.8 then raises at the
+  next epoch of a `PyDataset` (lift it only when `test_keras_fails_the_epoch_after_a_cut_epoch_of_a_pydataset_*` fails, never by
+  changing the shared `FinishKilledEpoch`); `compile_options` returns `jit_compile` false explicitly; `run_analysis` is the data-free
   analysis. The record is the fifth kind: a `DEPTH` row in every table of `TASK_TABLES`, in `PREDICT_WRITERS` and in `DATA_LISTERS`,
   and `export` refuses any traced shape but the record's (`depth_predictor.check_export`), because the converters write a file of
   the wrong size without an error; a `keras` file traces nothing, is the trained model and ignores `input_shape`. The user-facing description, with the measured numbers, is in [`README.md`](README.md). Tests:

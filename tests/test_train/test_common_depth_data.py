@@ -499,10 +499,18 @@ def test_a_list_where_three_files_in_five_give_no_crop_still_yields_every_sample
     assert max(tries) > 8, f"no sample needed more than 8 tries ({max(tries)}): the test has no power"
 
 
+#: The most files per train sample measured on the MegaDepth train list at 252 px (Step 1(c) of the plan).
+MEASURED_FILES_PER_SAMPLE = 1.272
+
+
 def test_the_readme_states_the_try_bound_of_the_code():
     readme = Path(depth_data.__file__).resolve().parents[1] / "README.md"
     text = " ".join(readme.read_text().split())
     assert f"trying up to {MAX_TRAIN_TRIES} files" in text
+    p = 1.0 - 1.0 / MEASURED_FILES_PER_SAMPLE
+    assert f"{MEASURED_FILES_PER_SAMPLE} files per sample" in text
+    assert f"p = 1 - 1/{MEASURED_FILES_PER_SAMPLE} = {p:.3f}" in text
+    assert f"at most {p:.3f}^{MAX_TRAIN_TRIES}, about {p ** MAX_TRAIN_TRIES:.1e}" in text
 
 
 def test_a_horizontal_flip_is_the_only_augmentation(data):

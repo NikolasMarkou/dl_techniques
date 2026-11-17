@@ -610,6 +610,24 @@ def test_the_figure_is_the_prediction_grid_of_eight_selection_crops(built, tmp_p
     np.testing.assert_allclose(standardize_imagenet(np.asarray(grid.display_rgb)), built.data.x_select[:n], atol=1e-5)
 
 
+@pytest.mark.parametrize("total, picked", [
+    (12, [0, 1, 3, 4, 6, 7, 9, 10]),
+    (32, [0, 4, 8, 12, 16, 20, 24, 28]),
+    (128, [0, 16, 32, 48, 64, 80, 96, 112]),
+])
+def test_the_grid_crops_are_spread_evenly_over_the_selection_set(tmp_path, total, picked):
+    """The selection crops are in scene order (about 13 per scene at the defaults), so the first 8 would all be one
+    scene; crop ``i * total // 8`` is taken instead, deterministic and in order."""
+    from train.common import depth_run
+
+    x = np.broadcast_to(np.arange(total, dtype=np.float32)[:, None, None, None], (total, SIZE, SIZE, 3)).copy()
+    y = np.concatenate([x[..., :1] + 0.5, np.ones_like(x[..., :1])], axis=-1)
+    grid = depth_run.prediction_grid(SimpleNamespace(n_select=total, x_select=x, y_select=y), tmp_path)
+    assert np.asarray(grid.val_rgb)[:, 0, 0, 0].tolist() == picked
+    assert np.asarray(grid.val_depth)[:, 0, 0, 0].tolist() == [i + 0.5 for i in picked]
+    assert np.asarray(grid.val_mask).min() == 1.0
+
+
 def test_the_data_holds_no_classes(built):
     from train.api.data_args import DataFacts
 
@@ -1027,6 +1045,8 @@ REFUSALS = {
         {"model_args": {}, "optim_args": {"optimizer": "sgd", "lr": 0.01, "weight_decay": None}},
         ("'optim_args.optimizer'", "adamw")),
     "fewer_than_3_validation_scenes": ({"data": {**E2E_DATA, "train_split": 0.8}}, ("at least 3",)),
+    "backup_inside_an_epoch": ({"checkpoint_args": {"backup_every_steps": 2}},
+                               ("'checkpoint_args.backup_every_steps'", "PyDataset", "epoch end")),
 }
 
 
@@ -1045,3 +1065,104 @@ def test_a_refused_request_exits_two_and_claims_no_run_directory(world, megadept
     assert not (tmp_path / "run").exists(), "a refusal claims no run directory"
     for fragment in fragments:
         assert fragment in error, (case, fragment, error[-2000:])
+
+
+def test_a_backup_inside_an_epoch_is_refused_by_the_function_before_the_claim(world, megadepth_tree, tmp_path):
+    asked = request(tmp_path, megadepth_tree, checkpoint_args={"backup_every_steps": 2})
+    with pytest.raises(ConfigValidationError, match=r"'checkpoint_args\.backup_every_steps'.*PyDataset"):
+        task_module().train_depth_estimation(**asked)
+    assert not (tmp_path / "run").exists(), "a refusal claims no run directory"
+
+
+# -- why a backup inside an epoch is refused: Keras 3.8 cannot cut an epoch of a PyDataset ------------------------
+
+
+class _Killed(Exception):
+    """The in-process stand-in for the SIGKILL of the first process."""
+
+
+class _KillInsideEpochOne(keras.callbacks.Callback):
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch = epoch
+
+    def on_train_batch_end(self, batch, logs=None):
+        if self.epoch == 1 and batch == 3:
+            raise _Killed()
+
+
+class _BatchesPerEpoch(keras.callbacks.Callback):
+    def __init__(self):
+        super().__init__()
+        self.counts, self.ran = {}, 0
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.ran = 0
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.ran += 1
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.counts[epoch] = self.ran
+
+
+class _InfiniteBatches(keras.utils.PyDataset):
+    """An infinite PyDataset read in this process, the shape of the depth train stream with ``data.workers=0``."""
+
+    def __init__(self):
+        super().__init__(workers=1, use_multiprocessing=False, max_queue_size=4)
+
+    @property
+    def num_batches(self):
+        return None
+
+    def __getitem__(self, index):
+        rng = np.random.default_rng(int(index))
+        return rng.normal(size=(4, 3)).astype("float32"), rng.normal(size=(4, 1)).astype("float32")
+
+
+def _repeated_dataset():
+    import tensorflow as tf
+
+    rng = np.random.default_rng(0)
+    return tf.data.Dataset.from_tensor_slices((rng.normal(size=(24, 3)).astype("float32"),
+                                               rng.normal(size=(24, 1)).astype("float32"))).batch(4).repeat()
+
+
+def _kill_inside_an_epoch_and_resume(backup_dir, make_data):
+    """Process 1 backs up every 2 of 6 batches and is killed after batch 4 of epoch 1; process 2 resumes from that
+    copy with the shared callbacks in the order the sequence uses (``finish`` first, the backup last)."""
+    from train.common.resume_state import StepBackupAndRestore
+
+    def fit(callbacks):
+        model = keras.Sequential([keras.Input((3,)), keras.layers.Dense(1)])
+        model.compile(keras.optimizers.SGD(0.01), "mse", jit_compile=False)
+        model.fit(make_data(), epochs=3, steps_per_epoch=6, verbose=0, callbacks=callbacks)
+
+    backup = StepBackupAndRestore(backup_dir, save_every_steps=2, steps_per_epoch=6)
+    with pytest.raises(_Killed):
+        fit([backup.finish, backup, _KillInsideEpochOne()])
+    backup, counted = StepBackupAndRestore(backup_dir, save_every_steps=2, steps_per_epoch=6), _BatchesPerEpoch()
+    try:
+        fit([backup.finish, counted, backup])
+    finally:
+        assert backup.resumed_inside == (1, 4), backup.resumed_inside
+    return counted.counts
+
+
+def test_keras_fails_the_epoch_after_a_cut_epoch_of_a_pydataset_which_is_why_the_backup_inside_an_epoch_is_refused(
+        tmp_path):
+    """Pins the Keras behaviour the refusal of ``checkpoint_args.backup_every_steps`` for this task rests on.
+
+    A resume from a backup taken inside an epoch ends that epoch early (``FinishKilledEpoch`` sets ``stop_training``
+    after the batches the copy had not taken). Keras 3.8's fit loop then leaves the epoch with ``break``, so the
+    ``PyDataset`` adapter's ``on_epoch_end`` never runs and the next epoch raises. A ``tf.data`` stream, the train data
+    of the other tasks, takes the same cut and goes on. The depth train stream is a ``PyDataset``. When this test
+    fails (Keras or the shared callback changed so the cut epoch of a ``PyDataset`` is followed by a whole one), the
+    refusal in ``DepthEstimationConfig.problems`` can be lifted, with its refusal tests and the README sentence.
+    """
+    from train.common.depth_data import DepthStream
+
+    assert issubclass(DepthStream, keras.utils.PyDataset)
+    assert _kill_inside_an_epoch_and_resume(tmp_path / "tf_data", _repeated_dataset) == {1: 2, 2: 6}
+    with pytest.raises(ValueError, match="on_epoch_begin` was called twice without `on_epoch_end"):
+        _kill_inside_an_epoch_and_resume(tmp_path / "py_dataset", _InfiniteBatches)

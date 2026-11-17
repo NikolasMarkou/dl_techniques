@@ -11,8 +11,8 @@ Interface contract
 ``DepthEstimationConfig``
     Frozen :class:`~train.api.config.StrictConfig`; one field per keyword of the function. ``out``, ``model`` and ``data``
     are required. ``data`` is :class:`~train.api.depth_args.DepthData`; ``optim_args``, ``transform_args`` and
-    ``metric_args`` are the depth groups of :mod:`train.api.depth_args`. ``precision`` other than ``float32`` and
-    ``analysis_args.conformal_alpha`` are refused by name.
+    ``metric_args`` are the depth groups of :mod:`train.api.depth_args`. ``precision`` other than ``float32``,
+    ``analysis_args.conformal_alpha`` and ``checkpoint_args.backup_every_steps`` are refused by name.
 
 ``DepthEstimationTrainer(config)``
     :class:`~train.api.trainer.TaskTrainer` with ``task = "depth_estimation"`` and ``success_metric = "val_loss"``.
@@ -167,12 +167,22 @@ class DepthEstimationConfig(StrictConfig):
     debug_args: DebugArgs = dataclasses.field(default_factory=DebugArgs)
 
     def problems(self, prefix: str) -> List[str]:
-        """Name the top-level fields out of range, a conformal level and a precision other than float32."""
+        """Name the fields out of range, a conformal level, a precision other than float32 and a mid-epoch backup."""
         lines = config_problems(self, prefix, no_conformal_for=TASK, because=_CONFORMAL)
         if self.precision != "float32":
             lines.append(
                 f"Invalid value for {join_path(prefix, 'precision')!r}: expected float32 for {TASK} (the masked median "
                 f"of the affine-invariant loss was never measured in a mixed precision), got {self.precision!r}"
+            )
+        # DECISION plan-2026-11-17T110935-9c7b9096/D-031: a mid-epoch resume cuts an epoch of the PyDataset stream and
+        # Keras 3.8 raises at the next one. Do NOT lift this while the Keras pin in test_depth_task.py (test_keras_fails_*)
+        # passes; do NOT change the shared FinishKilledEpoch for it (five tf.data tasks rely on it).
+        if self.checkpoint_args.backup_every_steps is not None:
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'checkpoint_args.backup_every_steps')!r}: expected null for "
+                f"{TASK}, got {self.checkpoint_args.backup_every_steps!r}. A resume from a backup taken inside an epoch "
+                "ends that epoch early, and Keras then fails the next epoch of this task's train stream (a "
+                "keras.utils.PyDataset); a resume of this task uses the backup taken at each epoch end"
             )
         return lines
 
