@@ -20,6 +20,9 @@ Interface contract
         ``{"optim_args": {"lr": 3e-4, ...}, "metric_args": {...}, ...}``, one
         entry per group, keyed by the group's field name in the task config.
         Keys a recipe does not carry are simply absent.
+    :param epochs: the epochs the run will train, ``None`` when nothing says.
+    :param model_args: the request's ``model_args`` (the recipe's are not laid under them), for a group whose
+        ``"auto"`` follows a model argument; empty when nothing says.
 
 ``<Group>.resolve_auto(context)``
     :param context: an :class:`AutoContext`.
@@ -100,6 +103,12 @@ class AutoContext:
     #: group whose ``"auto"`` depends on the length of the run (a denoiser's curriculum and warmup);
     #: ``None`` when nothing says, which no earlier task's group reads.
     epochs: Optional[int] = None
+    # DECISION plan-2026-11-17T110935-9c7b9096/D-022
+    # The request's model_args, for the one group whose "auto" follows a model argument (the depth task's learning
+    # rate follows model_args.pretrained: 5e-6 from the official encoder, 2e-4 from scratch). Default EMPTY and read
+    # by no earlier task's group, so their resolution is unchanged. Do NOT lay the recipe's model_args in here (the
+    # group reads context.defaults for those) and do NOT read it in a shared group's resolve_auto.
+    model_args: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
 
 def _is_auto(value: Any) -> bool:

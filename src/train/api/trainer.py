@@ -949,6 +949,10 @@ class TaskTrainer:
             image_size=facts.image_size,
             defaults=recipe,
             epochs=epochs,
+            # DECISION plan-2026-11-17T110935-9c7b9096/D-022: the request's model_args, read only by a group whose
+            # auto follows a model argument (the depth task's lr). Do NOT pass the merged factory keywords here:
+            # the resolver that merges them runs after the groups.
+            model_args=dict(config.model_args or {}),
         )
         changes: Dict[str, Any] = {}
         for field in dataclasses.fields(config):
