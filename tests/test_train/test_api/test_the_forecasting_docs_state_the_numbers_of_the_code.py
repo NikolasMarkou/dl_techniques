@@ -200,6 +200,15 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert f"outside [{span}]" in text and "the range this task trains and serves in, and no longer a float32 limit" in text
 
 
+def test_the_readme_states_what_a_blank_line_does_in_a_csv():
+    """Review pass 4 NOTE 7 and pass 5 NOTE 1 and NOTE 2: a blank line inside the series is refused with its row, one before the header or
+    after the last row shifts nothing and is ignored, and a text cell is refused with its row and the cell as written."""
+    text = " ".join(README.read_text().split())
+    assert "a blank line INSIDE the series is a missing cell refused with its row" in text
+    assert "blank lines before the header and after the last row shift nothing and are ignored" in text
+    assert "a text cell, a whitespace-only line included, is refused with its row and the cell as written" in text
+
+
 def test_the_readme_gate_section_names_the_code_head_it_ran_on_and_says_the_first_gate_is_superseded():
     """The final gate (plan 3a8319ef, Step 21) ran on one code HEAD; the README is a docs-only commit after it, and says so."""
     text = " ".join(README.read_text().split())

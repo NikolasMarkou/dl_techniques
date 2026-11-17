@@ -21,7 +21,8 @@ Interface contract
     :return: ``(values, names, sha256)``: ``(rows, channels)`` float64, the value column names, and the sha256 of
         the file bytes.
     :raises ConfigError: a missing file or column, an unreadable or empty csv, a non-numeric or non-finite value
-        column (a blank line is a missing cell, refused with its row), a time column that is not strictly increasing.
+        column (a blank line INSIDE the series is a missing cell, refused with its row; blank lines before the header and after the last row shift
+        nothing and are ignored; a text cell is named with its row), a time column that is not strictly increasing.
 
 ``split_bounds(rows, select_fraction, test_fraction)``
     :return: the ``(lo, hi)`` row ranges of the train, select and test segments, consecutive and disjoint.
@@ -242,10 +243,14 @@ def read_csv_series(
     if not file.is_file():
         refuse(f"data.path {path} does not exist")
     raw = file.read_bytes()
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-049
+    # A blank line INSIDE the series is a missing row (pandas' default drops it and the series after the gap is shifted by one step with no word said,
+    # D-048); a blank line before the header or after the last row shifts nothing, so those are dropped here and the rest is read with
+    # `skip_blank_lines=False`. Do NOT hand pandas the whole file with `skip_blank_lines=False`: the first blank line is then the header (review pass 5
+    # NOTE 1: "has no value column") and a final newline pair is a NaN row. The sha256 is of the bytes as written.
+    body = re.sub(rb"\A(?:[ \t]*\r?\n)+", b"", raw).rstrip()
     try:
-        # skip_blank_lines=False: a blank line is a MISSING row, refused below with its row number. The default drops it and the series
-        # after the gap is shifted by one step with no word said (D-048); pandas' own to_csv never writes one.
-        frame = pd.read_csv(io.BytesIO(raw), skip_blank_lines=False)
+        frame = pd.read_csv(io.BytesIO(body), skip_blank_lines=False)
     except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:
         raise ConfigError(f"data.path {path} is not a readable csv: {exc}") from exc
     if len(frame) == 0:
@@ -260,13 +265,22 @@ def read_csv_series(
         refuse(f"{file.name} has no value column: every column is the time column or an unnamed index")
     for name in names:
         if not pd.api.types.is_numeric_dtype(frame[name]) or pd.api.types.is_bool_dtype(frame[name]):
-            refuse(f"column {name!r} is not numeric (dtype {frame[name].dtype}): one text or decimal-comma "
+            cells = frame[name]
+            odd = cells.notna() & pd.to_numeric(cells, errors="coerce").isna()   # the cells that are text and not a number
+            where = ""
+            if odd.any():
+                row = int(np.argmax(odd.to_numpy()))
+                cell = cells.iloc[row]
+                where = (f": the first cell that is not a number is {cell!r} at row {row}"
+                         + (" (a blank cell: spaces only)" if str(cell).strip() == "" else ""))
+            refuse(f"column {name!r} is not numeric (dtype {cells.dtype}){where}; one text or decimal-comma "
                    "cell makes a whole column non-numeric; name the numeric columns in data.value_cols")
     values = frame[names].to_numpy(np.float64)
     bad = ~np.isfinite(values)
     if bad.any():
         row, col = (int(v[0]) for v in np.nonzero(bad))
-        refuse(f"column {names[col]!r} holds {int(bad[:, col].sum())} non-finite cell(s), the first at row {row}")
+        refuse(f"column {names[col]!r} holds {int(bad[:, col].sum())} non-finite cell(s), the first at row {row} "
+               "(a blank line, an empty cell, NaN or infinity)")
     if time_col is not None:
         _check_time_column(frame[time_col], time_col)
     return values, names, hashlib.sha256(raw).hexdigest()

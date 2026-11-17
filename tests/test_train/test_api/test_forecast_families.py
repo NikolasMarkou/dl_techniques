@@ -942,7 +942,7 @@ def refusal_cases(tmp_path):
         "a non-finite cell": ({"format": "csv", "path": write_csv(tmp_path / "f.csv", 400, extra={(3, "b"): "nan"})}, "non-finite"),
         # review pass 4 NOTE 7: a blank line was skipped by pandas and the series after it shifted by one step with no word said
         "a blank line": ({"format": "csv", "path": blank_line_csv(tmp_path / "blank.csv", write_csv(tmp_path / "g.csv", 400))},
-                         "non-finite cell(s), the first at row 100"),
+                         "non-finite cell(s), the first at row 100 (a blank line, an empty cell, NaN or infinity)"),
     }
 
 

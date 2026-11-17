@@ -822,28 +822,79 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         with pytest.raises(ConfigError, match="non-finite"):
             load(**csv_kwargs(write_csv(tmp_path, a=values)))
 
+    @staticmethod
+    def csv_text(columns: int, rows: int = 3000) -> str:
+        body = [",".join(f"{v:.6f}" for v in np.random.default_rng(i).normal(size=columns)) for i in range(rows)]
+        return "\n".join(["v" if columns == 1 else ",".join(f"v{c}" for c in range(columns))] + body) + "\n"
+
     @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
-    @pytest.mark.parametrize("where", ["middle", "end"])
-    def test_a_blank_line_is_a_missing_cell_with_its_row_and_not_a_skipped_row(self, tmp_path, columns, where):
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+    def test_an_interior_blank_line_is_a_missing_row_refused_with_its_row_and_not_a_skipped_row(self, tmp_path, columns, newline):
         """Review pass 4 NOTE 7: ``pd.read_csv`` skips a blank line by default, so a hand-written or spreadsheet file with an empty
         line trained on a series shifted by one step after the gap and nothing said so. The line is a missing cell now, refused with its
-        row, like an ``inf`` or an empty cell (the same function reads the file for ``predict``)."""
-        rows = [",".join(f"{v:.6f}" for v in np.random.default_rng(i).normal(size=columns)) for i in range(3000)]
-        text = "\n".join(["v" if columns == 1 else ",".join(f"v{c}" for c in range(columns))] + rows) + "\n"
+        row, like an ``inf`` or an empty cell (the same function reads the file for ``predict``). Only an INTERIOR blank line shifts the series."""
+        text = self.csv_text(columns)
         lines = text.split("\n")
-        if where == "middle":
-            lines.insert(1 + 1500, "")      # the blank line sits between data rows 1499 and 1500 (frame index 1500)
-        else:
-            lines.insert(len(lines) - 1, "")  # a blank line after the last data row (frame index 3000)
+        lines.insert(1 + 1500, "")      # the blank line sits between data rows 1499 and 1500 (frame index 1500)
         path = tmp_path / "blank.csv"
-        path.write_text("\n".join(lines))
-        sentence = f"holds 1 non-finite cell\\(s\\), the first at row {1500 if where == 'middle' else 3000}"
-        with pytest.raises(ConfigError, match=sentence):
+        path.write_bytes(newline.join(lines).encode())
+        with pytest.raises(ConfigError, match=r"holds 1 non-finite cell\(s\), the first at row 1500 \(a blank line, an empty cell, NaN or infinity\)"):
             fs.read_csv_series(str(path), None, None)
         clean = tmp_path / "clean.csv"
         clean.write_text(text)
         values, names, _ = fs.read_csv_series(str(clean), None, None)
         assert values.shape == (3000, columns), "vacuity guard: the same file without the blank line reads whole"
+
+    @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
+    @pytest.mark.parametrize("tail", ["\n\n", "\n\n\n\n", "\r\n\r\n", "\n   \n", "\n\t\n\n"], ids=["one", "several", "crlf", "spaces", "tab"])
+    def test_blank_lines_after_the_last_row_cannot_shift_the_series_and_are_ignored(self, tmp_path, columns, tail):
+        """Review pass 5 NOTE 1b: one trailing blank line (``row\\n\\n``, or ``\\r\\n\\r\\n`` from a Windows editor) was refused as a non-finite
+        cell at the next row, though no row is missing and the user sees no NaN. Nothing follows it, so nothing shifts."""
+        text = self.csv_text(columns)
+        clean = tmp_path / "clean.csv"
+        clean.write_text(text)
+        padded = tmp_path / "padded.csv"
+        padded.write_bytes(text.rstrip("\n").encode() + tail.encode())
+        want = fs.read_csv_series(str(clean), None, None)
+        got = fs.read_csv_series(str(padded), None, None)
+        np.testing.assert_array_equal(got[0], want[0])
+        assert got[1] == want[1] and got[2] == fs.read_csv_series(str(padded), None, None)[2] != want[2], "the hash is of the file bytes as written"
+
+    @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
+    @pytest.mark.parametrize("head", ["\n", "\n\n\n", "\r\n", "  \n"], ids=["one", "several", "crlf", "spaces"])
+    def test_blank_lines_before_the_header_are_ignored_as_pandas_did(self, tmp_path, columns, head):
+        """Review pass 5 NOTE 1a: a blank line BEFORE the header was refused as 'has no value column' (the empty header line became the
+        header). Nothing precedes the series, so it shifts nothing; pandas' default reader skipped it and so does this one."""
+        text = self.csv_text(columns)
+        clean = tmp_path / "clean.csv"
+        clean.write_text(text)
+        padded = tmp_path / "padded.csv"
+        padded.write_bytes(head.encode() + text.encode())
+        want = fs.read_csv_series(str(clean), None, None)
+        got = fs.read_csv_series(str(padded), None, None)
+        np.testing.assert_array_equal(got[0], want[0])
+        assert got[1] == want[1]
+
+    @pytest.mark.parametrize("body", ["v\n\n", "v\n\n\n", "v\r\n\r\n", "v\n   \n", "v\n"], ids=["lf", "lf2", "crlf", "spaces", "no blank"])
+    def test_a_header_with_only_blank_lines_after_it_has_no_rows(self, tmp_path, body):
+        """Review pass 5 NOTE 1c: the header and one blank line gave 'non-finite cell ... at row 0' instead of 'has no rows'."""
+        path = tmp_path / "header_only.csv"
+        path.write_bytes(body.encode())
+        with pytest.raises(ConfigError, match="has no rows"):
+            fs.read_csv_series(str(path), None, None)
+
+    @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
+    @pytest.mark.parametrize("junk", ["   ", "\t", " \t "], ids=["spaces", "tab", "mixed"])
+    def test_a_whitespace_only_line_mid_file_is_refused_with_its_row_and_the_right_cause(self, tmp_path, columns, junk):
+        """Review pass 5 NOTE 2: ``"   "`` mid-file made the column object dtype and was refused as "not numeric ... one text or
+        decimal-comma cell", with no row and the wrong cause. The sentence names the row and the cell that is not a number."""
+        lines = self.csv_text(columns).split("\n")
+        lines.insert(1 + 700, junk)     # frame index 700
+        path = tmp_path / "spaces.csv"
+        path.write_text("\n".join(lines))
+        with pytest.raises(ConfigError, match=rf"column 'v(0)?' is not numeric \(dtype object\): the first cell that is not a number is {re.escape(repr(junk))} at row 700") as raised:
+            fs.read_csv_series(str(path), None, None)
+        assert "blank" in str(raised.value) and "decimal-comma" in str(raised.value), "the old tail stays: name the numeric columns in data.value_cols"
 
     def test_a_named_column_that_is_missing(self, tmp_path):
         with pytest.raises(ConfigError, match="column 'nope' is missing"):
