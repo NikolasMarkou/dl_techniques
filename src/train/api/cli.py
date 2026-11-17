@@ -135,6 +135,7 @@ import logging
 import math
 import re
 import sys
+import textwrap
 import typing
 from pathlib import Path
 from typing import (
@@ -172,6 +173,7 @@ from .config import (
     validate,
 )
 from .errors import ConfigError, ConfigValidationError, DLTrainError
+from .forecast_predictor import FLAT_WINDOW_EXPORT_NOTE
 from .predictor import CLASSIFICATION, DENOISING, FORECASTING, SEGMENTATION, known_tasks_line, record_beside
 
 # ---------------------------------------------------------------------
@@ -308,11 +310,11 @@ EXPORT_NOTES = (
     "the reason: tflite of timestral, and onnx of xlstm, ets and timestral. A tflite of tirex, xlstm or ets needs the",
     "Flex delegate (select TF operators). A window whose std is not above max(1.18e-38, scale_floor * mean|x|) is flat: it has no",
     "scale and is forecast in the raw units (the model's output at about zero input added to the last level, which means little",
-    "where the series' unit is far from 1), in the file and in predict alike; both decide on the float32 value of the window, in",
-    "which a denormal (a value below float32's smallest normal number 1.18e-38) reads 0, and agree on it except within about 1e-5 of the",
-    "threshold (a relative distance, measured on the float32 values of the window) and, in the onnx file, which keeps a denormal, for a window whose spread is",
-    "within 1.3 times 1.18e-38; the keras, saved_model and tflite files also flush the cells below 1.18e-38 that predict keeps, so",
-    "they forecast such a window differently. The exported .keras file is not a run: predict takes the run directory.",
+    "where the series' unit is far from 1), in the file and in predict alike; both",
+    *textwrap.wrap(
+        f"{FLAT_WINDOW_EXPORT_NOTE}. The exported .keras file is not a run: predict takes the run directory.",
+        width=120, break_on_hyphens=False, break_long_words=False,
+    ),
     "The forecaster's .keras file names ServedForecaster, a class of the train package, which the wheel does not ship:",
     "it loads only where the train package is importable (the source tree on the path, or an editable install).",
 )

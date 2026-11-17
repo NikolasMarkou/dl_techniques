@@ -54,7 +54,8 @@ Interface contract
     file into the new path ``out`` (nothing is overwritten). :raises ConfigError: for any error of ``predict`` and for a
     forecast that is not finite (JSON has no NaN).
 
-``served(model, record)`` / ``check_export(record, format, shape)`` / ``export_note(record)`` / ``EXPORT_REFUSALS``
+``served(model, record)`` / ``check_export(record, format, shape)`` / ``export_note(record)`` / ``EXPORT_REFUSALS`` /
+``FLAT_WINDOW_EXPORT_NOTE``
     The export row of this task (:class:`train.api.predictor.ExportRule`): ``served`` is the layer a file runs (raw windows
     in, the forecast in the series' units out, :class:`train.common.forecast_run.ServedForecaster`), ``check_export`` raises a
     named :class:`ConfigError` BEFORE anything is written for the cells that do not convert (``EXPORT_REFUSALS``, each with its
@@ -62,6 +63,8 @@ Interface contract
     file. The exported ``.keras`` is the wrapped model, not a run's model: ``load_model`` refuses it with a :class:`ConfigError`.
     It also names ``ServedForecaster``, a class of the ``train`` package, which the wheel does not ship, so the file loads only
     in a process where ``train`` is importable (the source tree on the path, or an editable install).
+    ``FLAT_WINDOW_EXPORT_NOTE`` is the measured clause on flat windows that ``export_note`` and ``train.api.cli.EXPORT_NOTES``
+    both say (one string, so a new measurement edits one place).
 
 Import rule
 -----------
@@ -471,6 +474,21 @@ def check_export(record: Mapping[str, Any], format: str, shape: Sequence[Optiona
         raise ConfigError(f"Invalid value for 'format': {format!r} of a {record['decode']} model is refused: {reason}")
 
 
+# DECISION plan-2026-11-13T105600-3a8319ef/D-053
+# The flat-window clause was written twice, here and in `cli.EXPORT_NOTES`, and two fix rounds edited both copies in lockstep.
+# Do NOT copy it back into either: both read this constant (cli at module scope, which is why this module stays free of
+# numpy, keras and train.common at import; `test_cli_help_allocates_nothing` holds it).
+#: How the exported file and ``predict`` treat a flat window, as measured (D-048 to D-050): a clause whose subject the caller
+#: writes before it ("the file and predict", "both"), with no final stop.
+FLAT_WINDOW_EXPORT_NOTE = (
+    "decide on the float32 value of the window, in which a denormal (a value below float32's smallest normal number 1.18e-38) "
+    "reads 0, and agree on it except within about 1e-5 of the threshold (a relative distance, measured on the float32 values of "
+    "the window) and, in the onnx file, which keeps a denormal, for a window whose spread is within 1.3 times 1.18e-38; the "
+    "keras, saved_model and tflite files also flush the cells below 1.18e-38 that predict keeps, so they forecast such a window "
+    "differently"
+)
+
+
 def export_note(record: Mapping[str, Any]) -> str:
     """Return the sentence the command line logs beside an exported forecaster (what goes in, what comes out)."""
     heads = " (saved_model and keras give {point, quantiles}, tflite and onnx the point)" if record["head"] == "quantile" else ""
@@ -480,10 +498,8 @@ def export_note(record: Mapping[str, Any]) -> str:
         f"series' own units (no standardization to do) and returns the forecast (batch, {record['horizon']}, "
         f"{record['channels']}) in the same units{heads}{one}; a window whose std is not above max(1.18e-38, {record['scale_floor']:g} * mean|x|) is "
         "flat: it has no scale, so it is forecast in the series' raw units (the model's output at about zero input added to the last level, which "
-        "means little where the series' unit is far from 1); the file and predict decide on the float32 value of the window, in which a denormal (a value "
-        "below float32's smallest normal number 1.18e-38) reads 0, and agree on it except within about 1e-5 of the threshold (a relative distance, measured on the float32 values of the window) "
-        "and, in the onnx file, which keeps a denormal, for a window whose spread is within 1.3 times 1.18e-38; the keras, saved_model and tflite files also "
-        "flush the cells below 1.18e-38 that predict keeps, so they forecast such a window differently; the .keras file names ServedForecaster, a class of the train package, "
+        f"means little where the series' unit is far from 1); the file and predict {FLAT_WINDOW_EXPORT_NOTE}; the .keras file names "
+        "ServedForecaster, a class of the train package, "
         "which the wheel does not ship, so it loads only where the train package is importable (the source tree on the path, or "
         "an editable install)"
     )
