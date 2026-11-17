@@ -234,8 +234,8 @@ def test_the_readme_gate_section_names_the_code_head_it_ran_on_and_says_the_firs
     text = " ".join(README.read_text().split())
     start = text.index("**Gate numbers** (plan 3a8319ef")
     gate = text[start:start + 12000]
-    assert "run on HEAD `78e3295df` of the branch `train-api/phase-4e`" in gate
-    assert "the code HEAD `78e3295df56d9df62609d9afd28af038be383980`" in gate
+    assert "run on HEAD `c4cffe8fa` of the branch `train-api/phase-4e`" in gate
+    assert "the code HEAD `c4cffe8fabccc0539169051cc949f070bc4073a0`" in gate
     assert "the commit that holds this README is a docs-only commit after that HEAD" in gate
     assert "the first gate, run on HEAD `1904f07a8`" in gate and "is superseded and every number below replaces its numbers" in gate
     assert "PENDING" not in text and "NOT YET MEASURED" not in text
