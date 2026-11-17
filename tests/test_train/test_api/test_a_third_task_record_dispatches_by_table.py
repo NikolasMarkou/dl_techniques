@@ -17,8 +17,8 @@ and a ``domain`` text, no class names, no statistics) in every table, in the tes
   key, writer;
 * removing the fake's row from any ONE table refuses the record, naming the tasks that table knows,
   and the same for the ``predict`` writer table;
-* the four real tasks have a row in every table (the tables agree on their keys; the fourth, forecasting, arrived with
-  its predictor, and its record has no class names and no statistics either);
+* the five real tasks have a row in every table (the tables agree on their keys; the fourth, forecasting, and the
+  fifth, depth estimation, arrived with their predictors, and their records have no class names and no statistics either);
 * a task whose data has no classes (D-005): ``DataFacts`` and ``AutoContext`` take ``num_classes=None``
   and the run summary has no ``num_classes`` key, while a classifier's still has it.
 
@@ -41,6 +41,7 @@ from train.api.errors import ConfigError
 from train.api.predictor import (
     CLASSIFICATION,
     DENOISING,
+    DEPTH,
     FORECASTING,
     PREDICTORS,
     SCHEMA_VERSION,
@@ -176,7 +177,7 @@ def test_the_fake_has_a_row_for_every_table():
     assert set(FAKE_ROWS) == set(TASK_TABLES)
 
 
-REAL_TASKS = [CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING]
+REAL_TASKS = [CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH]
 
 
 @pytest.mark.parametrize("name", sorted(TASK_TABLES))
@@ -184,8 +185,8 @@ def test_the_real_tasks_have_a_row_in_every_table(name):
     assert sorted(TASK_TABLES[name]) == sorted(REAL_TASKS), name
 
 
-def test_the_predict_writers_and_the_data_listers_are_the_four_tasks_that_can_predict():
-    # Denoising's writer arrived with its predictor, forecasting's with its own: one row
+def test_the_predict_writers_and_the_data_listers_are_the_five_tasks_that_can_predict():
+    # Denoising's writer arrived with its predictor, forecasting's and depth's with their own: one row
     # per task that can be predicted, in the writers and in the listers of what ``data=`` names (D-012).
     assert sorted(cli.PREDICT_WRITERS) == sorted(REAL_TASKS)
     assert sorted(cli.DATA_LISTERS) == sorted(REAL_TASKS)
@@ -289,6 +290,7 @@ def test_the_real_tasks_keep_their_predictors():
     assert PREDICTORS[SEGMENTATION].__name__ == "_segmentation_predictor"
     assert PREDICTORS[DENOISING].__name__ == "_denoising_predictor"
     assert PREDICTORS[FORECASTING].__name__ == "_forecasting_predictor"
+    assert PREDICTORS[DEPTH].__name__ == "_depth_predictor"
 
 
 def test_export_reaches_the_tasks_rule_for_its_shape_its_refusals_and_its_note(run_dir, tmp_path, monkeypatch):

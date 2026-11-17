@@ -32,6 +32,7 @@ from train.api.predictor import (
     OPTIONAL_RECORD_KEYS,
     RECORD_KEYS,
     SCHEMA_VERSION,
+    build_depth_record,
     build_forecast_record,
     build_segmentation_record,
     build_task_record,
@@ -49,6 +50,7 @@ CLASSIFICATION = "image_classification"
 SEGMENTATION = "image_segmentation"
 DENOISING = "image_denoising"
 FORECASTING = "time_series_forecasting"
+DEPTH = "depth_estimation"
 
 #: The keys and order of a version 1 classification record, written out (not read from the module).
 V1_KEYS = [
@@ -87,6 +89,14 @@ def forecasting(**changes):
     return value
 
 
+def depth(**changes):
+    value = build_depth_record(
+        model="depth_anything/vit_s", family="depth_anything", variant="vit_s", input_size=(252, 252), channels=3,
+    )
+    value.update(changes)
+    return value
+
+
 def without(value, *keys):
     value = dict(value)
     for key in keys:
@@ -99,9 +109,9 @@ def without(value, *keys):
 # ---------------------------------------------------------------------
 
 
-def test_the_version_is_two_and_the_tables_are_the_four_tasks():
+def test_the_version_is_two_and_the_tables_are_the_five_tasks():
     assert SCHEMA_VERSION == 2
-    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING])
+    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH])
     assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
     assert OPTIONAL_RECORD_KEYS == ("variant_overrides",)
 
@@ -144,7 +154,18 @@ def test_a_forecasting_record_has_its_own_keys_and_no_class_names_and_no_statist
     check_record(point, "<built>")
 
 
-@pytest.mark.parametrize("make", [classification, segmentation, forecasting], ids=[CLASSIFICATION, SEGMENTATION, FORECASTING])
+def test_a_depth_record_has_its_own_keys_the_trained_size_and_no_class_names_and_no_statistics():
+    record = depth()
+    assert list(record) == list(RECORD_KEYS[DEPTH]) == [
+        "schema_version", "task", "model", "family", "variant", "input_size", "channels", "normalize", "output",
+    ]
+    assert (record["task"], record["input_size"], record["channels"]) == (DEPTH, [252, 252], 3)
+    assert (record["normalize"], record["output"]) == ("imagenet", "relative_disparity")
+    assert not {"class_names", "mean", "std", "input_shape", "lookback"} & set(record)
+
+
+@pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth],
+                         ids=[CLASSIFICATION, SEGMENTATION, FORECASTING, DEPTH])
 def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp_path):
     record = make()
     check_record(record, "<built>")
@@ -154,7 +175,7 @@ def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp
 
 
 def test_the_optional_key_rides_on_every_task():
-    for make in (classification, segmentation, forecasting):
+    for make in (classification, segmentation, forecasting, depth):
         with_overrides = make(variant_overrides={"depth": 4})
         check_record(with_overrides, "<built>")
     assert "variant_overrides" not in segmentation()
@@ -233,6 +254,19 @@ def test_a_forecasting_record_does_not_take_another_tasks_keys_and_no_other_reco
         check_record(without(forecasting(), "lookback", "horizon"), "task.json")
     with pytest.raises(ConfigError, match="unknown key.*lookback"):
         check_record(classification(lookback=32), "task.json")
+
+
+def test_a_depth_record_does_not_take_another_tasks_keys_and_no_other_record_takes_its_own():
+    with pytest.raises(ConfigError, match="unknown key.*mean"):
+        check_record(depth(mean=[0.485, 0.456, 0.406]), "task.json")
+    with pytest.raises(ConfigError, match=r"missing key.*input_size.*output"):
+        check_record(without(depth(), "input_size", "output"), "task.json")
+    with pytest.raises(ConfigError, match="'normalize' must be 'imagenet'"):
+        check_record(depth(normalize="unit"), "task.json")
+    with pytest.raises(ConfigError, match="'normalize' must be one of standardize, unit"):
+        check_record(segmentation(normalize="imagenet"), "task.json")
+    with pytest.raises(ConfigError, match="'output' must be one of masks, logits"):
+        check_record(segmentation(output="relative_disparity"), "task.json")
 
 
 def test_a_classification_record_does_not_take_the_segmentation_keys_and_the_reverse():

@@ -57,6 +57,11 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     the ``quantile_levels`` and the ``quantiles`` (:func:`train.api.forecast_predictor.write_predictions`). The record is read BEFORE the data is listed
     (``DATA_LISTERS``, D-012).
 
+    For a DEPTH run ``out`` is a new DIRECTORY: one ``<stem>.npy`` per image, the float32 relative-disparity map at the
+    size of that image (the image is resized to the trained size, standardized as in training, and the map resized back),
+    and, written last, ``index.json`` with one ``{"path", "file", "size"}`` per image
+    (:func:`train.api.depth_predictor.write_predictions`). Two images with one stem are refused before the model is loaded.
+
 ``convert <dataset> key=value ...``
     Writes a source dataset as index masks and CSV listings the segmentation task reads, outside the
     source tree, resumably and without deleting (:mod:`train.api.convert`; ``ade20k``, ``coco``). Exit 0 and ONLY
@@ -174,7 +179,7 @@ from .config import (
 )
 from .errors import ConfigError, ConfigValidationError, DLTrainError
 from .forecast_predictor import FLAT_WINDOW_EXPORT_NOTE
-from .predictor import CLASSIFICATION, DENOISING, FORECASTING, SEGMENTATION, known_tasks_line, record_beside
+from .predictor import CLASSIFICATION, DENOISING, DEPTH, FORECASTING, SEGMENTATION, known_tasks_line, record_beside
 
 # ---------------------------------------------------------------------
 
@@ -321,7 +326,7 @@ EXPORT_NOTES = (
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
     Option("data", "an image file, or a directory of images (searched recursively); a forecasting model takes a csv file or a .npy or .npz array of windows"),
-    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts)"),
+    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts; a depth model a directory of float32 .npy relative-disparity maps and an index.json)"),
 )
 
 
@@ -545,6 +550,18 @@ def _predict_forecasts(model_path: Path, record: Mapping[str, Any], files: List[
     return 0
 
 
+def _predict_disparity(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the relative-disparity maps of ``files`` as ``.npy`` arrays and an index into the new directory ``out``."""
+    from .depth_predictor import ARRAY_SUFFIX, write_predictions
+    from .predictor import load_model
+    from .segmentation_predictor import mask_names
+
+    mask_names(files, ARRAY_SUFFIX)  # two images with one stem are refused before the model is loaded
+    write_predictions(load_model(model_path), files, out)
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
 #: What ``predict`` lists from ``data=``, per task: ``lister(data) -> files``. The image tasks list images (recursively); a
 #: forecasting run takes one csv or numpy file. The keys are those of :data:`PREDICT_WRITERS`.
 DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
@@ -552,6 +569,7 @@ DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
     SEGMENTATION: _image_files,
     DENOISING: _image_files,
     FORECASTING: _forecast_files,
+    DEPTH: _image_files,
 }
 
 #: What ``predict`` writes, per task: ``writer(model_path, record, files, out) -> exit code``. A task
@@ -563,6 +581,7 @@ PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path],
     SEGMENTATION: _predict_masks,
     DENOISING: _predict_images,
     FORECASTING: _predict_forecasts,
+    DEPTH: _predict_disparity,
 }
 
 

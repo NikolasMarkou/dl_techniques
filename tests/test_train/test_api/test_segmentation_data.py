@@ -205,15 +205,15 @@ def test_a_floating_point_image_is_refused_by_name_at_the_header_and_at_the_deco
 
 
 def test_training_and_predict_decode_a_sixteen_bit_image_alike(tmp_path):
-    from train.api.segmentation_predictor import SegmentationPredictor
+    from train.api.segmentation_predictor import rgb_of
 
     ramp = np.linspace(0, 65535, 32 * 32).reshape(32, 32).astype(np.uint16)
     path = tmp_path / "g.png"
     Image.fromarray(ramp).save(path)
     trained_on = sd.decode_image(str(path))
-    predictor = object.__new__(SegmentationPredictor)
-    assert np.array_equal(predictor._rgb_of(str(path)), trained_on)
-    assert np.array_equal(predictor._rgb_of(Image.open(path)), trained_on)
+    # The predictors' one decoder (segmentation and depth call it).
+    assert np.array_equal(rgb_of(str(path)), trained_on)
+    assert np.array_equal(rgb_of(Image.open(path)), trained_on)
 
 
 def test_the_pipeline_feeds_a_sixteen_bit_image_at_its_range(tmp_path):

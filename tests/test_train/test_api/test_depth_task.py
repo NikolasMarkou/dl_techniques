@@ -837,10 +837,10 @@ def ended(world, megadepth_tree, tmp_path_factory):
 #: The files of a finished depth run, from the code: the sequence writes the config pair, the log and the lock
 #: (``run_sequence``), the callbacks the csv, the best checkpoint, the backup, the sidecar and tensorboard
 #: (``fit_callbacks``), the reporting the history, the final model and the summary (``report_data_free_run``,
-#: ``write_summary_json``). No ``task.json``: ``task_record`` returns ``None`` until the record exists.
+#: ``write_summary_json``), and the sequence ``task.json`` before ``fit`` (``task_record``, the depth record).
 RUN_FILES = {
     "best_model.keras", "config.json", "config_requested.json", "final_model.keras", "results_summary.json",
-    "run.lock", "run.log", "training_history.json", "training_log.csv",
+    "run.lock", "run.log", "task.json", "training_history.json", "training_log.csv",
 }
 #: ``analysis_args.model_analysis=false`` writes no ``model_analysis/``.
 RUN_DIRS = {"checkpoints", "tensorboard", "visualizations"}

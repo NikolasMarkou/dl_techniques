@@ -95,6 +95,16 @@ from the OPTIONAL ``variant_overrides``.
     ``(1, lookback, channels)``. ``scale_floor`` is NOT checked against anything: the model does not carry it, so a hand-edited
     value cannot be detected and changes every forecast (the flatness threshold of the standardization).
 
+``input_size``, ``channels``, ``normalize``, ``output`` (depth estimation)
+    A depth record has no ``class_names``, ``mean`` or ``std``: ``input_size`` is ``[height, width]`` the model was BUILT at
+    (positive ints), ``channels`` is 3, ``normalize`` is ``"imagenet"`` (:data:`DEPTH_NORMALIZE`: the ImageNet mean and
+    standard deviation of the official DINOv2 input, one function, ``train.common.megadepth.standardize_imagenet``, in
+    training and in ``predict``) and ``output`` is ``"relative_disparity"`` (:data:`DEPTH_OUTPUTS`: larger is nearer, defined
+    up to a scale and a shift per image). ``load_model`` refuses a record whose size or channels are not the ones the model
+    was built at (:func:`train.api.depth_predictor.check_built_size`, the ``MODEL_CHECKS`` row), before the model is called:
+    the model takes no other size, and a size that is not a multiple of the patch would pass a zero-input call. A resume
+    compares ``input_size``, ``channels`` and ``normalize``.
+
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
     run's resolved ``model_args`` set to another value, so the model is the variant WITH these
@@ -104,9 +114,10 @@ from the OPTIONAL ``variant_overrides``.
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)``
+``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)``
     :return: the record for a finished data load (not checked; see their docstrings). The first
-        writes a classification record, the second a segmentation record, the third a denoising one, the fourth a forecasting one.
+        writes a classification record, the second a segmentation record, the third a denoising one, the fourth a forecasting
+        one, the fifth a depth one.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
@@ -156,7 +167,8 @@ from the OPTIONAL ``variant_overrides``.
         (segmentation: ``input_size`` and the class count; denoising: ONE tensor of the probe image's
         size and the record's channels) does not match the record is refused here. A ``image_denoising``
         record gives a :class:`~train.api.denoising_predictor.DenoisingPredictor`, a ``time_series_forecasting`` one a
-        :class:`~train.api.forecast_predictor.ForecastPredictor`.
+        :class:`~train.api.forecast_predictor.ForecastPredictor`, a ``depth_estimation`` one a
+        :class:`~train.api.depth_predictor.DepthPredictor`.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -241,6 +253,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import registry
+from .depth_args import TASK as DEPTH
 from .errors import ConfigError
 from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 
@@ -331,6 +344,17 @@ RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
         "data_format",
         "data_sha256",
     ),
+    DEPTH: (
+        "schema_version",
+        "task",
+        "model",
+        "family",
+        "variant",
+        "input_size",
+        "channels",
+        "normalize",
+        "output",
+    ),
 }
 
 #: What ``output`` may say in a segmentation record.
@@ -342,6 +366,12 @@ DENOISING_OUTPUTS = ("images",)
 #: The side of the zero image a loaded denoiser is called on to check its output, rounded UP to a multiple of
 #: the record's ``size_multiple`` (a U-Net refuses a side off its stride; the model's own input is flexible).
 DENOISING_PROBE_SIDE = 32
+
+#: What ``normalize`` says in a depth record: the ImageNet statistics of the official DINOv2 input; what ``output`` may say (the
+#: model's map, larger is nearer, defined up to a scale and a shift per image); the channels its model takes (RGB).
+DEPTH_NORMALIZE = "imagenet"
+DEPTH_OUTPUTS = ("relative_disparity",)
+DEPTH_CHANNELS = 3
 
 #: What ``head`` may say in a forecasting record, and the sources ``data_format`` may name (the ``data.format`` values of the task).
 FORECAST_HEADS = ("point", "quantile")
@@ -607,6 +637,39 @@ def build_forecast_record(
     )
 
 
+def build_depth_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    input_size: Sequence[int],
+    channels: int,
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a depth run; see the module contract.
+
+    :param input_size: ``(height, width)`` the model was built at (the crops it trained on).
+    :param channels: the model's input channels (3).
+    :return: the record; ``normalize`` is :data:`DEPTH_NORMALIZE` and ``output`` the first of :data:`DEPTH_OUTPUTS`. It is
+        NOT checked (:func:`check_record` does that).
+    """
+    return _record_of(
+        DEPTH,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "task": DEPTH,
+            "model": model,
+            "family": family,
+            "variant": variant,
+            "input_size": [int(side) for side in input_size],
+            "channels": int(channels),
+            "normalize": DEPTH_NORMALIZE,
+            "output": DEPTH_OUTPUTS[0],
+        },
+        variant_overrides,
+    )
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
@@ -723,12 +786,17 @@ def _classification_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Opti
     return [], shape[2]
 
 
-def _segmentation_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
-    """Return ``(lines, channels)`` for ``input_size`` and ``channels`` (``None`` when unusable)."""
-    lines: List[str] = []
+def _input_size_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problem of ``input_size``, ``[height, width]`` of positive ints (a segmentation or a depth record)."""
     size = record["input_size"]
     if not (isinstance(size, list) and len(size) == 2 and all(_is_whole(side) and side > 0 for side in size)):
-        lines.append(f"'input_size' must be [height, width] of positive ints, got {size!r}")
+        return [f"'input_size' must be [height, width] of positive ints, got {size!r}"]
+    return []
+
+
+def _segmentation_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, channels)`` for ``input_size`` and ``channels`` (``None`` when unusable)."""
+    lines = _input_size_problems(record)
     channels = record["channels"]
     if not (_is_whole(channels) and channels > 0):
         lines.append(f"'channels' must be a positive int, got {channels!r}")
@@ -924,6 +992,29 @@ def _forecast_tail_problems(record: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _depth_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, channels)`` for ``input_size`` and ``channels``, which must be :data:`DEPTH_CHANNELS`."""
+    lines = _input_size_problems(record)
+    channels = record["channels"]
+    if not (_is_whole(channels) and channels == DEPTH_CHANNELS):
+        lines.append(f"'channels' must be {DEPTH_CHANNELS} (the model takes RGB), got {channels!r}")
+        return lines, None
+    return lines, channels
+
+
+def _depth_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``normalize`` and ``output``."""
+    lines: List[str] = []
+    if record["normalize"] != DEPTH_NORMALIZE:
+        lines.append(
+            f"'normalize' must be {DEPTH_NORMALIZE!r} (the ImageNet mean and standard deviation of the DINOv2 input, the "
+            f"only standardization a depth run trains with), got {record['normalize']!r}"
+        )
+    if record["output"] not in DEPTH_OUTPUTS:
+        lines.append(f"'output' must be one of {', '.join(DEPTH_OUTPUTS)}, got {record['output']!r}")
+    return lines
+
+
 # DECISION plan-2026-11-10T095307-d483ffab/D-006: the per-task work of reading a record is a ROW of
 # a table keyed by task, not a branch. Do NOT add a third ``elif task == ...`` here or in
 # ``input_shape_of``, ``load_model`` or ``_run_on_zeros`` (a third task would be one more branch in
@@ -1022,6 +1113,8 @@ DATA_KEYS: Dict[str, Tuple[str, ...]] = {
     # (the csv's bytes), NOT the head, the levels or the decode row: those are the model's, and the resume builds the model
     # from the request, which the request comparison has already held equal. Do NOT add them "for completeness".
     FORECASTING: ("lookback", "horizon", "channels", "value_cols", "scale_floor", "data_format", "data_sha256"),
+    # A depth resume compares the size the model is built at, the channels and the standardization: what the crops were.
+    DEPTH: ("input_size", "channels", "normalize"),
 }
 
 
@@ -1645,6 +1738,18 @@ def _forecasting_output_check(output: Any, record: Mapping[str, Any]) -> None:
         )
 
 
+def _depth_model_check(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> None:
+    from .depth_predictor import check_built_size
+
+    check_built_size(model, record, model_file, task_file)
+
+
+def _depth_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    from .depth_predictor import check_output
+
+    check_output(output, record)
+
+
 def _classification_predictor(model: Any, record: Mapping[str, Any]) -> "Predictor":
     return Predictor(model, record)
 
@@ -1665,6 +1770,12 @@ def _forecasting_predictor(model: Any, record: Mapping[str, Any]) -> Any:
     from .forecast_predictor import ForecastPredictor
 
     return ForecastPredictor(model, record)
+
+
+def _depth_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    from .depth_predictor import DepthPredictor
+
+    return DepthPredictor(model, record)
 
 
 class ExportRule(NamedTuple):
@@ -1738,12 +1849,25 @@ def _forecast_export_note(record: Mapping[str, Any]) -> str:
     return export_note(record)
 
 
+def _depth_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    from .depth_predictor import check_export
+
+    check_export(record, format, shape)
+
+
+def _depth_export_note(record: Mapping[str, Any]) -> str:
+    from .depth_predictor import export_note
+
+    return export_note(record)
+
+
 #: Geometry keys and the channel count, per task (see the contract above).
 GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Optional[int]]]] = {
     CLASSIFICATION: _classification_geometry,
     SEGMENTATION: _segmentation_geometry,
     DENOISING: _denoising_geometry,
     FORECASTING: _forecast_geometry,
+    DEPTH: _depth_geometry,
 }
 
 #: The keys only one task holds (classification's ``eval_transform``, segmentation's void,
@@ -1753,6 +1877,7 @@ TAIL_CHECKS: Dict[str, Callable[[Mapping[str, Any]], List[str]]] = {
     SEGMENTATION: _segmentation_tail_problems,
     DENOISING: _denoising_tail_problems,
     FORECASTING: _forecast_tail_problems,
+    DEPTH: _depth_tail_problems,
 }
 
 #: A denoiser's own input is flexible, so its row gives the zero image it is probed with.
@@ -1761,19 +1886,23 @@ INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
     SEGMENTATION: _segmentation_input_shape,
     DENOISING: _denoising_input_shape,
     FORECASTING: _forecast_input_shape,
+    DEPTH: _segmentation_input_shape,
 }
 
 #: The record key that holds the input geometry, per task (a denoiser's is its channel count).
 INPUT_KEY: Dict[str, str] = {
     CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels", FORECASTING: "lookback",
+    DEPTH: "input_size",
 }
 
-#: What a loaded model says of itself against its record, run BEFORE the model is called (D-042): only a forecaster has one.
+#: What a loaded model says of itself against its record, run BEFORE the model is called (D-042): a forecaster's built window
+#: and a depth model's built size.
 MODEL_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any], Path, Path], None]] = {
     CLASSIFICATION: _no_model_check,
     SEGMENTATION: _no_model_check,
     DENOISING: _no_model_check,
     FORECASTING: _forecasting_model_check,
+    DEPTH: _depth_model_check,
 }
 
 OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
@@ -1781,6 +1910,7 @@ OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
     SEGMENTATION: _segmentation_output_check,
     DENOISING: _denoising_output_check,
     FORECASTING: _forecasting_output_check,
+    DEPTH: _depth_output_check,
 }
 
 PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
@@ -1788,6 +1918,7 @@ PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
     SEGMENTATION: _segmentation_predictor,
     DENOISING: _denoising_predictor,
     FORECASTING: _forecasting_predictor,
+    DEPTH: _depth_predictor,
 }
 
 #: What ``export`` does per task (see :class:`ExportRule`). Classification and segmentation trace at the record's
@@ -1799,6 +1930,8 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     # A forecaster's file takes RAW windows ``(lookback, channels)`` (rank 2) and returns a forecast in the series' units: it
     # runs ``served``; the cells of its table that do not convert are refused by ``check`` (D-011, D-026).
     FORECASTING: ExportRule(_forecast_input_shape, _forecast_export_check, _forecast_export_note, _forecast_served),
+    # A depth model's file takes ImageNet-standardized images at the trained size (D-009): the record's own input shape.
+    DEPTH: ExportRule(_segmentation_input_shape, _depth_export_check, _depth_export_note),
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of

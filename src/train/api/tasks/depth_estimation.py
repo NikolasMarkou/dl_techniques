@@ -40,7 +40,12 @@ Interface contract
     (``test_metrics_best`` and the ``held_out`` block of :func:`train.common.depth_run.held_out_report`), checks that
     ``best_model.keras`` reloads to the same outputs, and runs the data-free analysis and the last-epoch report
     (``report_data_free_run``). The summary's ``baselines``, ``epoch_zero`` and ``held_out`` blocks come back through
-    ``Evaluation.extras``. No ``task.json`` is written yet.
+    ``Evaluation.extras``.
+
+    The record (D-009). ``task_record`` is the depth ``task.json`` (schema in :mod:`train.api.predictor`): the size the
+    model is built at, 3 channels, ``normalize`` ``imagenet`` and ``output`` ``relative_disparity``, written before
+    ``fit``. ``predict`` of the run directory resizes each image to that size and the map back
+    (:class:`~train.api.depth_predictor.DepthPredictor`).
 
 ``train_depth_estimation(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -97,6 +102,7 @@ from ..depth_args import (
     read_depth_data_file,
 )
 from ..depth_models import JIT_COMPILE
+from ..predictor import build_depth_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
 
@@ -233,6 +239,18 @@ class DepthEstimationTrainer(TaskTrainer):
     def _model_kwargs(config: DepthEstimationConfig, context: AutoContext) -> Dict[str, Any]:
         """Return the family adapter's keywords: the recipe's, then the caller's (the resolver refuses the rest)."""
         return registry.MODELS[context.family].load_resolver()(context, config.optim_args, config.model_args)
+
+    def task_record(self, config: DepthEstimationConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
+        """Return the depth ``task.json`` record: the size the model is built at (``data.input_shape``, which
+        ``build_model`` builds it at) and its channels; nothing of the model is needed, so a resume asks for it before
+        ``build_model``."""
+        height, width, channels = data.input_shape
+        table = registry.MODELS[context.family].load_variants()
+        return build_depth_record(
+            model=config.model, family=context.family, variant=context.variant, input_size=(height, width),
+            channels=channels,
+            variant_overrides=overrides_of_variant(table[context.variant], self._model_kwargs(config, context)),
+        )
 
     def used_arguments(self, config: DepthEstimationConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run was built with, for ``config.json``: the model keywords."""
@@ -409,7 +427,9 @@ class DepthEstimationTrainer(TaskTrainer):
             "the selection crops select and are not a held-out estimate; `held_out` scores the best weights on the test "
             "crops of other scenes, once: loss, per-crop Pearson over valid pixels, the constant and the layout, and the "
             "paired model-minus-layout difference with its standard error",
-            "no `task.json` is written: `predict` and `export` of this run directory are refused",
+            "`task.json` records the size the model is built at: `predict` resizes each image to it, standardizes it as "
+            "training did and resizes the map back to the image's size; a map is relative disparity, defined up to scale "
+            "and shift per image",
         ]
         notes.append(
             "the model analysis is data-free (weights and spectral only; `analyzer.analyzers` lists them): the stock "

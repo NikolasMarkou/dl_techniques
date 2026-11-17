@@ -51,9 +51,16 @@ Interface contract
 ``check_png_output(record)``
     :raises ConfigError: unless the record's ``output`` is ``masks``.
 
-``mask_names(files)``
+``rgb_of(item)`` / ``items_of(x)``
+    The input half of :meth:`SegmentationPredictor.predict`, shared with the depth predictor (one decoder for the dense
+    image tasks): ``rgb_of`` returns one image (a path, a PIL image or a 2-D or 3-D array, read as described there) as
+    ``uint8`` ``(H, W, 3)``; ``items_of`` returns the undecoded images of an argument (a list of one for a single image).
+    :raises ConfigError: for an unreadable file, an unsupported array or an empty list.
+
+``mask_names(files, suffix=".png")``
     :param files: the input paths of a ``predict`` run.
-    :return: ``["<stem>.png", ...]``, one per file.
+    :param suffix: the extension of the written file (the depth writer passes ``.npy``).
+    :return: ``["<stem><suffix>", ...]``, one per file.
     :raises ConfigError: when two files have one stem (``a/cat.jpg`` and ``b/cat.png``), naming
         both; the outputs would overwrite each other and nothing is ever overwritten.
 
@@ -173,6 +180,46 @@ def _array_to_rgb(array: Any) -> Any:
     return np.ascontiguousarray(array)
 
 
+def rgb_of(item: Any) -> Any:
+    """Return one image (a path, a PIL image or a 2-D or 3-D array) as ``uint8`` ``(H, W, 3)``; see the module contract."""
+    import numpy as np
+    from PIL import Image
+
+    from train.common.segmentation_data import PairError, decode_image, image_to_rgb
+
+    if isinstance(item, (str, os.PathLike)):
+        if not os.path.isfile(item):
+            raise ConfigError(f"Invalid image: {os.fspath(item)!r} is not a file")
+        try:
+            return decode_image(os.fspath(item))
+        except PairError as exc:
+            raise ConfigError(f"Invalid image: {exc}") from exc
+    if isinstance(item, Image.Image):
+        return image_to_rgb(item)
+    if isinstance(item, np.ndarray) and item.ndim in (2, 3):
+        return _array_to_rgb(item)
+    raise ConfigError(
+        "Invalid image: expected a path, a PIL image, or a 2-D or 3-D numpy array, got "
+        f"{type(item).__name__}"
+        + (f" of shape {tuple(item.shape)}" if hasattr(item, "shape") else "")
+    )
+
+
+def items_of(x: Any) -> List[Any]:
+    """Return the images of the argument of a ``predict``, still undecoded; see the module contract."""
+    import numpy as np
+
+    if isinstance(x, np.ndarray) and x.ndim == 4:
+        if len(x) == 0:
+            raise ConfigError(f"Invalid image: the array of images is empty (shape {tuple(x.shape)})")
+        return list(x)
+    if isinstance(x, (list, tuple)):
+        if not x:
+            raise ConfigError("Invalid image: the list of images is empty")
+        return list(x)
+    return [x]
+
+
 class SegmentationPredictor:
     """A loaded segmentation model and the preprocessing it was trained with; see the module contract.
 
@@ -199,45 +246,6 @@ class SegmentationPredictor:
     # -----------------------------------------------------------------
     # Input
     # -----------------------------------------------------------------
-
-    def _rgb_of(self, item: Any) -> Any:
-        """Return one image (a path, a PIL image or a 2-D or 3-D array) as ``uint8`` ``(H, W, 3)``."""
-        import numpy as np
-        from PIL import Image
-
-        from train.common.segmentation_data import PairError, decode_image, image_to_rgb
-
-        if isinstance(item, (str, os.PathLike)):
-            if not os.path.isfile(item):
-                raise ConfigError(f"Invalid image: {os.fspath(item)!r} is not a file")
-            try:
-                return decode_image(os.fspath(item))
-            except PairError as exc:
-                raise ConfigError(f"Invalid image: {exc}") from exc
-        if isinstance(item, Image.Image):
-            return image_to_rgb(item)
-        if isinstance(item, np.ndarray) and item.ndim in (2, 3):
-            return _array_to_rgb(item)
-        raise ConfigError(
-            "Invalid image: expected a path, a PIL image, or a 2-D or 3-D numpy array, got "
-            f"{type(item).__name__}"
-            + (f" of shape {tuple(item.shape)}" if hasattr(item, "shape") else "")
-        )
-
-    @staticmethod
-    def _items_of(x: Any) -> List[Any]:
-        """Return the images of the argument of :meth:`predict`, still undecoded."""
-        import numpy as np
-
-        if isinstance(x, np.ndarray) and x.ndim == 4:
-            if len(x) == 0:
-                raise ConfigError(f"Invalid image: the array of images is empty (shape {tuple(x.shape)})")
-            return list(x)
-        if isinstance(x, (list, tuple)):
-            if not x:
-                raise ConfigError("Invalid image: the list of images is empty")
-            return list(x)
-        return [x]
 
     # -----------------------------------------------------------------
     # The model
@@ -269,10 +277,10 @@ class SegmentationPredictor:
 
     def predict(self, x: Any) -> Dict[str, Any]:
         """Return ``{"masks", "class_names"}`` (or ``{"logits", ...}``) for ``x``; see the module contract."""
-        items = self._items_of(x)
+        items = items_of(x)
         answers: List[Any] = []
         for start in range(0, len(items), CHUNK):
-            images = [self._rgb_of(item) for item in items[start : start + CHUNK]]
+            images = [rgb_of(item) for item in items[start : start + CHUNK]]
             logits = self._logits(images)
             for image, one in zip(images, logits):
                 answers.append(self._answer(one, (int(image.shape[0]), int(image.shape[1]))))
@@ -284,12 +292,12 @@ class SegmentationPredictor:
 # The command line's output
 # ---------------------------------------------------------------------
 
-def mask_names(files: Sequence[Union[str, "os.PathLike[str]"]]) -> List[str]:
-    """Return ``<stem>.png`` for each of ``files``; see the module contract."""
+def mask_names(files: Sequence[Union[str, "os.PathLike[str]"]], suffix: str = ".png") -> List[str]:
+    """Return ``<stem><suffix>`` for each of ``files``; see the module contract."""
     names: List[str] = []
     seen: Dict[str, str] = {}
     for file in files:
-        name = Path(file).stem + ".png"
+        name = Path(file).stem + suffix
         if name in seen:
             raise ConfigError(
                 f"Invalid value for 'data': {seen[name]} and {os.fspath(file)} have the same name "
