@@ -58,7 +58,9 @@ Interface contract
     :raises ConfigError: when every value column is constant over the select ``segment``: every window is flat, so naive-last
         and seasonal-naive score exactly 0 and the bar (strictly below them) can be neither met nor judged.
 
-``served_values(contexts)`` / ``served_flat(contexts, scale_floor)`` / ``context_spread(context, scale_floor)`` / ``flat_contexts(contexts, scale_floor, *, resolution=False)`` / ``flat_windows(bank, positions, lookback, scale_floor, *, resolution=False)`` / ``segment_windows(n_series, segment, width, stride)``
+``served_values(contexts)`` / ``served_flat(contexts, scale_floor)`` / ``context_spread(context, scale_floor)`` /
+``flat_contexts(contexts, scale_floor, *, resolution=False)`` / ``flat_windows(bank, positions, lookback, scale_floor, *, resolution=False)`` /
+``segment_windows(n_series, segment, width, stride)``
     The ONE flatness rule, as numpy: a context is flat when its std about its first value is not above ``max(FLOAT32_TINY, scale_floor * mean|x|)``,
     ``FLOAT32_TINY`` the smallest normal float32 number (D-049: there is no larger absolute term; the std is ``span * std(deviation / span)``, so no
     raw deviation is squared and float32 resolves it down to that number). ``context_spread`` returns ``(std, flat)`` of ``(..., lookback, channels)``
@@ -70,21 +72,22 @@ Interface contract
     (``(n, 2)`` ``(series, start)`` into ``bank`` ``(series, rows, channels)``); ``segment_windows`` is every window of every series whose targets
     are ``stride`` apart inside a ``segment``. The tf and keras-ops twins in ``train.common.forecast_data`` write the same comparison with
     ``FLOAT32_TINY``, a test holds them equal at the threshold and one float32 ulp either side, and the float32 export and ``flat_contexts`` (same
-    values, float32 against float64 arithmetic) disagree only within about 1e-5 of the threshold, a relative distance of the std measured on the float32 values
-    (1 and 3 channels, lookbacks up to 1,024; D-050: not stated as a rate, which depends on the channels and on how many windows sit at the threshold). A float32 value
-    below ``FLOAT32_TINY`` (a denormal) reads 0 in ``served_values``, as TensorFlow's cast gives it and its arithmetic reads it (D-050): training, scoring,
-    the count, the flag and ``predict``'s scale decide on that, and so do the keras, saved_model and tflite files; onnxruntime keeps a denormal and decides
-    differently within 1.3 times ``FLOAT32_TINY`` of it (measured, D-050).
+    values, float32 against float64 arithmetic) disagree only within about 1e-5 of the threshold, a relative distance of the std measured on the
+    float32 values (1 and 3 channels, lookbacks up to 1,024; D-050: not stated as a rate, which depends on the channels and on how many windows sit
+    at the threshold). A float32 value below ``FLOAT32_TINY`` (a denormal) reads 0 in ``served_values``, as TensorFlow's cast gives it and its
+    arithmetic reads it (D-050): training, scoring, the count, the flag and ``predict``'s scale decide on that, and so do the keras, saved_model
+    and tflite files; onnxruntime keeps a denormal and decides differently within 1.3 times ``FLOAT32_TINY`` of it (measured, D-050).
 
 ``check_csv_level(values, names, *, lookback, horizon, select_fraction, test_fraction, scale_floor)``
     :param values: the csv's ``(rows, channels)`` array; ``names`` its value columns; ``lookback`` and ``horizon`` the RESOLVED window;
         the two fractions the split by time; ``scale_floor`` the flatness threshold of ``transform_args``.
     :raises ConfigError: for the first column whose nonzero max |x| is outside ``FLOAT32_RANGE`` (the range this task is held to; D-049
-        measured the files finite and within 6e-6 of a window std of ``predict`` far outside it, 128 windows per cell), and for the first segment (train, select, test) of which
-        more than ``FLAT_SHARE`` of the windows at stride ``horizon`` are RESOLUTION-flat (std above 0, not above the threshold: the level is too
-        large for float32 to resolve the spread, so the run would mix units). The sentence names the segment, the count, the first window's rows and the
-        remedies, chosen by the term the first such window FAILS: the relative one (std at most ``scale_floor * mean|x|``) says to subtract the level or
-        take a first or seasonal difference, and only where just ``FLOAT32_TINY`` binds (a window spread under 1.18e-38: a column too small) it says
+        measured the files finite and within 6e-6 of a window std of ``predict`` far outside it, 128 windows per cell), and for the first
+        segment (train, select, test) of which more than ``FLAT_SHARE`` of the windows at stride ``horizon`` are RESOLUTION-flat (std above 0,
+        not above the threshold: the level is too large for float32 to resolve the spread, so the run would mix units). The sentence names the
+        segment, the count, the first window's rows and the remedies, chosen by the term the first such window FAILS: the relative one (std at
+        most ``scale_floor * mean|x|``) says to subtract the level or take a first or seasonal difference, and only where just
+        ``FLOAT32_TINY`` binds (a window spread under 1.18e-38: a column too small) it says
         to multiply the column by a power of ten or set the stretch to exactly 0, and that ``scale_floor`` cannot lower that term;
         an exactly constant window is genuine and never refused (D-047). Called by the pre-claim check and the loader.
 
@@ -129,7 +132,8 @@ FLOAT32_TINY = 1.1754943508222875e-38
 FLOAT32_FLUSH = FLOAT32_TINY * (1.0 - 2.0 ** -25)
 #: The nonzero max |x| a csv column may have: the range this task trains and serves in. It is no longer a float32 limit (D-049: with the spread
 #: computed without squaring raw deviations, the files were measured finite and within 6e-6 of a window std of ``predict`` at window spreads of
-#: 1e-33 to 1e-19 and 1e16 to 1e35 at lookback 32, 128 windows per cell); it is kept because a flat window is forecast in the series' raw units, which means nothing for a unit far from 1.
+#: 1e-33 to 1e-19 and 1e16 to 1e35 at lookback 32, 128 windows per cell); it is kept because a flat window is forecast in the series' raw
+#: units, which means nothing for a unit far from 1.
 FLOAT32_RANGE = (1e-12, 1e15)
 
 
@@ -254,7 +258,8 @@ def read_csv_series(
     # D-048); a blank line before the header or after the last row shifts nothing, so those are dropped here and the rest is read with
     # `skip_blank_lines=False`. Do NOT hand pandas the whole file with `skip_blank_lines=False`: the first blank line is then the header (review pass 5
     # NOTE 1: "has no value column") and a final newline pair is a NaN row. The sha256 is of the bytes as written.
-    body = re.sub(rb"\A(\xef\xbb\xbf)?(?:[ \t]*\r?\n)+", rb"\1", raw).rstrip()   # a UTF-8 byte-order mark stays (pandas decodes it) and does not hide the blank lines (D-050)
+    # A UTF-8 byte-order mark stays (pandas decodes it) and does not hide the blank lines (D-050).
+    body = re.sub(rb"\A(\xef\xbb\xbf)?(?:[ \t]*\r?\n)+", rb"\1", raw).rstrip()
     try:
         frame = pd.read_csv(io.BytesIO(body), skip_blank_lines=False)
     except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:
@@ -333,9 +338,9 @@ def served_flat(contexts: "np.ndarray", scale_floor: float) -> "np.ndarray":
 def flat_contexts(contexts: "np.ndarray", scale_floor: float, *, resolution: bool = False) -> "np.ndarray":
     """The bool ``(n,)`` of contexts ``(n, lookback, channels)`` flat in some channel (the ONE answer to "is this window flat").
 
-    Decided on the FLOAT32 value of the context (:func:`served_flat`; a denormal reads 0 there, D-050), as the exported file decides it, and as ``standardize_tf`` (training
-    and scoring) and ``predict`` decide it. ``resolution=True`` is the csv check's question instead, about the data as written: float64,
-    ignoring a channel with std 0.
+    Decided on the FLOAT32 value of the context (:func:`served_flat`; a denormal reads 0 there, D-050), as the exported file decides it, and
+    as ``standardize_tf`` (training and scoring) and ``predict`` decide it. ``resolution=True`` is the csv check's question instead, about
+    the data as written: float64, ignoring a channel with std 0.
     """
     # DECISION plan-2026-11-13T105600-3a8319ef/D-048
     # The file is handed raw float32 windows and `predict` float64 ones: the float64 rule and the float32 function disagreed on 228 of 400
@@ -348,8 +353,6 @@ def flat_contexts(contexts: "np.ndarray", scale_floor: float, *, resolution: boo
     # D-048 left `standardize_tf` (training and the scoring of `val_mae`, the baselines and the bar) on the float64 window, so the summary's
     # `flat_windows` described windows that the scoring did not treat as flat (3 against 0 on an accepted csv, review pass 5 W2). It decides on
     # the float32 value too now: the count, the flag, the scale and the scoring are ONE decision. Do NOT give the training function its own.
-    import numpy as np
-
     if resolution:
         std, flat = context_spread(contexts, scale_floor)
         flat = flat & (std > 0)
