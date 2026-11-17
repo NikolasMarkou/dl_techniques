@@ -191,7 +191,9 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert "3 counted against 0 scored on a csv with 5 windows 0.1 percent above the threshold" in text, "review pass 5 W2"
     assert "disagree on at most 1 window of 4,000 at any of twelve distances from 1e-7 to 3e-5 of the threshold" in text, "the measured band (r4_rel_fine.log)"
     assert "`standardize_tf` agrees with it on 3,600 of 3,600 windows at three levels" in text
-    assert "flush a float32 value below 1.18e-38 to 0" in text and "297 of 2,000 windows at 0.9 times it" in text, "the one place a file differs from predict"
+    assert "within 4e-6 of a window std of `predict` at window spreads from 1e-19 to 1e-30" in text and "0.09 to 0.23 window std from `predict` on float64 windows" in text
+    assert "7e15 window stds apart" in text and "forecast about 2.6e8 times its own level" in text
+    assert "flush a float32 value below 1.18e-38 to 0" in text and "297 of 2,000 windows at 0.9 times it at lookback 32 and 325 at lookback 168" in text, "the one place a file differs from predict"
     assert "A flat window has no scale" in text and "forecast about 2.6e8 times its own level" in text, "review pass 5 NOTE 8"
     assert "which means little where the series' unit is far from 1" in text
     for gone in ("within two float32 steps", "0 disagreements at every distance", "squares deviations in float32"):
