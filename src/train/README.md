@@ -6,12 +6,12 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 ## `python -m train` and `train.api`
 
-A key=value command line over strict configs. It has five tasks, `image_classification`
+A key=value command line over strict configs. It has six tasks, `image_classification`
 (families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`),
 `image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), `image_denoising`
 (families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), `pretrain` (families `energy_transformer`, `beit`)
-and `time_series_forecasting` (families `nbeats`, `prism`, `tirex`, `xlstm`, `ets`, `timestral`, `mdn`),
-and the same code is a Python function. Run it from the repo root with `.venv`, with
+`time_series_forecasting` (families `nbeats`, `prism`, `tirex`, `xlstm`, `ets`, `timestral`, `mdn`) and
+`depth_estimation` (family `depth_anything`), and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
 ```bash
@@ -306,7 +306,7 @@ denoised = load_model("<run>/final_model.keras").predict("noisy.png")["denoised"
 ```
 
 * **Families** (`train/api/denoising_models.py`; each trains this task only: `python -m train image_denoising model=vit/vit_pico` exits 2 naming
-  the families of this task, and the other four tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
+  the families of this task, and the other five tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
   `"bias_free"`: no additive constant anywhere, so `f(a x) = a f(x)`; the three are checked, see Homogeneity below);
   `convunext_biased` (ConvUNext with `use_bias=true`, its own family because the segmentation family forces
   `output_channels` to the class count) and `scunet` carry constants and are never checked. `scunet` has no variants table in the
@@ -621,7 +621,7 @@ result = train_pretrain(out="auto", model="energy_transformer/et_tiny", data={"d
 
 * **Families** (`train/api/pretrain_models.py`; the variants are the keys of each model module's `MODEL_VARIANTS`, and
   `python -m train list_models task=pretrain` prints them). Each family trains this task only: a `vit/vit_pico` model given to `pretrain`
-  exits 2 naming the families of this task, and the other four tasks refuse these two the same way.
+  exits 2 naming the families of this task, and the other five tasks refuse these two the same way.
 
 | Family | Method | Variants | Recipe (the legacy trainer's) |
 |---|---|---|---|
@@ -826,7 +826,7 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   **Legacy rescore (Step 18, report only, no parity claimed, D-012).** The legacy trainer (`train.energy_transformer.train_masked_completion`, `et_tiny`, cifar10, 12 epochs, its own defaults and stateful masks, 252,913 parameters like G1) was run once and its `best_model.keras` scored on the API's fixed selection stream under the API's loss: 0.17493 against 0.17435 for the earlier gate's G1 best checkpoint scored the same way (the control reproduces that run's logged 0.17435 to 3e-8; the final gate's G1 logged 0.17422 and was not rescored); on the test stream 0.17504 against 0.17450. The two runs differ in their train masks and streams, so the numbers are reported and not graded.
   **Kill and resume (G4).** Each run was started with `checkpoint_args.backup_every_steps=300`, its PID recorded, and sent SIGKILL (that PID only) when the backup's metadata first read epoch 2 batch 299, that is after 2 CSV rows and 300 batches of the third epoch (the process exit status was 137); the same command with `resume_interrupted=true` then finished with exit 0 in ET and exit 0 in BEiT. The copy held 3112 optimizer steps (2 x 1,406 + 300), the final copy 5624 (4 x 1,406): no step lost or run twice after the copy. The CSV has one row per epoch (0 to 3) and the two rows written before the kill are unchanged. The learning rate the CSV records at each epoch start equals the run's own schedule evaluated at 0, 1,406, 3,112 and 4,218 steps, exactly, in both families: `optimizer.iterations == epoch * steps_per_epoch` at the starts of epochs 0, 1 and 3, and the epoch the kill landed in starts from the copy, at 2 x 1,406 + 300 (the documented behaviour of `backup_every_steps`), so for that one epoch the equation reads plus 300. The first three train batches of the resumed process were not read back from the real fit (it was not traced); the stream its stream seed gives (`with_stream(3112)`), digested the way the CPU resume test does on the real CIFAR-10 unaugmented, differs from epoch 0's stream at all three batches in both families.
 * **Follow-up plans**, named and not started: the language tasks (the next user of `fit_kwargs` and `resume_stream`, after
-  `time_series_forecasting` below), depth, DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`), a `task.json` record with `predict`
+  `time_series_forecasting` below), DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`), a `task.json` record with `predict`
   and `export` for pretrain, and the Phase 5 wrappers (the repo map entry among them).
 
 **`time_series_forecasting`** (plan 3a8319ef): trains a forecaster on windows of a series, either a synthetic bank of the library's
@@ -850,7 +850,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 
 * **Families** (`train/api/forecast_models.py`; the variants are the keys of each family's variants table, `python -m train list_models
   task=time_series_forecasting` prints them). Each family trains this task only; `model=vit/vit_pico` exits 2 naming the families of
-  this task, and the other four tasks refuse these seven the same way. Every row is held to its library factory's signature by
+  this task, and the other five tasks refuse these seven the same way. Every row is held to its library factory's signature by
   `signature_census`: a key the family offers is passed through (and may override a variant's value), a key it refuses or forces is
   named in the refusal, and a key the adapter takes from the data (`lookback`, `horizon`, the channels) is refused as `model_args`.
 
@@ -1114,7 +1114,7 @@ problems and a "did you mean". `auto` asks for the family's recipe default.
 images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns `path` and `label`).
 **A data file and dotted keys are two layers of one group** (plan 98b866fb 7.1, D-021): `data=<file>` is the path of a YAML
 file holding the group, and `data.<key>=` tokens put over it, key by key, so a capped or tweaked run needs no copy of the file.
-The same rule holds for all five tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
+The same rule holds for all six tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
 the group's file, then the dotted keys, and the file's `format` reads dotted keys that state none (`data.path_column=` after a
 csv file); a `data.format=` that differs from the file's is refused naming both formats (give a file of that format, or every key on the command line with no file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
 refused as a repeated key. `config.json` records the resolved values, as for every key, and not which layer a value came from.

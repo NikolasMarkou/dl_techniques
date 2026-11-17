@@ -42,6 +42,7 @@ from train.api.denoising_args import (
     DenoisingData,
     DenoiseTransformArgs,
 )
+from train.api.depth_args import DepthData, DepthMetricArgs, DepthOptimArgs, DepthTransformArgs
 from train.api.forecast_args import ForecastLossArgs, ForecastMetricArgs, ForecastTransformArgs, TimeSeriesData
 from train.api.pretrain_args import PretrainData, PretrainMetricArgs, PretrainTransformArgs
 from train.api.segmentation_args import (
@@ -51,6 +52,7 @@ from train.api.segmentation_args import (
     SegMetricArgs,
     SegTransformArgs,
 )
+from train.api.tasks.depth_estimation import DepthEstimationConfig
 from train.api.tasks.image_classification import ImageClassificationConfig
 from train.api.tasks.image_denoising import ImageDenoisingConfig
 from train.api.tasks.image_segmentation import ImageSegmentationConfig
@@ -158,7 +160,8 @@ def classes_checked() -> List[type]:
     then the segmentation task's: its config, its three data configs and its two own groups (step 28:
     a field of a class this list lacks is a field no guard asks about), then the denoising task's: its
     config, its data config and its four own groups, the pretrain task's (config, data, two groups),
-    then the forecasting task's: its config, its data config and its three own groups."""
+    then the forecasting task's: its config, its data config and its three own groups, then the depth task's: its
+    config, its data config and its three own groups."""
     return [
         *args_groups(), ImageClassificationConfig, BuiltinImageData, FolderImageData, CsvImageData,
         ImageSegmentationConfig, BuiltinSegData, FolderSegData, CsvSegData, SegTransformArgs, SegMetricArgs,
@@ -166,6 +169,7 @@ def classes_checked() -> List[type]:
         DenoiseOptimArgs,
         PretrainConfig, PretrainData, PretrainTransformArgs, PretrainMetricArgs,
         TimeSeriesForecastingConfig, TimeSeriesData, ForecastTransformArgs, ForecastMetricArgs, ForecastLossArgs,
+        DepthEstimationConfig, DepthData, DepthTransformArgs, DepthMetricArgs, DepthOptimArgs,
     ]
 
 
@@ -215,9 +219,11 @@ def test_no_exemption_is_stale(reads):
         )
 
 
-def test_the_scan_covers_the_thirty_two_classes_and_the_files_it_names():
+def test_the_scan_covers_the_thirty_seven_classes_and_the_files_it_names():
     assert len(args_groups()) == 7, "the brief names seven groups; a new one is a new row to review"
-    assert len(classes_checked()) == 32
+    assert len(classes_checked()) == 37
+    assert SRC / "train" / "api" / "tasks" / "depth_estimation.py" in SCANNED
+    assert SRC / "train" / "api" / "depth_args.py" in SCANNED
     assert SRC / "train" / "api" / "tasks" / "time_series_forecasting.py" in SCANNED
     assert SRC / "train" / "api" / "forecast_args.py" in SCANNED
     assert SRC / "train" / "api" / "tasks" / "pretrain.py" in SCANNED

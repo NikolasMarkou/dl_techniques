@@ -85,9 +85,11 @@ from train.api.cli import parse_task_arguments
 from train.api.errors import ConfigError
 from train.api.data_args import BuiltinImageData, CsvImageData, FolderImageData
 from train.api.denoising_args import DenoisingData
+from train.api.depth_args import DepthData
 from train.api.forecast_args import TimeSeriesData
 from train.api.pretrain_args import PretrainData
 from train.api.segmentation_args import BuiltinSegData, CsvSegData, FolderSegData
+from train.api.tasks.depth_estimation import DepthEstimationConfig, DepthEstimationTrainer
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
 from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoisingTrainer
 from train.api.tasks.image_segmentation import ImageSegmentationConfig, ImageSegmentationTrainer
@@ -110,6 +112,7 @@ CLASSES = {
     "ImageDenoisingTrainer": ImageDenoisingTrainer,
     "PretrainTrainer": PretrainTrainer,
     "TimeSeriesForecastingTrainer": TimeSeriesForecastingTrainer,
+    "DepthEstimationTrainer": DepthEstimationTrainer,
     "AnalysisArgs": AnalysisArgs,
     "LoggerArgs": LoggerArgs,
     "ImageClassificationConfig": ImageClassificationConfig,
@@ -117,6 +120,7 @@ CLASSES = {
     "ImageDenoisingConfig": ImageDenoisingConfig,
     "PretrainConfig": PretrainConfig,
     "TimeSeriesForecastingConfig": TimeSeriesForecastingConfig,
+    "DepthEstimationConfig": DepthEstimationConfig,
 }
 #: Module aliases the docs use for ``module.function``; a ``train.`` or ``dl_techniques.`` path is
 #: imported as written.
@@ -144,7 +148,7 @@ KEY = re.compile(
 GROUP_ONLY = re.compile(r"`((?:[a-z]+_)+args)`")
 SUMMARY = re.compile(r"`summary\.analyzer\.([A-Za-z0-9_]+)`")
 HOOK = re.compile(
-    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
+    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
 )
 DOTTED = re.compile(r"`([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)(?:\([^`]*\))?`")
 PATH = re.compile(r"\b((?:src|tests)/[\w/.\-]+\.(?:py|md|json))\b")
@@ -166,13 +170,14 @@ ANALYZER_BLOCK_KEYS = set(skipped_analysis_status()) | {"failed_analyses"}
 #: reference is checked against the FIRST config that has the group and the field; a name a document
 #: writes must exist in at least one task, and a value it writes after ``=`` must be valid there.
 CONFIGS = (
-    ImageClassificationConfig, ImageSegmentationConfig, ImageDenoisingConfig, PretrainConfig, TimeSeriesForecastingConfig
+    ImageClassificationConfig, ImageSegmentationConfig, ImageDenoisingConfig, PretrainConfig, TimeSeriesForecastingConfig,
+    DepthEstimationConfig,
 )
 
 #: Every data class of those configs, in the order of :data:`CONFIGS`.
 DATA_CLASSES = (
     BuiltinImageData, FolderImageData, CsvImageData, BuiltinSegData, FolderSegData, CsvSegData, DenoisingData,
-    PretrainData, TimeSeriesData,
+    PretrainData, TimeSeriesData, DepthData,
 )
 
 
@@ -454,6 +459,7 @@ TASK_CONFIGS = {
     "image_denoising": ImageDenoisingConfig,
     "pretrain": PretrainConfig,
     "time_series_forecasting": TimeSeriesForecastingConfig,
+    "depth_estimation": DepthEstimationConfig,
 }
 
 
@@ -570,7 +576,7 @@ def _reference_problems(region: str) -> List[str]:
             continue
         if token.split(".")[0] in (
             "TaskTrainer", "ImageClassificationTrainer", "ImageSegmentationTrainer", "ImageDenoisingTrainer", "PretrainTrainer",
-            "TimeSeriesForecastingTrainer",
+            "TimeSeriesForecastingTrainer", "DepthEstimationTrainer",
         ):
             continue  # the hook rule below owns these, with or without parentheses
         if token.rsplit(".", 1)[1] in FILE_SUFFIXES:
@@ -584,7 +590,7 @@ def _reference_problems(region: str) -> List[str]:
             found.append(f"`{cls_name}.{name}` is not a method of {cls_name}")
     # With parentheses, the parameter names must be the real ones (without them only the name is).
     for cls_name, name, params in re.findall(
-        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
+        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
     ):
         real = _hook_params(CLASSES[cls_name], name)
         shown = [p.strip() for p in params.split(",") if p.strip()]

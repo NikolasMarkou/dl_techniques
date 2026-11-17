@@ -317,8 +317,9 @@ def test_a_list_command_accepts_every_help_word(command, word, cwd):
         # the 11 of resnet_seg and convnext_seg, which read the classifiers' own tables) and the 23 of the five
         # denoising families (plan d483ffab step 7: four with five variants each, scunet with three) and the 7 of the two
         # pretrain families (energy_transformer with three, beit with four) and the 23 of the seven
-        # forecasting families (nbeats 3, prism 4, tirex 4, xlstm 2, ets 3, timestral 4, mdn 3).
-        assert len(result.stdout.split()) == 106
+        # forecasting families (nbeats 3, prism 4, tirex 4, xlstm 2, ets 3, timestral 4, mdn 3) and the 3 of the one depth
+        # family (depth_anything: vit_s, vit_b, vit_l).
+        assert len(result.stdout.split()) == 109
 
 
 # A task that raises a DLTrainError of its own is a user-fixable failure, not a

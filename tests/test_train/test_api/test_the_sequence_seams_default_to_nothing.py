@@ -43,6 +43,7 @@ import contextlib
 import copy
 import dataclasses
 import hashlib
+import importlib
 import json
 import re
 import shutil
@@ -712,6 +713,23 @@ def optim_arm(name):
 )
 def test_no_existing_task_overrides_the_optimizer_options(task_class):
     assert getattr(task_class, "optimizer_options") is getattr(TaskTrainer, "optimizer_options")
+
+
+def test_the_depth_task_is_the_one_task_that_overrides_the_optimizer_options():
+    """Plan 9c7b9096 step 6 (D-003): the seam's one user is the depth task (the DPT head at 10x). Read over every
+    built-in task, so a seventh task that overrides it is a new row to review, not a silent second user."""
+    from train.api.tasks import BUILTIN_TASKS
+    from train.api.tasks.depth_estimation import DepthEstimationTrainer
+
+    users = set()
+    for spec in BUILTIN_TASKS:
+        module = importlib.import_module(spec.function.split(":")[0])
+        trainers = [value for value in vars(module).values()
+                    if isinstance(value, type) and issubclass(value, TaskTrainer) and value.__module__ == module.__name__]
+        assert len(trainers) == 1, (spec.name, trainers)
+        if trainers[0].optimizer_options is not TaskTrainer.optimizer_options:
+            users.add(trainers[0])
+    assert users == {DepthEstimationTrainer}
 
 
 def test_the_optimizer_options_default_to_nothing(world, tmp_path):

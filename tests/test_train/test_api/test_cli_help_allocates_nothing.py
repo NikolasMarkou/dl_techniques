@@ -328,7 +328,8 @@ def test_load_model_and_export_are_on_the_lazy_surface_and_import_nothing_until_
 def test_the_command_help_lists_the_real_task(tmp_path):
     result = run_train(["help"], tmp_path, importtime=False)
     assert result.returncode == 0, result.stderr[-2000:]
-    assert "tasks:\n  image_classification  " in result.stdout
+    first = min(spec.name for spec in BUILTIN_TASKS)
+    assert f"tasks:\n  {first}  " in result.stdout and "\n  image_classification  " in result.stdout
 
 
 def test_the_forbidden_list_names_the_two_keras_backends_and_their_children():

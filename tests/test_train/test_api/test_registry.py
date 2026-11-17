@@ -367,7 +367,8 @@ def test_list_tasks_prints_each_registered_task(fake_module, empty_registries, c
     registry.register_task(task_spec())
     assert cli.main(["list_tasks"]) == 0
     out = capsys.readouterr().out
-    assert out.split()[:1] == ["fake_task"] and "a synthetic task" in out
+    names = [line.split()[0] for line in out.splitlines() if line.strip()]
+    assert "fake_task" in names and names == sorted(names) and "a synthetic task" in out
 
 
 def test_list_models_prints_names_and_filters(fake_module, only_the_fakes, capsys):
@@ -524,7 +525,11 @@ def test_a_python_call_to_main_registers_the_built_in_families_and_tasks(
     assert out.startswith("usage: ") and "model" in out and "epochs" in out
     # The listings see both registries.
     assert train.api.main(["list_tasks"]) == 0
-    assert capsys.readouterr().out.startswith("image_classification  ")
+    out = capsys.readouterr().out
+    from train.api.tasks import BUILTIN_TASKS
+
+    first = min(spec.name for spec in BUILTIN_TASKS)
+    assert out.startswith(f"{first}  ") and "\nimage_classification  " in out
     assert train.api.main(["list_models", "task=image_classification"]) == 0
     assert "vit/vit_pico" in capsys.readouterr().out.split()
     # A second call registers nothing twice.

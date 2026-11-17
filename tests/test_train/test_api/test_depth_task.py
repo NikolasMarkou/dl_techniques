@@ -332,3 +332,369 @@ def test_an_sgd_weight_decay_is_refused_as_for_every_task_with_no_model_regulari
 
 def test_the_evidence_imports_the_worktree():
     assert dl_techniques.__file__.startswith(WT_SRC) and train.__file__.startswith(WT_SRC)
+
+
+# ---------------------------------------------------------------------
+# Second part: the task, its hooks, its bar and its registration
+# ---------------------------------------------------------------------
+#
+# The task module is imported inside the helpers, so each test of this part fails on its own until it exists.
+
+import importlib
+import inspect
+import math
+from types import SimpleNamespace
+
+import numpy as np
+
+from train.api import recipes, registry
+from train.api.trainer import REQUIRED_HOOKS, TaskTrainer
+from train.common import forecast_run
+from train.common.pretrain_data import derive_stream_seed
+from train.common.resume_state import FIT_STATE_NAME, update_fit_state
+
+TASK = "depth_estimation"
+TINY_TREE = dict(train_split=0.6, n_select=8, n_test=8, layout_samples=16, steps_per_epoch=3, workers=0,
+                 max_train_files=None)
+
+
+def task_module():
+    return importlib.import_module("train.api.tasks.depth_estimation")
+
+
+def bare_trainer():
+    """A trainer with no config, for the pure hooks (``object.__new__``: the constructor needs a config)."""
+    trainer = object.__new__(task_module().DepthEstimationTrainer)
+    trainer.config = None
+    trainer._baselines, trainer._epoch_zero, trainer._select_batches = None, None, None
+    return trainer
+
+
+@pytest.fixture(scope="module")
+def world():
+    """An empty registry holding every built-in family and task."""
+    from train.api.tasks import register_builtin_tasks
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(registry, "MODELS", {})
+        patch.setattr(registry, "TASKS", {})
+        recipes.register_builtin_models()
+        register_builtin_tasks()
+        yield
+
+
+@pytest.fixture(scope="module")
+def megadepth_tree(tmp_path_factory):
+    """The synthetic MegaDepth tree of the data library's tests: 9 scenes of 6 pairs at 40 px."""
+    from tests.test_train.test_common_depth_data import write_megadepth_tree
+
+    return write_megadepth_tree(tmp_path_factory.mktemp("megadepth"))
+
+
+def prepared(out, root, **changes):
+    """``(trainer, resolved config, context)`` resolved the way ``run`` resolves, at 28 px and batch 4."""
+    module = task_module()
+    asked = {"out": str(out), "model": "depth_anything/vit_s", "data": {"root": str(root), **TINY_TREE},
+             "epochs": 2, "batch_size": 4, "transform_args": {"image_size": SIZE},
+             "analysis_args": {"model_analysis": False, "figures": False}, **changes}
+    config = validate(module.DepthEstimationConfig, asked)
+    trainer = module.DepthEstimationTrainer(config)
+    family, variant = registry.parse_model_name(config.model, task=trainer.task)
+    resolved, ctx = trainer._resolve(trainer.describe_data(config), family, variant)
+    return trainer, resolved, ctx
+
+
+@pytest.fixture(scope="module")
+def built(world, megadepth_tree, tmp_path_factory):
+    """The data of a from-scratch request on the synthetic tree, built once by the task's own ``build_data``."""
+    trainer, resolved, ctx = prepared(tmp_path_factory.mktemp("built") / "run", megadepth_tree,
+                                      model_args={"pretrained": False})
+    data = trainer.build_data(resolved, ctx)
+    return SimpleNamespace(trainer=trainer, resolved=resolved, context=ctx, data=data)
+
+
+#: The optional hooks the task overrides, and why each one is needed.
+OPTIONAL_HOOKS = (
+    "fit_kwargs",          # the train stream is infinite: an epoch is steps_per_epoch batches
+    "resume_stream",       # a resumed fit starts a fresh iterator: another stream, not a replay
+    "bar_is_met",          # a loss: strictly below, in float32, with a tie band (the default is >=)
+    "compile_options",     # jit_compile False, explicitly
+    "optimizer_options",   # the DPT head at 10x the encoder rate from a pretrained start
+    "check_model_args",    # the weights file, the optimizer and the refused keys before the claim
+    "figure_callbacks",    # the prediction grid of 8 fixed selection crops
+    "run_analysis",        # data-free (the output is disparity, not class probabilities)
+    "summary_fields",      # the scenes, the crops and the stream rule
+    "used_arguments",      # the model keywords the run was built with
+    "unjudged_note",       # why init_scale_warning is null
+    "task_notes",          # the lines of the summary's notes
+)
+
+
+def test_the_class_names_its_task_and_its_metric():
+    cls = task_module().DepthEstimationTrainer
+    assert (cls.task, cls.success_metric) == (TASK, "val_loss")
+    assert issubclass(cls, TaskTrainer)
+    assert cls.resume_order, "a resume trains on another stream and the summary says so"
+
+
+@pytest.mark.parametrize("hook", REQUIRED_HOOKS)
+def test_every_required_hook_is_overridden(hook):
+    cls = task_module().DepthEstimationTrainer
+    assert getattr(cls, hook) is not getattr(TaskTrainer, hook), hook
+
+
+@pytest.mark.parametrize("hook", OPTIONAL_HOOKS)
+def test_every_optional_hook_the_task_relies_on_is_overridden(hook):
+    cls = task_module().DepthEstimationTrainer
+    assert getattr(cls, hook) is not getattr(TaskTrainer, hook), hook
+
+
+def test_the_task_does_not_name_a_stage():
+    own = {name for name in vars(task_module().DepthEstimationTrainer) if not name.startswith("__")}
+    assert not own & {"run", "_resolve", "_callbacks", "_summary_head", "_notes", "_refuse_before_the_claim"}
+
+
+def test_the_function_takes_exactly_the_fields_of_the_config():
+    module = task_module()
+    fields = [f.name for f in dataclasses.fields(module.DepthEstimationConfig)]
+    params = list(inspect.signature(module.train_depth_estimation).parameters)
+    assert params == fields
+    assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in inspect.signature(
+        module.train_depth_estimation).parameters.values())
+
+
+def test_the_metric_names_are_the_compiled_metrics_names_and_build_nothing():
+    from train.common.depth_run import loss_and_metrics
+
+    names = bare_trainer().metric_names(None, None)
+    assert names == [m.name for m in loss_and_metrics()[1]]
+    assert all(isinstance(name, str) for name in names)
+
+
+# -- the bar: strictly below, in float32, with the tie band of the selection batches ----------------
+
+
+def test_a_value_equal_to_the_threshold_is_a_miss():
+    trainer = bare_trainer()
+    assert trainer.bar_is_met(None, 0.5, 0.5) is False
+    assert trainer.bar_is_met(None, 0.4999, 0.5) is True
+    assert trainer.bar_is_met(None, 0.5001, 0.5) is False
+
+
+def test_a_float64_value_that_rounds_to_the_float32_threshold_is_a_miss():
+    trainer = bare_trainer()
+    threshold = float(np.float32(0.7))
+    reached = threshold - 1e-10
+    assert reached < threshold and np.float32(reached) == np.float32(threshold)
+    assert trainer.bar_is_met(None, reached, threshold) is False
+
+
+def test_the_bar_is_the_forecasting_rule_with_the_selection_batch_count():
+    trainer = bare_trainer()
+    threshold = np.float32(1.0)
+    step = np.spacing(threshold)
+    for batches in (None, 2, 16, 2048):
+        trainer._select_batches = batches
+        band = forecast_run.tie_band(batches or 1)
+        for ulps in (0, 1, band, band + 1, band + 40):
+            reached = float(threshold - np.float32(ulps) * step)
+            assert trainer.bar_is_met(None, reached, float(threshold)) is forecast_run.beats_bar(
+                reached, float(threshold), batches or 1), (batches, ulps)
+        assert trainer.bar_is_met(None, float(threshold - np.float32(band) * step), float(threshold)) is False
+        assert trainer.bar_is_met(None, float(threshold - np.float32(band + 1) * step), float(threshold)) is True
+
+
+def test_the_success_value_is_the_minimum_from_the_selection_start(monkeypatch):
+    trainer = bare_trainer()
+    hist = {"val_loss": [0.4, 0.9, 0.6, 0.7], "loss": [0.1, 0.1, 0.1, 0.1]}
+    assert trainer.success_value(hist) == 0.4
+    monkeypatch.setattr(trainer, "selection_start_epoch", lambda config: 2)
+    assert trainer.success_value(hist) == 0.6
+
+
+def write_sidecar(run_dir: Path, loss: float) -> Path:
+    from train.api.run_dir import CHECKPOINTS_DIR
+
+    path = run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    update_fit_state(path, initial={"metrics": {"loss": loss, "abs_rel": 0.3}, "ratio": loss, "warned": None})
+    return run_dir
+
+
+@pytest.mark.parametrize("constant, layout, epoch_zero, expected", [
+    (1.0, 1.02, 1.55, 1.0),     # Step 1 measured: the constant binds
+    (1.0, 0.93, 1.55, 0.93),    # the layout binds
+    (1.0, 1.02, 0.81, 0.81),    # the untrained model binds
+])
+def test_the_threshold_is_the_minimum_of_the_three_terms(tmp_path, constant, layout, epoch_zero, expected):
+    trainer = bare_trainer()
+    trainer._baselines = {"constant": constant, "layout": layout}
+    trainer.read_epoch_zero(write_sidecar(tmp_path, epoch_zero))
+    assert trainer.success_threshold(None) == expected
+
+
+def test_a_resume_reads_the_same_epoch_zero_value_from_the_sidecar(tmp_path):
+    """A resumed process never runs ``initial_loss_check``: a fresh trainer reads the first process's value from the file."""
+    run_dir = write_sidecar(tmp_path, 0.77)
+    first, resumed = bare_trainer(), bare_trainer()
+    for trainer in (first, resumed):
+        trainer._baselines = {"constant": 1.0, "layout": 1.02}
+        assert trainer.read_epoch_zero(run_dir) == 0.77
+    assert first.success_threshold(None) == resumed.success_threshold(None) == 0.77
+
+
+def test_a_threshold_asked_before_the_data_or_the_sidecar_is_refused_by_name(tmp_path):
+    trainer = bare_trainer()
+    trainer._epoch_zero = 0.8
+    with pytest.raises(RuntimeError, match="baselines"):
+        trainer.success_threshold(None)
+    trainer._baselines, trainer._epoch_zero = {"constant": 1.0, "layout": 1.0}, None
+    with pytest.raises(RuntimeError, match="epoch-zero"):
+        trainer.success_threshold(None)
+    with pytest.raises(ValueError, match="epoch-zero"):
+        trainer.read_epoch_zero(tmp_path / "no_run")
+
+
+# -- the hooks against the data the task builds -------------------------------------------------------
+
+
+def test_build_data_hands_every_field_to_the_loader_and_measures_both_baselines(built):
+    data, trainer = built.data, built.trainer
+    assert (data.n_select, data.n_test, data.steps_per_epoch, data.batch_size, data.image_size) == (8, 8, 3, 4, SIZE)
+    assert data.augment is True and data.workers == 0 and data.seed == built.resolved.seed
+    assert trainer._select_batches == data.n_select // data.batch_size == 2
+    assert set(trainer._baselines) == {"constant", "layout"}
+    assert abs(trainer._baselines["constant"] - 1.0) < 1e-5
+    assert math.isfinite(trainer._baselines["layout"])
+
+
+def test_the_smoke_cap_and_the_file_cap_cut_the_train_list_and_never_the_fixed_sets(world, megadepth_tree, tmp_path):
+    trainer, resolved, ctx = prepared(tmp_path / "run", megadepth_tree, model_args={"pretrained": False},
+                                      data={"root": str(megadepth_tree), **TINY_TREE, "max_samples": 5})
+    data = trainer.build_data(resolved, ctx)
+    assert len(data.train_rgb) == 5 and (data.n_select, data.n_test) == (8, 8)
+    trainer, resolved, ctx = prepared(tmp_path / "run2", megadepth_tree, model_args={"pretrained": False},
+                                      data={"root": str(megadepth_tree), **TINY_TREE, "max_train_files": 7,
+                                            "max_samples": 9})
+    assert len(trainer.build_data(resolved, ctx).train_rgb) == 7
+
+
+def test_the_fit_keywords_are_the_datas(built):
+    data = built.data
+    assert built.trainer.fit_kwargs(built.resolved, data) == {
+        "steps_per_epoch": data.steps_per_epoch, "validation_steps": data.n_select // data.batch_size}
+
+
+def test_a_resume_trains_on_the_stream_of_the_completed_steps_and_keeps_the_fixed_sets(built):
+    data = built.data
+    resumed = built.trainer.resume_stream(built.resolved, data, 7)
+    assert resumed.stream_seed == derive_stream_seed(data.seed, 7) != data.stream_seed
+    assert resumed.x_select is data.x_select and resumed.y_test is data.y_test and resumed.layout is data.layout
+    assert resumed.fingerprint == data.fingerprint
+
+
+def test_jit_compile_is_passed_explicitly_false(built):
+    assert built.trainer.compile_options(built.resolved, registry.MODELS["depth_anything"]) == {"jit_compile": False}
+
+
+def test_the_figure_is_the_prediction_grid_of_eight_selection_crops(built, tmp_path):
+    from dl_techniques.callbacks.depth_visualization import DepthPredictionGridCallback
+    from train.common.megadepth import standardize_imagenet
+
+    (grid,) = built.trainer.figure_callbacks(built.resolved, built.data, tmp_path)
+    assert isinstance(grid, DepthPredictionGridCallback) and grid.output_dir == tmp_path
+    n = min(8, built.data.n_select)
+    np.testing.assert_array_equal(np.asarray(grid.val_rgb), built.data.x_select[:n])
+    np.testing.assert_array_equal(np.asarray(grid.val_depth), built.data.y_select[:n, ..., :1])
+    np.testing.assert_array_equal(np.asarray(grid.val_mask), built.data.y_select[:n, ..., 1:])
+    np.testing.assert_allclose(standardize_imagenet(np.asarray(grid.display_rgb)), built.data.x_select[:n], atol=1e-5)
+
+
+def test_the_data_holds_no_classes(built):
+    from train.api.data_args import DataFacts
+
+    trainer = built.trainer
+    trainer.input_check(DataFacts(dataset="megadepth", num_classes=None, image_size=None), built.data)
+    with pytest.raises(RuntimeError, match="holds no classes"):
+        trainer.input_check(DataFacts(dataset="megadepth", num_classes=3, image_size=None), built.data)
+
+
+# -- the optimizer seam: the head at 10x from a pretrained start, nothing from scratch ----------------
+
+
+def test_the_optimizer_options_give_the_head_10x_and_nothing_else_from_a_pretrained_start(world, megadepth_tree,
+                                                                                          tmp_path):
+    from train.depth_anything.train_depth_anything import DECODER_LR_MULTIPLIER
+
+    trainer, resolved, ctx = prepared(tmp_path / "run", megadepth_tree)
+    data = SimpleNamespace(input_shape=(SIZE, SIZE, 3))
+    model = trainer.build_model(resolved, ctx, data)
+    options = trainer.optimizer_options(resolved, model)
+    assert set(options) == {"lr_multipliers"}
+    table = options["lr_multipliers"]
+    head = {v.path for v in model.decoder.trainable_variables}
+    assert set(table) == head and set(table.values()) == {DECODER_LR_MULTIPLIER} == {10.0}
+    encoder = {v.path for v in model.trainable_variables} - head
+    assert encoder and not encoder & set(table), "no encoder variable is in the table"
+    scratch, resolved, ctx = prepared(tmp_path / "run2", megadepth_tree, model_args={"pretrained": False})
+    assert scratch.optimizer_options(resolved, scratch.build_model(resolved, ctx, data)) == {}
+
+
+def test_the_optimizer_options_are_asked_after_the_model_was_built():
+    with pytest.raises(RuntimeError, match="build_model"):
+        bare_trainer().optimizer_options(None, None)
+
+
+# -- the refusals of the task ---------------------------------------------------------------------------
+
+
+def test_a_missing_weights_file_is_refused_by_check_model_args(world, megadepth_tree, tmp_path, monkeypatch):
+    monkeypatch.setenv(WEIGHTS_ENV, str(tmp_path / "no_weights"))
+    with pytest.raises(ConfigError, match=WEIGHTS_ENV):
+        prepared(tmp_path / "run", megadepth_tree)
+    assert not (tmp_path / "run").exists()
+
+
+def test_a_conformal_level_and_a_mixed_precision_are_refused_by_name(megadepth_tree, tmp_path):
+    module = task_module()
+    asked = {"out": str(tmp_path / "run"), "model": "depth_anything/vit_s", "data": {"root": str(megadepth_tree)}}
+    with pytest.raises(ConfigValidationError, match=r"'analysis_args\.conformal_alpha'.*disparity"):
+        validate(module.DepthEstimationConfig, {**asked, "analysis_args": {"conformal_alpha": 0.1}})
+    with pytest.raises(ConfigValidationError, match=r"'precision'.*float32"):
+        validate(module.DepthEstimationConfig, {**asked, "precision": "mixed_float16"})
+
+
+# -- the registration ----------------------------------------------------------------------------------
+
+
+def test_the_task_and_its_family_are_registered(world):
+    from train.api.tasks import BUILTIN_TASKS
+
+    (spec,) = [spec for spec in BUILTIN_TASKS if spec.name == TASK]
+    assert spec.load_config_class() is task_module().DepthEstimationConfig
+    assert spec.load_function() is task_module().train_depth_estimation
+    assert TASK in registry.TASKS
+    assert registry.MODELS["depth_anything"].tasks == (TASK,)
+
+
+def test_the_lazy_surface_names_the_four_depth_rows():
+    import train.api as api
+
+    for name in ("DepthData", "load_depth_data_config", "DepthEstimationConfig", "train_depth_estimation"):
+        assert name in api.__all__, name
+        assert getattr(api, name) is not None
+
+
+def run_cli(*words):
+    env = {**os.environ, "PYTHONPATH": WT_SRC, "CUDA_VISIBLE_DEVICES": "", "MPLBACKEND": "Agg"}
+    return subprocess.run([sys.executable, "-m", "train", *words], env=env, capture_output=True, text=True,
+                          timeout=300)
+
+
+def test_list_tasks_and_list_models_name_the_task_and_its_three_variants():
+    tasks = run_cli("list_tasks")
+    assert tasks.returncode == 0, tasks.stderr[-2000:]
+    assert TASK in tasks.stdout
+    models = run_cli("list_models", f"task={TASK}")
+    assert models.returncode == 0, models.stderr[-2000:]
+    assert models.stdout.split() == ["depth_anything/vit_b", "depth_anything/vit_l", "depth_anything/vit_s"], models.stdout

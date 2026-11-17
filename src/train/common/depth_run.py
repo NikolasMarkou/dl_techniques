@@ -30,6 +30,10 @@ Interface contract
     Plain floats and ints: ``n``; ``loss``, ``pearson``, ``layout``, ``layout_pearson``, ``model_minus_layout``,
     each a mean over the test crops with its ``*_sem`` (sample standard deviation over the square root of the
     count); ``pearson_n`` and ``layout_pearson_n`` (crops with a finite coefficient); ``constant``.
+``prediction_grid(data, vis_dir) -> DepthPredictionGridCallback``
+    The per-epoch figure: rgb, target and aligned prediction of the first :data:`GRID_CROPS` selection crops, every
+    ``monitor_every_n_epochs`` epochs of the legacy trainer's config, written under ``vis_dir``; row 1 shows the
+    crops un-standardized (the inverse of ``standardize_imagenet``).
 
 This module imports Keras and TensorFlow; ``train.api`` imports it inside functions only.
 """
@@ -48,6 +52,8 @@ from train.depth_anything.train_depth_anything import build_depth_loss, build_de
 
 #: Crops per call of the loss in :func:`per_crop_loss`.
 LOSS_CHUNK = 32
+#: Selection crops the per-epoch prediction grid draws.
+GRID_CROPS = 8
 
 # ---------------------------------------------------------------------
 
@@ -138,3 +144,20 @@ def held_out_report(model: "keras.Model", data: Any) -> Dict[str, Any]:
             report[f"{key}_n"] = n
     report["constant"] = constant_baseline(data.test_ds)
     return report
+
+
+def prediction_grid(data: Any, vis_dir: Any) -> Any:
+    """The per-epoch prediction grid of the first selection crops; see the module contract."""
+    from dl_techniques.callbacks.depth_visualization import DepthPredictionGridCallback
+    from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
+    from train.depth_anything.train_depth_anything import DepthAnythingTrainingConfig
+
+    n = min(GRID_CROPS, int(data.n_select))
+    x, y = data.x_select[:n], data.y_select[:n]
+    # Row 1 is drawn in the [-1, 1] convention; the crops are ImageNet-standardized, so the inverse of
+    # `standardize_imagenet` gives the picture back.
+    display = (x * np.asarray(IMAGENET_STD, np.float32) + np.asarray(IMAGENET_MEAN, np.float32)) * 2.0 - 1.0
+    return DepthPredictionGridCallback(
+        val_rgb=x, val_depth=y[..., :1], val_mask=y[..., 1:], output_dir=vis_dir,
+        frequency=DepthAnythingTrainingConfig().monitor_every_n_epochs, max_samples=n,
+        title="Depth Anything, selection crops", display_rgb=display.astype(np.float32))

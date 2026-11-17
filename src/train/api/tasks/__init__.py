@@ -46,6 +46,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.time_series_forecasting:train_time_series_forecasting",
         summary="train a forecaster on a synthetic series bank or a csv, scored against naive-last and seasonal-naive",
     ),
+    registry.TaskSpec(
+        name="depth_estimation",
+        config_class="train.api.tasks.depth_estimation:DepthEstimationConfig",
+        function="train.api.tasks.depth_estimation:train_depth_estimation",
+        summary="train a relative-depth model on MegaDepth, scored against a constant and the average layout",
+    ),
 )
 
 

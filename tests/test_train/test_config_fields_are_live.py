@@ -204,6 +204,12 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/api/forecast_args.py", "ForecastTransformArgs"),
     ("train/api/forecast_args.py", "ForecastMetricArgs"),
     ("train/api/forecast_args.py", "ForecastLossArgs"),
+    # The depth_estimation task: its config, its data config and its three own groups.
+    ("train/api/tasks/depth_estimation.py", "DepthEstimationConfig"),
+    ("train/api/depth_args.py", "DepthData"),
+    ("train/api/depth_args.py", "DepthTransformArgs"),
+    ("train/api/depth_args.py", "DepthMetricArgs"),
+    ("train/api/depth_args.py", "DepthOptimArgs"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
@@ -297,6 +303,23 @@ READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS: Dict[Tuple[str, str], Dict[str,
     # The two fields of the forecasting metric group are the monitor and its direction: `epoch_zero` checks the monitor against
     # the compiled model's metrics and `train_or_restore` picks the best epoch with the direction, for every task.
     ("train/api/forecast_args.py", "ForecastMetricArgs"): {
+        "watch_metric": ("train/api/run_sequence.py", "epoch_zero"),
+        "watch_mode": ("train/api/run_sequence.py", "train_or_restore"),
+    },
+    # The same task-agnostic reads for the depth task (`model` is parsed by `TaskTrainer.run`; the depth trainer takes the
+    # family and the variant from the context), and its metric group, read as the forecasting one is.
+    ("train/api/tasks/depth_estimation.py", "DepthEstimationConfig"): {
+        "debug_args": ("train/api/trainer.py", "TaskTrainer.run"),
+        "logger_args": ("train/api/fit_callbacks.py", "build_callbacks"),
+        "out": ("train/api/trainer.py", "TaskTrainer.run"),
+        "model": ("train/api/trainer.py", "TaskTrainer.run"),
+        "devices": ("train/api/trainer.py", "TaskTrainer.run"),
+        "epochs": ("train/api/run_sequence.py", "train_or_restore"),
+        "checkpoint": ("train/api/run_sequence.py", "build_model"),
+        "resume_interrupted": ("train/api/trainer.py", "TaskTrainer.run"),
+        "metric_args": ("train/api/run_sequence.py", "epoch_zero"),
+    },
+    ("train/api/depth_args.py", "DepthMetricArgs"): {
         "watch_metric": ("train/api/run_sequence.py", "epoch_zero"),
         "watch_mode": ("train/api/run_sequence.py", "train_or_restore"),
     },
