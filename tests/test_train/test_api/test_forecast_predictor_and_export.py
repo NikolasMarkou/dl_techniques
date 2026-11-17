@@ -1131,6 +1131,17 @@ def test_a_window_above_the_bound_of_a_training_column_is_refused_by_name(value,
     assert shown == abs(value) and shown > 1e15, "the sentence shows the magnitude exactly, so it IS above the bound for every refused value (review pass 6 N4: 1e15 + 0.125 read '1e+15 above 1e15')"
 
 
+@pytest.mark.parametrize("value, shown", [(4e15, "4e+15"), (float(np.nextafter(1e15, 2e15)), "1.0000000000000001e+15"), (-2e15, "2e+15"), (1e300, "1e+300")])
+def test_the_refused_magnitude_reads_short_and_stays_above_the_bound(value, shown, one):
+    """Review pass 7 N3. ``repr`` of 4e15 read 4000000000000000.0 (16 digits to count against ``1e15``); the shortest scientific form of the float
+    reads 4e+15 and still prints one more digit than 1e15 for ``nextafter(1e15)``, so every refusal reads as above the bound."""
+    window = raw_windows(1, 1, seed=3)[0].copy()
+    window[5, 0] = value
+    with pytest.raises(ConfigError) as raised:
+        one.predictor.predict(window)
+    assert f"holds a value of magnitude {shown} at row 5, column 0, above 1e15" in str(raised.value)
+
+
 def test_a_window_at_the_bound_is_forecast_by_predict_and_by_a_file_alike(world, tmp_path_factory):
     """The bound itself: a window whose cells reach 1e15 (spread 1e15 about level 0) is accepted, and the keras file agrees with ``predict`` to
     a thousandth of the window std (measured finite and within 4.3e-6 of it up to a spread of 1e35 on 128 windows per cell, ``scratch_review6b/t5_files_beyond_bound.log``)."""
@@ -1153,7 +1164,7 @@ def test_a_csv_whose_last_rows_are_above_the_bound_is_refused_through_predict_to
     values = np.random.default_rng(3).normal(size=rows)
     values[-3] = 4e15
     path.write_text("v\n" + "\n".join(repr(float(v)) for v in values) + "\n")
-    with pytest.raises(ConfigError, match=r"holds a value of magnitude 4000000000000000\.0 at row \d+, column 0, above 1e15"):
+    with pytest.raises(ConfigError, match=r"holds a value of magnitude 4e\+15 at row \d+, column 0, above 1e15"):
         one.predictor.predict(str(path))
 
 
