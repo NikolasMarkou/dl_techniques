@@ -70,8 +70,10 @@ Interface contract
     (``(n, 2)`` ``(series, start)`` into ``bank`` ``(series, rows, channels)``); ``segment_windows`` is every window of every series whose targets
     are ``stride`` apart inside a ``segment``. The tf and keras-ops twins in ``train.common.forecast_data`` write the same comparison with
     ``FLOAT32_TINY``, a test holds them equal at the threshold and one float32 ulp either side, and the float32 export and ``flat_contexts`` (same
-    values, float32 against float64 arithmetic) disagree on at most 1 window of 4,000 within 3e-5 of the threshold (none beyond 1e-4) except that the
-    TensorFlow-based files flush a float32 value below ``FLOAT32_TINY`` to 0 (measured, D-049).
+    values, float32 against float64 arithmetic) disagree on at most 1 window of 4,000 within 3e-5 of the threshold (none beyond 1e-4). A float32 value
+    below ``FLOAT32_TINY`` (a denormal) reads 0 in ``served_values``, as TensorFlow's cast gives it and its arithmetic reads it (D-050): training, scoring,
+    the count, the flag and ``predict``'s scale decide on that, and so do the keras, saved_model and tflite files; onnxruntime keeps a denormal and decides
+    differently within 1.3 times ``FLOAT32_TINY`` of it (measured, D-050).
 
 ``check_csv_level(values, names, *, lookback, horizon, select_fraction, test_fraction, scale_floor)``
     :param values: the csv's ``(rows, channels)`` array; ``names`` its value columns; ``lookback`` and ``horizon`` the RESOLVED window;
@@ -121,6 +123,9 @@ FLAT_SHARE = 0.1
 #: The smallest normal float32 number (``2 ** -126``): the one absolute term of the flat rule. A context whose spread is not above it is flat
 #: whatever ``scale_floor`` says (D-049).
 FLOAT32_TINY = 1.1754943508222875e-38
+#: The magnitude below which TensorFlow's float64 to float32 cast gives 0: float32's smallest normal number less half of one denormal step
+#: (``FLOAT32_TINY * (1 - 2**-25)``, exact). ``served_values`` flushes below it (D-050).
+FLOAT32_FLUSH = FLOAT32_TINY * (1.0 - 2.0 ** -25)
 #: The nonzero max |x| a csv column may have: the range this task trains and serves in. It is no longer a float32 limit (D-049: with the spread
 #: computed without squaring raw deviations, the files were measured finite and within 3e-6 of a window std of ``predict`` at a window spread of
 #: 1e-30 and of 1e35 at lookback 32); it is kept because a flat window is forecast in the series' raw units, which means nothing for a unit far from 1.
@@ -299,10 +304,24 @@ def context_spread(context: "np.ndarray", scale_floor: float) -> "Tuple[np.ndarr
 
 
 def served_values(contexts: "np.ndarray") -> "np.ndarray":
-    """The float32 value of every cell of ``contexts``, as float64: what the exported file is handed (raw float32 windows, D-048)."""
+    """The float32 value of every cell of ``contexts``, as float64: what the exported file is handed (raw float32 windows, D-048).
+
+    A value that float32 would hold as a denormal (below its smallest normal number) is 0, with its sign, the way TensorFlow's cast does:
+    :func:`context_stats_np` and ``standardize_tf`` decide on THIS value, so training, scoring, the count, the flag and ``predict``'s scale
+    read one window (D-050).
+    """
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-050
+    # TensorFlow's float64 to float32 cast (which `standardize_tf` decides on) FLUSHES a denormal to 0, and numpy's cast keeps it: at a context std
+    # of 1.0001 times 1.18e-38, 470 to 841 of 1,000 windows were scored flat by training and counted standardized by the summary (review pass 6 W1;
+    # on an accepted csv the summary said 0 of 72 select windows flat and the scoring treated 38). The flush is the same here. Do NOT cast with numpy
+    # alone and do NOT flush below `FLOAT32_TINY` itself: the hardware decides the underflow on the value rounded to 24 bits with an unbounded exponent,
+    # so a float64 value between `FLOAT32_TINY * (1 - 2**-25)` and `FLOAT32_TINY` is KEPT (as the smallest normal number) and everything under
+    # `FLOAT32_TINY * (1 - 2**-25)` is 0, signed (swept at ulp scale against `tf.cast`, scratch_review6b/t1_cast_sweep.log; a test holds it bit for bit).
     import numpy as np
 
-    return np.asarray(contexts, np.float32).astype(np.float64)
+    values = np.asarray(contexts, np.float64)
+    values = np.where(np.abs(values) < FLOAT32_FLUSH, np.copysign(0.0, values), values)
+    return values.astype(np.float32).astype(np.float64)
 
 
 def served_flat(contexts: "np.ndarray", scale_floor: float) -> "np.ndarray":
@@ -313,7 +332,7 @@ def served_flat(contexts: "np.ndarray", scale_floor: float) -> "np.ndarray":
 def flat_contexts(contexts: "np.ndarray", scale_floor: float, *, resolution: bool = False) -> "np.ndarray":
     """The bool ``(n,)`` of contexts ``(n, lookback, channels)`` flat in some channel (the ONE answer to "is this window flat").
 
-    Decided on the FLOAT32 value of the context (:func:`served_flat`), as the exported file decides it, and as ``standardize_tf`` (training
+    Decided on the FLOAT32 value of the context (:func:`served_flat`; a denormal reads 0 there, D-050), as the exported file decides it, and as ``standardize_tf`` (training
     and scoring) and ``predict`` decide it. ``resolution=True`` is the csv check's question instead, about the data as written: float64,
     ignoring a channel with std 0.
     """

@@ -100,8 +100,8 @@ def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarra
 
     The anchor is the FIRST context value, the offset the mean of the context minus the anchor and the scale the POPULATION std
     (ddof 0); a context whose std is not above ``max(FLOAT32_TINY, scale_floor * mean|x|)`` is FLAT and has ``UNIT_SCALE``. The flat decision
-    is taken on the float32 value of the context (what the exported file is handed, and what ``standardize_tf`` decides on); the numbers
-    stay float64.
+    is taken on the float32 value of the context (what the exported file is handed, and what ``standardize_tf`` decides on), in which a denormal
+    reads 0 (D-050); the numbers stay float64.
     """
     # DECISION plan-2026-11-13T105600-3a8319ef/D-005
     # The statistics come from the CONTEXT only, and the TARGET is divided by the same numbers. Do NOT
@@ -119,7 +119,8 @@ def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarra
     # `context_spread`) here and in `flat_contexts`, the same comparison on the same float32 value in `standardize_tf` and `context_stats_ops`.
     # The std, the anchor and the offset stay float64 so a shift is still held to the float64 limit (casting the whole window rounds a level
     # of 1e5 to 0.0078 and `predict` loses its shift invariance, D-048). Do NOT decide on the float64 window here: the training function
-    # then scores one unit where the summary counts another (review pass 5 W2).
+    # then scores one unit where the summary counts another (review pass 5 W2). The float32 value is TensorFlow's: a denormal cell reads 0
+    # (`served_values`, D-050), because `standardize_tf` casts through TensorFlow, which flushes it (review pass 6 W1).
     context = np.asarray(context, np.float64)
     anchor = context[..., :1, :]
     offset = (context - anchor).mean(axis=-2, keepdims=True)
@@ -139,7 +140,7 @@ def standardize_tf(window: "tf.Tensor", lookback: int, scale_floor: float) -> Tu
     shifted = context - anchor
     offset = tf.reduce_mean(shifted, axis=-2, keepdims=True)
     std = tf.sqrt(tf.reduce_mean(tf.square(shifted - offset), axis=-2, keepdims=True))
-    held = tf.cast(tf.cast(context, tf.float32), tf.float64)   # the float32 value of the context: what the file is handed (D-049)
+    held = tf.cast(tf.cast(context, tf.float32), tf.float64)   # the float32 value of the context: what the file is handed (D-049); TF flushes a denormal to 0 here (D-050)
     held_shifted = held - held[..., :1, :]
     held_std = tf.sqrt(tf.reduce_mean(tf.square(held_shifted - tf.reduce_mean(held_shifted, axis=-2, keepdims=True)), axis=-2, keepdims=True))
     flat = held_std <= tf.maximum(scale_floor * tf.reduce_mean(tf.abs(held), axis=-2, keepdims=True), FLOAT32_TINY)

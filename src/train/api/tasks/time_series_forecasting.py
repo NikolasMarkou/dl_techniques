@@ -564,7 +564,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         ]
         if data.flat_windows["select"] > 0.5 * data.n_select:
             # D-048 (review pass 4 NOTE 4): a flat window is scored in the series' raw unit, so with most of them flat the bar is a number of that unit;
-            # D-049: the count is the decision `standardize_tf` scores with (one decision on the float32 value), so these ARE the windows scored in it
+            # D-049: the count is the decision `standardize_tf` scores with (one decision on the float32 value, a denormal reading 0 in both, D-050), so these ARE the windows scored in it
             notes.append(
                 f"{data.flat_windows['select']} of the {data.n_select} selection windows are flat and scored in the series' own unit, so `val_mae`, "
                 "the baselines and the bar are mostly in the unit the data is written in and change when the column is rescaled (a held "

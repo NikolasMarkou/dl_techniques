@@ -1476,6 +1476,81 @@ class TestTheFlatDecisionHasNoSquaresGuard:
         np.testing.assert_allclose(np.asarray(fd.context_stats_ops(np.asarray(context, np.float32), floor)[2])[:, 0, 0], want, rtol=2e-6)
 
 
+class TestTheFloat32FlushIsOneRule:
+    """D-050 (review pass 6 W1): TensorFlow's float64 to float32 cast flushes a value below float32's smallest normal number to 0 (signed), and
+    ``standardize_tf`` decides on that cast, while ``served_values`` (numpy) kept the denormal, so the count, the flag and ``predict``'s scale
+    read a window that training and scoring did not. ``served_values`` is now the same flush, so ONE value of the window is decided on."""
+
+    @staticmethod
+    def sweep() -> np.ndarray:
+        """float64 values around 1.18e-38 at ulp scale, the float32 denormals and zeros, both signs (the boundary of what TensorFlow flushes
+        is half a float32 step below the smallest normal number, not the number itself: measured in ``scratch_review6b/t1_cast_sweep.log``)."""
+        tiny = fs.FLOAT32_TINY
+        edge = tiny * (1.0 - 2.0 ** -25)                        # the 24-bit midpoint below the smallest normal number
+        named = [0.0, 1e-45, 1.4e-45, 1e-41, 5e-40, 1e-39, 1.17e-38, 1.18e-38, tiny, edge, tiny * (1.0 - 2.0 ** -24), tiny * (1.0 - 2.0 ** -26)]
+        for anchor in (tiny, edge, tiny * (1.0 - 2.0 ** -24)):
+            named += [np.nextafter(anchor, 0.0), np.nextafter(anchor, 1.0)]
+        rng = np.random.default_rng(3)
+        random = np.concatenate([tiny * np.exp(rng.uniform(np.log(1e-8), np.log(4.0), 4000)), tiny * (1.0 + rng.uniform(-1e-7, 1e-7, 4000))])
+        positive = np.concatenate([np.array(named), random])
+        return np.concatenate([positive, -positive, [-0.0]])
+
+    def test_served_values_are_the_cast_tensorflow_hands_the_decision_bit_for_bit(self):
+        values = self.sweep()
+        want = tf.cast(tf.cast(tf.constant(values), tf.float32), tf.float64).numpy()
+        got = fs.served_values(values)
+        assert (want == 0.0).sum() > 100 and (np.abs(want) >= fs.FLOAT32_TINY).sum() > 100, "vacuity: both sides of the flush are swept"
+        assert (np.abs(values.astype(np.float32).astype(np.float64)) != np.abs(want)).any(), "vacuity: plain numpy casting keeps denormals"
+        np.testing.assert_array_equal(got, want)
+        np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
+
+    def test_a_float32_denormal_input_is_flushed_too(self):
+        """The file is handed float32 windows: a denormal cell reads 0 (TensorFlow flushes it on the cast to float64 and on every arithmetic op)."""
+        values = np.array([1e-39, -1e-39, 5e-40, 1e-41, 1.4e-45, fs.FLOAT32_TINY, -fs.FLOAT32_TINY], np.float32)
+        want = tf.cast(tf.constant(values), tf.float64).numpy()
+        np.testing.assert_array_equal(fs.served_values(values), want)
+        assert (fs.served_values(values)[:5] == 0.0).all() and (np.abs(fs.served_values(values)[5:]) == fs.FLOAT32_TINY).all()
+
+    @pytest.mark.parametrize("lookback", [8, 32])
+    @pytest.mark.parametrize("k", [0.9, 1.0001, 1.1])
+    def test_training_and_scoring_decide_as_the_flag_and_the_scale_at_the_tiny_edge(self, lookback, k):
+        """Review pass 6 W1: at a context std of 1.0001 times 1.18e-38, 470 to 841 of 1,000 windows were scored flat by ``standardize_tf`` and
+        standardized by the flag and ``predict``'s scale (about 40 percent of the cells sit below the flush)."""
+        rng = np.random.default_rng(5 + lookback)
+        z = rng.normal(size=(300, lookback, 1))
+        z -= z[:, :1]
+        context = z / (z - z.mean(axis=1, keepdims=True)).std(axis=1, keepdims=True) * fs.FLOAT32_TINY * k
+        flag = fs.flat_contexts(context, 1e-6)
+        assert 0 < flag.sum() < len(flag), "vacuity: both decisions occur at this spread"
+        window = np.concatenate([context, context[:, -2:]], axis=1)
+        out = standardize_tf(tf.constant(window), lookback, 1e-6)[0].numpy()
+        scored_flat = np.abs(out).max(axis=(1, 2)) < 1e-30        # a flat context keeps its raw unit (about 1e-38), a standardized one has std 1
+        np.testing.assert_array_equal(scored_flat, flag)
+        np.testing.assert_array_equal(context_stats_np(context, 1e-6)[2].reshape(-1) == 1.0, flag)
+
+    def test_the_summary_count_is_what_the_scoring_treated_as_flat_at_the_tiny_edge(self, tmp_path):
+        """Review pass 6 s11b: an ACCEPTED csv (every select context has a float64 std of 1.0001 times 1.18e-38, so it is not resolution-flat)
+        whose summary counted 0 of 72 select windows flat while the select dataset scored 38 of them in the series' raw unit."""
+        lookback = horizon = 8
+        rows = 4000
+        rng = np.random.default_rng(6)
+        values = rng.normal(size=rows)
+        low, high = fs.split_bounds(rows, 0.2, 0.2)[1]
+        for _, start in fs.segment_windows(1, (low, high), lookback + horizon, horizon):
+            z = rng.normal(size=lookback)
+            z -= z[0]
+            values[start:start + lookback] = z / (z - z.mean()).std() * fs.FLOAT32_TINY * 1.0001
+            values[start + lookback:start + lookback + horizon] = 0.0 if start + lookback + horizon > high else values[start + lookback:start + lookback + horizon]
+        path = write_csv(tmp_path, rows=rows, a=values)
+        b = load(**csv_kwargs(path, value_cols=["a"], lookback=lookback, horizon=horizon, batch_size=8, steps_per_epoch=None))
+        targets = np.concatenate([y.numpy() for _, y in b.select_ds]).astype(np.float64)
+        windows = np.stack([b.bank[s, a:a + lookback + horizon] for s, a in b.select_windows[:len(targets)]])
+        scored = (np.abs(targets) < 1e-30).all(axis=(1, 2)) & (np.abs(windows[:, lookback:] - windows[:, :1]).max(axis=(1, 2)) < 1.0)
+        assert 0 < scored.sum() < len(scored), "vacuity: some windows are scored in raw units and some are standardized"
+        assert b.flat_windows["select"] == int(scored.sum()), (b.flat_windows["select"], int(scored.sum()))
+        assert int(fs.flat_contexts(windows[:, :lookback], 1e-6).sum()) == b.flat_windows["select"]
+
+
 class TestTheFloat32RangeOfACsv:
     """A column whose nonzero max |x| leaves [1e-12, 1e15] is refused: the exported function squares deviations in float32."""
 

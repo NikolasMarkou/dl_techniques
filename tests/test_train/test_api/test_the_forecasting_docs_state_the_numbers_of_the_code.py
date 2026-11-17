@@ -193,7 +193,11 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert "`standardize_tf` agrees with it on 3,600 of 3,600 windows at three levels" in text
     assert "within 4e-6 of a window std of `predict` at window spreads from 1e-19 to 1e-30" in text and "0.09 to 0.23 window std from `predict` on float64 windows" in text
     assert "7e15 window stds apart" in text and "forecast about 2.6e8 times its own level" in text
-    assert "flush a float32 value below 1.18e-38 to 0" in text and "297 of 2,000 windows at 0.9 times it at lookback 32 and 325 at lookback 168" in text, "the one place a file differs from predict"
+    # D-050 (review pass 6 W1): a float32 denormal reads 0 in the decision of every implementation but onnxruntime's; the TensorFlow files also flush the cells
+    assert "the decision reads a denormal as 0, as TensorFlow does (D-050)" in text and "both read 0 for a denormal now" in text, "review pass 6 W1"
+    assert "the summary said 0 flat and the scoring treated 38 as flat" in text and "1,153 of 2,000 windows at 1.0001 times it at lookback 168" in text, "s11b and t2"
+    assert "8.7 window stds at a spread of 0.9 times 1.18e-38, 5.9 at 1.0001 times, 3.9 at 1.5 times, 1.8 at 3.5 times, 0.32 at 10 times, 0.028 at 100 times, 0.047 at 1e-36 and 3e-6 at 1e-33" in text
+    assert "flush a float32 value below 1.18e-38 to 0 and" not in text and "297 of 2,000 windows at 0.9 times it" not in text, "the pass-5 sentence, measured false in pass 6"
     assert "A flat window has no scale" in text and "forecast about 2.6e8 times its own level" in text, "review pass 5 NOTE 8"
     assert "which means little where the series' unit is far from 1" in text
     for gone in ("within two float32 steps", "0 disagreements at every distance", "squares deviations in float32"):
