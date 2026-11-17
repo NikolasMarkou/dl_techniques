@@ -80,7 +80,7 @@ Interface contract
     :param values: the csv's ``(rows, channels)`` array; ``names`` its value columns; ``lookback`` and ``horizon`` the RESOLVED window;
         the two fractions the split by time; ``scale_floor`` the flatness threshold of ``transform_args``.
     :raises ConfigError: for the first column whose nonzero max |x| is outside ``FLOAT32_RANGE`` (the range this task is held to; D-049
-        measured the files finite and within 3e-6 of a window std of ``predict`` far outside it), and for the first segment (train, select, test) of which
+        measured the files finite and within 6e-6 of a window std of ``predict`` far outside it, 128 windows per cell), and for the first segment (train, select, test) of which
         more than ``FLAT_SHARE`` of the windows at stride ``horizon`` are RESOLUTION-flat (std above 0, not above the threshold: the level is too
         large for float32 to resolve the spread, so the run would mix units). The sentence names the segment, the count, the first window's rows and the
         remedies, chosen by the term the first such window FAILS: the relative one (std at most ``scale_floor * mean|x|``) says to subtract the level or
@@ -128,8 +128,8 @@ FLOAT32_TINY = 1.1754943508222875e-38
 #: (``FLOAT32_TINY * (1 - 2**-25)``, exact). ``served_values`` flushes below it (D-050).
 FLOAT32_FLUSH = FLOAT32_TINY * (1.0 - 2.0 ** -25)
 #: The nonzero max |x| a csv column may have: the range this task trains and serves in. It is no longer a float32 limit (D-049: with the spread
-#: computed without squaring raw deviations, the files were measured finite and within 3e-6 of a window std of ``predict`` at a window spread of
-#: 1e-30 and of 1e35 at lookback 32); it is kept because a flat window is forecast in the series' raw units, which means nothing for a unit far from 1.
+#: computed without squaring raw deviations, the files were measured finite and within 6e-6 of a window std of ``predict`` at window spreads of
+#: 1e-33 to 1e-19 and 1e16 to 1e35 at lookback 32, 128 windows per cell); it is kept because a flat window is forecast in the series' raw units, which means nothing for a unit far from 1.
 FLOAT32_RANGE = (1e-12, 1e15)
 
 

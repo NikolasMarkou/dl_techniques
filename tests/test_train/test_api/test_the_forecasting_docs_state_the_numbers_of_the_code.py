@@ -192,7 +192,10 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert "disagree only within about 1e-5 of the threshold, as a relative distance of the window's std measured on the float32 values" in text, "the measured band (t3_band_distance.log)"
     assert "the largest distance of a disagreement in any cell was 1.0e-5, at 3 channels and lookback 1,024" in text and "1 window of 4,000" not in text, "review pass 6 N3"
     assert "`standardize_tf` agrees with it on 3,600 of 3,600 windows at three levels" in text
-    assert "within 4e-6 of a window std of `predict` at window spreads from 1e-19 to 1e-30" in text and "0.09 to 0.23 window std from `predict` on float64 windows" in text
+    # review pass 6 N6: the maxima of pass 5 were measured on 16 windows and exceeded on 64; re-measured on 128 windows per cell (t4, t5) and the sample size is in the text
+    assert "within 6e-6 of a window std of `predict` at window spreads from 1e-33 to 1e-19 and from 1e16 to 1e35 (128 windows per cell" in text
+    assert "0.08 to 0.31 window std from `predict` on float64 windows (the largest gap over 128 windows in each of 45 cells" in text and "0.09 to 0.23" not in text
+    assert "within 4e-6 of a window std of `predict` at window spreads from 1e-19 to 1e-30" not in text and "(r5_files.log" not in text, "the 16-window numbers are gone"
     assert "7e15 window stds apart" in text and "forecast about 2.6e8 times its own level" in text
     # D-050 (review pass 6 W1): a float32 denormal reads 0 in the decision of every implementation but onnxruntime's; the TensorFlow files also flush the cells
     assert "the decision reads a denormal as 0, as TensorFlow does (D-050)" in text and "both read 0 for a denormal now" in text, "review pass 6 W1"

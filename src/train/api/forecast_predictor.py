@@ -144,7 +144,7 @@ def _window(item: Any, index: int, record: Mapping[str, Any]) -> Any:
     # DECISION plan-2026-11-13T105600-3a8319ef/D-049
     # A window is bounded by the largest max |x| a training column may have (`FLOAT32_RANGE[1]`, the csv check's bound), by name. D-048 refused only above
     # float32's maximum, 3.4e38, which is not where anything fails: under the squares guard every file returned infinity or NaN from spreads of 1e19 while
-    # `predict` answered (review pass 5 NOTE 6). The files were measured finite and within 3e-6 of a window std of `predict` up to 1e35 since, so the bound is
+    # `predict` answered (review pass 5 NOTE 6). The files were measured finite and within 6e-6 of a window std of `predict` up to 1e35 since (128 windows per cell), so the bound is
     # the training range's and not a limit of the files. Do NOT go back to the float32 maximum, and do NOT write a second bound here.
     high = FLOAT32_RANGE[1]
     beyond = np.argwhere(np.abs(window) > high)
