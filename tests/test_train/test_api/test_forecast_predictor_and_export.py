@@ -964,6 +964,7 @@ def test_the_library_keras_export_runs_the_shape_check_of_the_other_formats(case
     assert written.exists() and read_json(written.with_name("ok.keras.task.json")) == run.record
 
 
+@pytest.mark.filterwarnings("error:Conversion of an array with ndim > 0 to a scalar:DeprecationWarning")   # pass 4 NOTE 8: one element, not float() of an array
 def test_the_keras_ops_standardization_is_the_numpy_twin_rule_for_rule():
     """The function a file runs is ``context_stats_ops``: the first-value anchor, the offset from it, the population std and the unit
     scale of a flat context equal ``context_stats_np`` (the rule the Predictor and the bar use), on the cases where a simpler rule
@@ -985,7 +986,7 @@ def test_the_keras_ops_standardization_is_the_numpy_twin_rule_for_rule():
         np.testing.assert_array_equal(got_anchor, anchor, err_msg=name)
         np.testing.assert_allclose(got_offset, offset, rtol=1e-5, atol=1e-6 * float(np.abs(window - anchor).max()), err_msg=name)
         np.testing.assert_allclose(got_scale, scale, rtol=1e-4, atol=1e-30, err_msg=name)
-    assert float(fd.context_stats_ops(np.zeros((1, LOOKBACK, 1), np.float32), floor)[2]) == fd.UNIT_SCALE
+    assert np.asarray(fd.context_stats_ops(np.zeros((1, LOOKBACK, 1), np.float32), floor)[2]).item() == fd.UNIT_SCALE
 
 
 @pytest.mark.parametrize("case", ["nbeats", "prism_quantile"])
