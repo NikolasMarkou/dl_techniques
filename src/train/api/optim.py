@@ -12,10 +12,16 @@ Interface contract
     :raises ConfigValidationError: for every problem below that does not need
         ``steps_per_epoch``; the run is then refused before it is claimed.
 
-``build_optimizer_and_schedule(args, steps_per_epoch, epochs)``
+``build_optimizer_and_schedule(args, steps_per_epoch, epochs, options=None)``
     :param args: a resolved :class:`~train.api.args.OptimArgs` (no ``"auto"``).
     :param steps_per_epoch: optimizer steps in one epoch; a positive ``int``.
     :param epochs: epochs the run lasts; a positive ``int``.
+    :param options: what the task's ``optimizer_options`` hook returned, a mapping
+        whose keys are in :data:`OPTION_KEYS`; ``None``, ``{}`` and an empty
+        ``lr_multipliers`` table all leave the builder's config as it was
+        before the hook existed. A non-empty ``lr_multipliers`` (variable path
+        or ``/``-bounded prefix -> learning-rate multiplier) is added to it, and
+        the builder returns an ``LRMultiplierAdamW``.
     :return: ``(optimizer, schedule)``. ``schedule`` is the learning-rate
         schedule object the optimizer holds, or a plain ``float`` when
         ``args.schedule`` is ``"constant"``.
@@ -23,7 +29,10 @@ Interface contract
         ``optim_args.<field>``: a field still ``"auto"``, an unknown
         ``optimizer`` or ``schedule``, a number out of range, both clips set,
         an option the chosen optimizer does not take, a constant schedule with
-        a warmup, or a ``post_warmup`` decay with no steps left after warmup.
+        a warmup, a ``post_warmup`` decay with no steps left after warmup, an
+        ``options`` key outside :data:`OPTION_KEYS` or an ``options`` that is not
+        a mapping, or a non-empty ``lr_multipliers`` with an optimizer other
+        than adamw.
 
 Where each field goes
 ---------------------
@@ -45,7 +54,7 @@ Module scope imports only the standard library and ``train.api`` (D-012);
 
 import dataclasses
 import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .args import OptimArgs
 from .config import AUTO, join_path
@@ -57,6 +66,8 @@ from .errors import ConfigValidationError
 OPTIMIZERS = ("adamw", "adam", "sgd")
 SCHEDULES = ("cosine_decay", "constant")
 DECAYS = ("total", "post_warmup")
+#: The keys a task's ``optimizer_options`` may name: a closed set (D-003).
+OPTION_KEYS = ("lr_multipliers",)
 
 _BETAS = ("beta_1", "beta_2", "epsilon")
 
@@ -177,6 +188,29 @@ def _problems(
     return lines
 
 
+def _option_problems(options: Any, optimizer: str) -> List[str]:
+    """Return one line per reason the task's ``options`` cannot reach the builder; empty when they can."""
+    if not isinstance(options, Mapping):
+        return [f"Invalid optimizer options: expected a mapping, got {options!r}"]
+    lines = [
+        f"Invalid optimizer option {key!r}: a task may pass only {', '.join(OPTION_KEYS)}"
+        for key in options
+        if key not in OPTION_KEYS
+    ]
+    table = options.get("lr_multipliers", {})
+    if not isinstance(table, Mapping):
+        lines.append(
+            "Invalid optimizer option 'lr_multipliers': expected a mapping of variable path "
+            f"to learning-rate multiplier, got {table!r}"
+        )
+    elif table and optimizer != "adamw":
+        lines.append(
+            "Invalid optimizer option 'lr_multipliers': only the adamw optimizer takes a "
+            f"per-variable rate table, got 'optim_args.optimizer'={optimizer!r}"
+        )
+    return lines
+
+
 def check_optim_args(args: OptimArgs, epochs: int) -> None:
     """Refuse an optimizer configuration that no data could make buildable.
 
@@ -194,10 +228,15 @@ def check_optim_args(args: OptimArgs, epochs: int) -> None:
 
 
 def build_optimizer_and_schedule(
-    args: OptimArgs, steps_per_epoch: int, epochs: int
+    args: OptimArgs,
+    steps_per_epoch: int,
+    epochs: int,
+    options: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[Any, Any]:
     """Build the optimizer and its learning-rate schedule; see the module docstring."""
+    options = {} if options is None else options
     problems = _problems(args, steps_per_epoch, epochs)
+    problems += _option_problems(options, str(args.optimizer).strip().lower())
     if problems:
         raise ConfigValidationError(problems)
 
@@ -243,5 +282,13 @@ def build_optimizer_and_schedule(
         # its own 0.004, and ``weight_decay=null`` would mean a decay the
         # caller never asked for.
         config["weight_decay"] = 0.0 if args.weight_decay is None else args.weight_decay
+    # DECISION plan-2026-11-17T110935-9c7b9096/D-003: the task's options are merged
+    # HERE, from a closed key set, and only when they hold something. Do NOT add an
+    # empty table (the config of every earlier task would gain a key) and do NOT
+    # pass unknown keys through: the builder drops a key it does not read without
+    # a word, the trap the clip mapping above already fell into once.
+    table = options.get("lr_multipliers", {})
+    if table:
+        config["lr_multipliers"] = dict(table)
 
     return optimizer_builder(config, schedule), schedule

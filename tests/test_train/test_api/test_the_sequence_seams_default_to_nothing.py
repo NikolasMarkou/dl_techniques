@@ -23,6 +23,13 @@ refusals that need a stream (a mismatched ``steps_per_epoch``, an infinite ``tra
 the ``resume_stream`` call, among them that a fresh run never asks for a new stream, that a ``None`` answer
 leaves the data and that the default hook answers ``None``, are in ``test_the_stream_contract.py``.
 
+Plan 9c7b9096 step 2 (D-003) adds ``TaskTrainer.optimizer_options(config, model)`` (default ``{}``), called
+once with the built model and handed to ``build_optimizer_and_schedule(..., options=)``, which merges a
+closed key set (``lr_multipliers`` only) into the builder's config. The default arm spies on
+``optimizer_builder`` and compares the config it receives with literals read at the commit before the
+seam (f6f15bedf); the positive arm gets an ``LRMultiplierAdamW`` holding the task's table; another key,
+or a table with an optimizer other than adamw, is refused by name.
+
 Every seam is proved twice, because a default that is "almost" nothing moves a byte in a golden and a
 seam that does nothing passes every default test: the default arm is a real fit of ``vit/vit_pico`` on
 fake CIFAR-10 arrays whose compile call, callback list, ``config.json`` keys and summary keys are read
@@ -32,6 +39,8 @@ the selection window's start is run for real (a callback raises at the start of 
 The tests write only under ``tmp_path``.
 """
 
+import contextlib
+import copy
 import dataclasses
 import hashlib
 import json
@@ -44,7 +53,9 @@ import pytest
 import train.api.recipes as recipes
 import train.api.run_sequence as run_sequence
 from train.api import registry
+from train.api.args import OptimArgs
 from train.api.errors import ConfigError
+from train.api.optim import build_optimizer_and_schedule
 from train.api.registry import KNOWN_PROPERTIES, ModelSpec
 from train.api.run_dir import write_resolved
 from train.api.run_sequence import Run
@@ -52,6 +63,8 @@ from train.api.tasks import register_builtin_tasks
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
 from train.api.tasks.image_denoising import ImageDenoisingTrainer
 from train.api.tasks.image_segmentation import ImageSegmentationTrainer
+from train.api.tasks.pretrain import PretrainTrainer
+from train.api.tasks.time_series_forecasting import TimeSeriesForecastingTrainer
 from train.api.trainer import Evaluation, TaskTrainer
 from train.common.callbacks import AtomicModelCheckpoint
 
@@ -199,6 +212,26 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+@contextlib.contextmanager
+def spying_on_the_optimizer_builder():
+    """Yield a list that receives a deep copy of every config ``optimizer_builder`` is called with.
+
+    ``build_optimizer_and_schedule`` imports the builder from ``dl_techniques.optimization`` at call
+    time, so replacing the package attribute is enough; the real builder still builds the optimizer.
+    """
+    import dl_techniques.optimization as optimization
+
+    seen, real = [], optimization.optimizer_builder
+
+    def spy(config, schedule):
+        seen.append(copy.deepcopy(config))
+        return real(config, schedule)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(optimization, "optimizer_builder", spy)
+        yield seen
+
+
 def config_for(out, **changes):
     return make_config(out, **{**REQUEST, **changes})
 
@@ -292,7 +325,9 @@ def test_an_evaluation_carries_no_extras_and_no_failed_check_by_default():
 def default_run(world, tmp_path_factory):
     run_dir = tmp_path_factory.mktemp("default") / "run"
     task = Scripted(make_config(run_dir, **{**REQUEST, "analysis_args.figures": True}))
-    result = task.run()
+    with spying_on_the_optimizer_builder() as seen:
+        result = task.run()
+    task.builder_configs = seen
     return task, result, run_dir
 
 
@@ -624,3 +659,152 @@ def test_a_resume_inside_the_window_keeps_the_best_epoch_and_its_file(killed_ins
     # The resumed epoch scored 0.2, below the window's 0.3: the file is the earlier segment's, untouched.
     assert sha(run_dir / "best_model.keras") == before
     assert summary["best_checkpoint_max_abs_diff"] < 1e-5
+
+
+# ---------------------------------------------------------------------
+# The optimizer seam (plan 9c7b9096 step 2, D-003)
+# ---------------------------------------------------------------------
+
+#: What ``optimizer_builder`` received at f6f15bedf, the commit before the seam, in key order: the
+#: default arm's classification fit, and four ``OptimArgs`` arms that reach every key the mapping writes.
+#: Read by a spy at that commit (``derive_base_configs.py`` of the plan), not typed from the code.
+BASE_DEFAULT_RUN_CONFIG = [("type", "adamw"), ("gradient_clipping_by_norm", 1.0), ("weight_decay", 0.05)]
+OPTIM_ARMS = {
+    "adamw_global_clip": (
+        {},
+        [("type", "adamw"), ("gradient_clipping_by_norm", 1.0), ("weight_decay", 0.05)],
+    ),
+    "adamw_no_decay_local_clip_betas": (
+        {"weight_decay": None, "clipnorm": 0.5, "global_clipnorm": None, "beta_1": 0.8, "beta_2": 0.95,
+         "epsilon": 1e-7},
+        [("type", "adamw"), ("gradient_clipping_by_norm_local", 0.5), ("beta_1", 0.8), ("beta_2", 0.95),
+         ("epsilon", 1e-07), ("weight_decay", 0.0)],
+    ),
+    "sgd_momentum": (
+        {"optimizer": "sgd", "lr": 0.1, "weight_decay": 1e-4, "momentum": 0.9, "global_clipnorm": None},
+        [("type", "sgd"), ("momentum", 0.9)],
+    ),
+    "adam_constant": (
+        {"optimizer": "adam", "weight_decay": None, "schedule": "constant", "warmup_epochs": 0},
+        [("type", "adam"), ("gradient_clipping_by_norm", 1.0)],
+    ),
+}
+OPTIM_BASE = OptimArgs(
+    optimizer="adamw", lr=3e-4, weight_decay=0.05, momentum=None, beta_1=None, beta_2=None, epsilon=None,
+    schedule="cosine_decay", warmup_epochs=5, warmup_start_lr=1e-8, min_lr_ratio=0.01, decay_over="total",
+    clipnorm=None, global_clipnorm=1.0,
+)
+#: ``options`` values that must all leave the builder's config as it was before the seam; ``"absent"`` is
+#: the call without the keyword. An empty table is no table (the depth task's from-scratch start has none).
+NO_OPTIONS = {"absent": "absent", "None": None, "empty": {}, "empty table": {"lr_multipliers": {}}}
+
+
+def optim_arm(name):
+    changes, expected = OPTIM_ARMS[name]
+    return dataclasses.replace(OPTIM_BASE, **changes), expected
+
+
+@pytest.mark.parametrize(
+    "task_class",
+    [ImageClassificationTrainer, ImageSegmentationTrainer, ImageDenoisingTrainer, PretrainTrainer,
+     TimeSeriesForecastingTrainer],
+)
+def test_no_existing_task_overrides_the_optimizer_options(task_class):
+    assert getattr(task_class, "optimizer_options") is getattr(TaskTrainer, "optimizer_options")
+
+
+def test_the_optimizer_options_default_to_nothing(world, tmp_path):
+    task = ImageClassificationTrainer(config_for(tmp_path / "run"))
+    assert task.optimizer_options(task.config, None) == {}
+
+
+def test_a_default_task_hands_the_optimizer_builder_the_config_it_did_before_the_seam(default_run):
+    task, _, _ = default_run
+    assert len(task.builder_configs) == 1
+    assert list(task.builder_configs[0].items()) == BASE_DEFAULT_RUN_CONFIG
+
+
+@pytest.mark.parametrize("arm", list(OPTIM_ARMS))
+@pytest.mark.parametrize("options", list(NO_OPTIONS))
+def test_no_options_leave_the_builder_config_as_it_was_before_the_seam(arm, options):
+    args, expected = optim_arm(arm)
+    keywords = {} if NO_OPTIONS[options] == "absent" else {"options": NO_OPTIONS[options]}
+    with spying_on_the_optimizer_builder() as seen:
+        optimizer, _ = build_optimizer_and_schedule(args, 351, 10, **keywords)
+    assert [list(config.items()) for config in seen] == [expected]
+    assert type(optimizer).__name__ != "LRMultiplierAdamW"
+
+
+class Multiplied(Scripted):
+    """A task whose ``optimizer_options`` gives the model's last trainable variable a 10x rate."""
+
+    def optimizer_options(self, config, model):
+        self.model_was_built = model.built
+        self.table = {model.trainable_variables[-1].path: 10.0}
+        self.other = model.trainable_variables[0].path
+        return {"lr_multipliers": dict(self.table)}
+
+
+@pytest.fixture(scope="module")
+def multiplied(world, tmp_path_factory):
+    run_dir = tmp_path_factory.mktemp("multiplied") / "run"
+    task = Multiplied(config_for(run_dir, epochs=1))
+    with spying_on_the_optimizer_builder() as seen:
+        task.run()
+    task.builder_configs = seen
+    return task
+
+
+def test_a_task_rate_table_reaches_an_lr_multiplier_adamw(multiplied):
+    from dl_techniques.optimization import LRMultiplierAdamW
+
+    assert multiplied.model_was_built is True
+    assert len(multiplied.compile_calls) == 1
+    optimizer = multiplied.compile_calls[0][1]["optimizer"]
+    assert isinstance(optimizer, LRMultiplierAdamW)
+    assert optimizer.lr_multipliers == multiplied.table
+    (path,) = multiplied.table
+    assert optimizer.multiplier_for(path) == 10.0
+    # Only the named variable moves: the first trainable variable keeps the base rate.
+    assert multiplied.other != path and optimizer.multiplier_for(multiplied.other) == 1.0
+    # The table is the one key the options add: everything else is what the builder got before.
+    (config,) = multiplied.builder_configs
+    assert config["lr_multipliers"] == multiplied.table
+    assert list(config)[-1] == "lr_multipliers"
+
+
+@pytest.mark.parametrize(
+    "options, named",
+    [({"layer_rates": {"a": 2.0}}, "layer_rates"),
+     ({"lr_multipliers": {"a": 2.0}, "momentum": 0.9}, "momentum"),
+     ({"lr_multipliers": [("a", 2.0)]}, "lr_multipliers"),
+     ([("lr_multipliers", {"a": 2.0})], "mapping")],
+    ids=["an unknown key", "a known key beside an unknown one", "a table that is not a mapping",
+         "options that are not a mapping"],
+)
+def test_an_option_outside_the_closed_set_is_refused_by_name(options, named):
+    args, _ = optim_arm("adamw_global_clip")
+    with spying_on_the_optimizer_builder() as seen:
+        with pytest.raises(ConfigError, match=named):
+            build_optimizer_and_schedule(args, 351, 10, options=options)
+    assert seen == [], "refused before the builder is called"
+
+
+@pytest.mark.parametrize("arm", ["sgd_momentum", "adam_constant"])
+def test_a_rate_table_with_an_optimizer_other_than_adamw_is_refused_by_name(arm):
+    args, _ = optim_arm(arm)
+    with spying_on_the_optimizer_builder() as seen:
+        with pytest.raises(ConfigError, match=rf"lr_multipliers.*{args.optimizer}"):
+            build_optimizer_and_schedule(args, 351, 10, options={"lr_multipliers": {"a": 10.0}})
+    assert seen == []
+
+
+def test_a_task_naming_an_unknown_optimizer_option_stops_the_run_before_fit(world, tmp_path):
+    class Unknown(Scripted):
+        def optimizer_options(self, config, model):
+            return {"layer_rates": {"a": 2.0}}
+
+    run_dir = tmp_path / "run"
+    with pytest.raises(ConfigError, match="layer_rates"):
+        Unknown(config_for(run_dir, epochs=1)).run()
+    assert not (run_dir / "training_log.csv").exists(), "refused before fit"

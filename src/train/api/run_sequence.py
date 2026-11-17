@@ -536,8 +536,14 @@ def build_model(run: Run) -> None:
             run.model.build((None, *data.input_shape))
     if config.checkpoint is not None:
         trainer._load_checkpoint(run.model, config.checkpoint)
+    # DECISION plan-2026-11-17T110935-9c7b9096/D-003: the task's optimizer options are asked
+    # for ONCE, here, with the built model, and go to the one builder call below. Do NOT build a
+    # second optimizer in the task or spread the options into ``compile``: the schedule and clip
+    # rules live in build_optimizer_and_schedule only, and it refuses a key outside its closed set.
+    with _bad_value_is_a_config_error(run.run_dir, "the optimizer options"):
+        optimizer_options = trainer.optimizer_options(config, run.model)
     optimizer, _schedule = build_optimizer_and_schedule(
-        optim_cfg, run.steps_per_epoch, config.epochs
+        optim_cfg, run.steps_per_epoch, config.epochs, options=optimizer_options
     )
     # DECISION plan-2026-10-30T132432-a865fa08/D-052: do NOT wrap the optimizer in
     # ``LossScaleOptimizer`` here. ``compile`` does it under ``mixed_float16``

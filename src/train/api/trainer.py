@@ -254,6 +254,14 @@ Hooks (override in a task)
     precision XLA rejects), a mapping that may not name ``optimizer``, ``loss`` or
     ``metrics`` (``ConfigError``). ``spec`` is the family's :class:`~train.api.registry.ModelSpec`.
     Default: ``{}``, and the call is exactly the three-argument call of every earlier task (D-012).
+``optimizer_options(config, model)``
+    Options for the optimizer the run builds, called once with the BUILT model (after the optional
+    ``checkpoint`` load) and passed to :func:`train.api.optim.build_optimizer_and_schedule` as
+    ``options``. A mapping whose keys are in :data:`train.api.optim.OPTION_KEYS`: ``lr_multipliers``,
+    a variable path (or ``/``-bounded prefix) -> learning-rate multiplier table, which makes the
+    optimizer an ``LRMultiplierAdamW`` and is adamw-only. Any other key, or a non-empty table with
+    another optimizer, is a ``ConfigError`` naming it. Default: ``{}``, and the builder gets exactly
+    the config it got before the hook existed (D-003).
 ``fit_kwargs(config, data)``
     Extra keyword arguments for the one ``fit`` call (``steps_per_epoch`` and ``validation_steps``
     of a stream that does not end), a mapping that may not name ``x``, ``y``, ``validation_data``,
@@ -641,6 +649,21 @@ class TaskTrainer:
         :return: a mapping spread into ``model.compile(optimizer=..., loss=..., metrics=...)``;
             it may not name those three.
         """
+        return {}
+
+    def optimizer_options(self, config: StrictConfig, model: Any) -> Dict[str, Any]:
+        """Return options for the optimizer the run builds; default ``{}`` (none).
+
+        :param model: the built model, so a table can name its variables by path.
+        :return: a mapping whose keys are in :data:`train.api.optim.OPTION_KEYS`, passed to
+            :func:`train.api.optim.build_optimizer_and_schedule` as ``options``.
+        """
+        # DECISION plan-2026-11-17T110935-9c7b9096/D-003: the default stays an EMPTY mapping.
+        # Do NOT return a default table or any key here: the builder would get a config the five
+        # earlier tasks never passed, and the goldens and the builder spy of
+        # test_the_sequence_seams_default_to_nothing exist to catch that. Do NOT replace
+        # build_optimizer_and_schedule in a task instead: the schedule and clip rules would then
+        # live in two places.
         return {}
 
     def fit_kwargs(self, config: StrictConfig, data: Any) -> Dict[str, Any]:
