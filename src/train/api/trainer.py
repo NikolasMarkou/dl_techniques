@@ -367,6 +367,7 @@ REQUIRED_HOOKS = (
     "evaluate_and_report",
 )
 
+
 def check_holds_no_classes(task: Any, facts: DataFacts, data: Any) -> None:
     """The ``input_check`` of a task with no classes (denoising, pretrain, forecasting): one body, one sentence.
 
