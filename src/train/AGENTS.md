@@ -261,7 +261,7 @@ from this list in the same commit. No test enforces this list.
 | `run_summary.run_data_free_analysis(model, sample, labels, history, model_name, run_dir, enabled=True)` | The end-of-run weights + spectral analysis for trainers whose data is not per-image labels (the ConvUNeXt denoiser and segmentation trainers). Never raises; the returned `analyzer` block (`{status, analyzers, error, path, seconds}`) is read back from `model_analysis/analysis_results.json` by `read_data_free_analysis_status`, not taken from the analyzer's return value. After an `ok` read-back it deletes the library's empty `model_analysis/summary_dashboard.png` and adds `removed: ["summary_dashboard.png"]` to the block (absent otherwise), and only while `model_metrics`, `calibration_metrics`, `confidence_metrics` and `weight_pca` of the returned result are all empty: a dashboard a panel has data for is kept. `data_free_analysis_config()` is the one `AnalysisConfig` behind it. The analyzer call runs inside `threadpool_limits(limits=limits)`, scoped to that call; `limits` defaults to `DATA_FREE_ANALYSIS_BLAS_THREADS` = 4 (12 BLAS threads oversubscribed the host: 14.7 to 21.0 s against 6.1 to 6.6 s at one thread on one saved model, D-046; four against one: AlexNet 177.8 s against 381.7 s, a 1.9M-parameter ConvUNext 5.7 s against 5.8 s, plan-2026-10-14T062616-81938e81 D-243). Do not write a per-trainer copy |
 | `run_summary.summary_head(config, run_dir, *, params, steps_per_epoch, devices)` | The summary keys the bfunet trainers (ConvUNeXt denoiser, unet, bfcnn) and the ConvUNext segmenter share: the config attributes named in `SUMMARY_CONFIG_KEYS`, `epochs_requested`, the sizes, the three device keys and `image_range` `[0.0, 1.0]` (the CLEAN images' range, not the noisy input, which `--no-clip` leaves unclipped; not `config.json`'s `data_range` string). A new shared fact is added there once; the ConvNeXt reference keeps its own `_summary_head` |
 | `TrainingDashboardCallback(..., best_key=None)` / `render_training_dashboard(..., best_epoch=None)` (`classification_viz`) | Opt-in best-epoch marker: pass `best_key="val_loss"` to draw a dashed line and star at the best value so far (the lowest, or the highest when `resolve_monitor_mode` says `max`, e.g. the segmentation trainer's `--monitor val_miou`). `None` draws nothing and leaves the PNG unchanged. A history that carries `miou` / `val_miou` columns (the segmentation trainer's) gets an extra mIoU panel; a history without them draws the same panels and the same PNG bytes as before |
-| `discover_megadepth_pairs(root, max_files)` / `split_megadepth_pairs(root, train_split, max_train_files, max_val_files)` / `MegaDepthDataset(...)` | MegaDepth RGB+depth pipeline. A `max_files` cap is taken evenly across the scenes; `split_megadepth_pairs` is scene-disjoint (no scene in both splits) |
+| `discover_megadepth_pairs(root, max_files)` / `split_megadepth_scenes(root, train_split)` / `split_megadepth_pairs(root, train_split, max_train_files, max_val_files)` / `MegaDepthDataset(...)` | MegaDepth RGB+depth pipeline. A `max_files` cap is taken evenly across the scenes; `split_megadepth_scenes` is the scene-disjoint deal (no scene in both splits) as scene entries, and `split_megadepth_pairs` (the legacy trainer) and `train.common.depth_data` (the `depth_estimation` task) both cut their lists from it, so the two cannot drift |
 | `compare_runs(a_dir, b_dir, labels, output_dir)` | Two-run comparison; also `python -m train.common.compare_runs A B`. Emits `comparison.md` + curve PNGs |
 | `StepCheckpointCallback(...)` | Step-indexed CSV logging, rolling `.keras` checkpoint window, optional periodic ModelAnalyzer, step-loss plots. Pass an external `step_counter` for resume setups. Use instead of a per-trainer step-checkpoint class. A failed `final.keras` save raises; a failed step save is retried at the next interval and `on_train_end` raises naming it after `final.keras` is written (D-183) |
 | `set_seeds(seed)` | Canonical seeding (`PYTHONHASHSEED` + `random` + numpy + `keras.utils.set_random_seed`). Every entry point that trains takes `--seed`, defaulting to `DEFAULT_SEED` (42, in `train/common/seed.py`; a module that does not import `train.common` spells it as the literal 42, and the census holds the two equal), and passes it here, never a literal; a script that only evaluates, exports or prepares data is named with its reason instead. `tests/test_train/test_every_trainer_seeds_through_the_shared_helper.py` holds both by an AST call-graph census (D-247 of plan-2026-10-14T062616-81938e81). A fixed seed for a fixed evaluation set (`nam/train_dfsa_ste.py`'s quick eval, the TabM synthetic example) stays, on a private generator when the training stream draws from the same global module (D-248) |
@@ -583,7 +583,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   `data_range` and `output`, and no class, statistic or input size; a forecasting record (the fourth kind) has `lookback`,
   `horizon`, `channels`, `value_cols`, `time_col`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and
   `data_sha256` and no class, statistic or input size, and a resume compares its `DATA_KEYS` (the window, channels, columns, scale
-  floor and source) and nothing about the head. A new task is a new row of both tables and a
+  floor and source) and nothing about the head; a depth record (the fifth kind) has `input_size` (the size the model is built at),
+  `channels`, `normalize` (`imagenet`) and `output` (`relative_disparity`), and a resume compares the first three. A new task is a new row of both tables and a
   builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
   `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`.
 - **The `image_denoising` task** (plan d483ffab): `api/tasks/image_denoising.py:ImageDenoisingTrainer` supplies hooks and no
@@ -679,8 +680,17 @@ classification task calls the same `train.common.classification_run` helpers as 
   `check_data_unchanged` were made against the original. `TaskTrainer.resume_order` (a class variable, default `None`) is the clause
   that says what a resume does to the data order, for the summary's resume note and, through `config.resume_help(order=)`, the help of
   `resume_interrupted`: the default text is the older tasks' ("replays epoch 0's"), a task whose `resume_stream` trains on another
-  stream sets it (`pretrain` and `time_series_forecasting` do). Both hooks have two users today, `pretrain` and
-  `time_series_forecasting`; the language tasks are the next.
+  stream sets it (`pretrain`, `time_series_forecasting` and `depth_estimation` do). Both hooks have three users today, `pretrain`,
+  `time_series_forecasting` and `depth_estimation`; the language tasks are the next.
+- **A sixth seam, for a per-variable learning rate** (plan 9c7b9096; a no-op by default, proven in
+  `test_the_sequence_seams_default_to_nothing.py`, with the goldens EXACT after the shared edit).
+  `TaskTrainer.optimizer_options(config, model)` (default `{}`) is called ONCE in `run_sequence`, after the model is built and any
+  `checkpoint` is loaded, and its result goes to `build_optimizer_and_schedule(..., options=)`, the one builder, so the schedule
+  and clip rules stay in one place. The keys are a closed set, `optim.OPTION_KEYS` (only `lr_multipliers`, a mapping of variable
+  path to multiplier). An unknown key, a bad entry (`lr_multiplier_problem`, the optimizer's own rule) or a non-empty table with an
+  optimizer other than `adamw` is a `ConfigError` naming it, raised after the claim because the table names the built model's
+  variables; an empty mapping or an empty table leaves the builder's config as it was. Do not build an optimizer in a task, and do
+  not spread the options into `compile`. `depth_estimation` is its one user (the DPT head at 10x from a pretrained start).
 - **The mask-key rule** (D-004, D-005; why a pretrain run is reproducible and a resume does not leak). A mask is a function of a key
   and nothing stateful: `make_stateless_masked_patch_map_fn` (`dl_techniques/datasets/vision/masked_patches.py`) and
   `make_stateless_beit_mim_map_fn` (`beit_masking.py`) return `fn(index, image, *_)`. The SELECT and TEST masks are keyed on
@@ -766,6 +776,25 @@ classification task calls the same `train.common.classification_run` helpers as 
     `test_forecast_resume.py`, `test_forecast_predictor_and_export.py` and `tests/test_train/test_common_forecast_data.py`; they share
     `_forecast_fixtures.py` (the registry `world`, the one series csv writer, the numpy oracle of the standardization) and the
     pretrain resume test shares `_resume_protocol.py` (the SIGKILL chain and its assertions) with `test_forecast_resume.py`.
+- **The `depth_estimation` task** (plan 9c7b9096): `api/tasks/depth_estimation.py:DepthEstimationTrainer` supplies hooks and no
+  stage; it is the third user of `fit_kwargs` and `resume_stream` and the first of `optimizer_options`. One family, `depth_anything`
+  (`vit_s`, `vit_b`, `vit_l`): the adapter `create_depth_anything`, the tables `ALLOWED`, `REFUSED`, `FORCED` and `SUPPLIED` (held
+  to the factory's signature by `signature_census`), `RECIPE`, `depth_models.resolve_depth_args`, `check_weights` and `builtin_depth_models` are in
+  `api/depth_models.py`; the groups (`DepthData`, `DepthTransformArgs`, `DepthMetricArgs`, and `DepthOptimArgs`, whose `auto` rate
+  follows `model_args.pretrained`) and `depth_facts` are in `api/depth_args.py`; the data (`deal_megadepth_scenes`, `DepthStream`,
+  `DepthBatches`, `load_depth_batches`) is in `train/common/depth_data.py` and the scoring (`loss_and_metrics`, `constant_baseline`,
+  `layout_baseline`, `held_out_report`, `prediction_grid`) in `train/common/depth_run.py`; both import TensorFlow, so `train.api`
+  imports them inside functions only. Rules a change must keep: the selection and test crops are keyed on `(seed, salt, pool
+  index)`, never on the stream seed, and a resume moves only the stream seed (`DepthBatches.with_stream(completed_steps)`); the
+  train stream is an infinite `PyDataset` whose batch `i` is a pure function of `(stream_seed, i)`, so `fit_kwargs` passes
+  `steps_per_epoch` and `validation_steps`; the bar is `min(constant, layout, epoch-zero)` on the selection crops, the epoch-zero
+  term read from the fit sidecar, met through `forecast_run.beats_bar`; the weights check and the optimizer refusal run in
+  `DepthEstimationTrainer.check_model_args`, before the claim; `compile_options` returns `jit_compile` false explicitly; `run_analysis` is the data-free
+  analysis. The record is the fifth kind: a `DEPTH` row in every table of `TASK_TABLES`, in `PREDICT_WRITERS` and in `DATA_LISTERS`,
+  and `export` refuses any shape but the record's (`depth_predictor.check_export`), because the converters write a file of the wrong
+  size without an error. The user-facing description, with the measured numbers, is in [`README.md`](README.md). Tests:
+  `tests/test_train/test_api/test_depth_task.py`, `test_depth_resume.py` (with the child `_depth_child.py`),
+  `test_depth_predictor_and_export.py` and `tests/test_train/test_common_depth_data.py`.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `MODEL_CHECKS`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served)`: the shape `export` traces, the cells it refuses, the
@@ -775,7 +804,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   is known to the reader only when it has a row in EVERY table of `TASK_TABLES` (`record_problems` refuses another, naming the tasks
   of the first table it is missing from), and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
   only for a task whose `RECORD_KEYS` hold those keys. A task that writes a record is one row in each table plus one in `PREDICT_WRITERS` and one in `DATA_LISTERS`;
-  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. `pretrain` writes none (D-013 of plan
+  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. Five tasks write a record, `depth_estimation`
+  the fifth; `pretrain` writes none (D-013 of plan
   46e5318f: `task_record` returns `None`), so it is in no table and `predict`, `export` and `load_model` of its run directory stop
   in `read_record` with the existing `task.json` sentence; do not write a partial record for it, a record that exists makes
   `load_model` dispatch on a task it has no predictor for. Do not add an `elif task ==` to

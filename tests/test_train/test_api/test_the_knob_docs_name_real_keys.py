@@ -37,7 +37,9 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
 * a sentence that says "default", names one key and a ``true``, ``false``, ``null`` or number after
   "is" or "=", states that key's default, and it must equal the real one (JSON spelling);
 * a table whose second column is ``Default`` must hold, for every key in its first column, the
-  real default, with or without backticks around it;
+  real default, with or without backticks around it; a table preceded by ``<!-- keys-of: <task> -->`` is read
+  against THAT task's config (its own default, and a key the task does not have is named even when another task
+  has it), every other table against the first config that has the field;
 * a table whose third column is ``Read at``: every ``src/`` or ``tests/`` path in the region must
   exist, and every backticked ``Class.attr`` or ``module.function`` rooted at a class or module this
   file knows (``CLASSES``, ``MODULES``, a ``train.`` or ``dl_techniques.`` dotted path) must resolve;
@@ -528,11 +530,82 @@ def _default_claims(text: str) -> List[str]:
     return found
 
 
-def _table_problems(text: str) -> List[str]:
+#: ``<!-- keys-of: <task> -->`` before a table (blank lines between allowed): the table's first-column keys are read
+#: against THAT task's config, not the first config that has the field, so a task whose default differs from an earlier
+#: task's (``data.n_select`` is 128 for depth, null for forecasting) lists its own default, and a key the task does not
+#: have is named even when another task has it.
+TASK_TABLE = re.compile(r"^<!-- keys-of: ([a-z_]+) -->$")
+
+
+def _task_field(task: str, group: str, name: str):
+    """Return ``(field, problem)`` for the key ``group.name`` of ``task``'s config.
+
+    ``(None, None)`` for a free mapping (``model_args``: unchecked, as everywhere in this file).
+    """
+    hints = typing.get_type_hints(TASK_CONFIGS[task])
+    missing = f"`{group}.{name}` is not a key of the {task} task"
+    if group not in hints:
+        return None, missing
+    classes = [c for c in (typing.get_args(hints[group]) or (hints[group],)) if dataclasses.is_dataclass(c)]
+    if not classes:
+        return None, None
+    for cls in classes:
+        fields = {f.name: f for f in dataclasses.fields(cls)}
+        if name in fields:
+            return fields[name], None
+    return None, missing
+
+
+def _task_tables(lines: List[str]):
+    """Return ``({line index: task} for the lines of every marked table, problems of the markers)``."""
+    scope: Dict[int, str] = {}
     found: List[str] = []
+    for index, line in enumerate(lines):
+        match = TASK_TABLE.match(line.strip())
+        if not match:
+            continue
+        task = match.group(1)
+        if task not in TASK_CONFIGS:
+            found.append(f"`<!-- keys-of: {task} -->` names no task (the tasks: {', '.join(TASK_CONFIGS)})")
+            continue
+        start = index + 1
+        while start < len(lines) and not lines[start].strip():
+            start += 1
+        if start >= len(lines) or not lines[start].startswith("|"):
+            found.append(f"`<!-- keys-of: {task} -->` is not followed by a table")
+            continue
+        while start < len(lines) and lines[start].startswith("|"):
+            scope[start] = task
+            start += 1
+    return scope, found
+
+
+def _task_table_problems(lines: List[str], scope: Dict[int, str]) -> List[str]:
+    """Every first-column key of a marked table: a key of its task, and its default the task's own."""
+    found: List[str] = []
+    for index, task in sorted(scope.items()):
+        cells = _cells(lines[index])
+        match = re.fullmatch(r"`((?:[a-z]+_)+args|data)\.([A-Za-z0-9_]+)`", cells[0])
+        if not match or len(cells) < 2:
+            continue  # the header, the separator, a row about something else
+        field, problem = _task_field(task, *match.groups())
+        if problem:
+            found.append(problem)
+        elif field is not None and cells[1].strip("`") != _default_text(field):
+            found.append(f"`{match.group(1)}.{match.group(2)}` is documented with default {cells[1]}, "
+                         f"the {task} task has {_default_text(field)}")
+    return found
+
+
+def _table_problems(text: str) -> List[str]:
     lines = text.splitlines()
+    scope, found = _task_tables(lines)
+    found.extend(_task_table_problems(lines, scope))
     index = 0
     while index < len(lines):
+        if index in scope:
+            index += 1  # a marked table is read against its own task above
+            continue
         header = _cells(lines[index]) if lines[index].startswith("|") else []
         if len(header) >= 2 and header[1].lower() == "default":
             index += 2  # the header and its separator
@@ -551,8 +624,8 @@ def _table_problems(text: str) -> List[str]:
         else:
             index += 1
     # Wherever a row sits, a first-column key whose second cell IS a value must have the real default.
-    for line in lines:
-        if not line.startswith("|"):
+    for index, line in enumerate(lines):
+        if not line.startswith("|") or index in scope:
             continue
         cells = _cells(line)
         match = re.fullmatch(r"`((?:[a-z]+_)+args|data)\.([A-Za-z0-9_]+)`", cells[0])
@@ -856,6 +929,31 @@ def test_a_row_is_compared_wherever_it_sits_and_a_default_column_is_compared_wha
     # Inside a Default table a second cell that is prose is not the default either.
     assert any("documented with default usually on" in p
                for p in problems(good.replace("`analysis_args.figures` | `true`", "`analysis_args.figures` | usually on")))
+
+
+def test_a_table_marked_with_its_task_is_read_against_that_tasks_config():
+    """A task whose default differs from an earlier task's (``data.n_select`` is 128 for depth and null for forecasting)
+    lists its own default in a table marked ``<!-- keys-of: <task> -->``, and a key that task does not have is named."""
+    good = _good_region()
+    header = "| Key | Default | Read at |\n|---|---|---|\n"
+
+    def marked(rows: str, task: str = "depth_estimation", between: str = "\n") -> str:
+        return good.replace(END, f"\n<!-- keys-of: {task} -->\n{between}{header}{rows}\n{END}")
+
+    own = '| `data.n_select` | `128` | text |\n| `transform_args.augment` | `"flip"` | text |'
+    assert problems(marked(own)) == []
+    # Unmarked, the same rows are read against the first config that has each field, whose defaults differ.
+    unmarked = problems(good.replace(END, f"\n{header}{own}\n{END}"))
+    assert any("`data.n_select` is documented with default `128`" in p for p in unmarked), unmarked
+    # A key another task has and this one does not, a wrong default, a task that does not exist, a marker with no table.
+    assert any("`data.lookback` is not a key of the depth_estimation task" in p
+               for p in problems(marked('| `data.lookback` | `"auto"` | text |')))
+    assert any("`data.n_select` is documented with default `64`, the depth_estimation task has 128" in p
+               for p in problems(marked("| `data.n_select` | `64` | text |")))
+    assert any("names no task" in p for p in problems(marked(own, task="depth")))
+    assert any("is not followed by a table" in p for p in problems(marked("", between="prose\n\n")))
+    # `model_args` is a free mapping, unchecked here as everywhere (see the module docstring).
+    assert problems(marked("| `model_args.pretrained` | `true` | text |")) == []
 
 
 def test_a_file_name_a_name_and_a_module_function_must_exist():

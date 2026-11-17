@@ -825,9 +825,13 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   The exactness claims above, now on the GPU: the best checkpoint's reload gap is exactly 0.0 in all five runs; the zero-predictor baseline is the same float in G1 and in the ET kill run (1.0040831565856934 and 1.0040831565856934); the untrained `val_loss` is not the same float across two processes with one seed in either family: ET 2.3379111289978027 in G1 and 2.3379108905792236 in the ET kill run (relative difference 1.0e-07), BEiT 6.2661356925964355 in G3 and 6.266140460968018 in the BEiT kill run (7.6e-07), so equality across processes on the GPU is measured for the baseline and not for the untrained model's `val_loss` (the earlier gate's ET pair was equal, its BEiT pair was not).
   **Legacy rescore (Step 18, report only, no parity claimed, D-012).** The legacy trainer (`train.energy_transformer.train_masked_completion`, `et_tiny`, cifar10, 12 epochs, its own defaults and stateful masks, 252,913 parameters like G1) was run once and its `best_model.keras` scored on the API's fixed selection stream under the API's loss: 0.17493 against 0.17435 for the earlier gate's G1 best checkpoint scored the same way (the control reproduces that run's logged 0.17435 to 3e-8; the final gate's G1 logged 0.17422 and was not rescored); on the test stream 0.17504 against 0.17450. The two runs differ in their train masks and streams, so the numbers are reported and not graded.
   **Kill and resume (G4).** Each run was started with `checkpoint_args.backup_every_steps=300`, its PID recorded, and sent SIGKILL (that PID only) when the backup's metadata first read epoch 2 batch 299, that is after 2 CSV rows and 300 batches of the third epoch (the process exit status was 137); the same command with `resume_interrupted=true` then finished with exit 0 in ET and exit 0 in BEiT. The copy held 3112 optimizer steps (2 x 1,406 + 300), the final copy 5624 (4 x 1,406): no step lost or run twice after the copy. The CSV has one row per epoch (0 to 3) and the two rows written before the kill are unchanged. The learning rate the CSV records at each epoch start equals the run's own schedule evaluated at 0, 1,406, 3,112 and 4,218 steps, exactly, in both families: `optimizer.iterations == epoch * steps_per_epoch` at the starts of epochs 0, 1 and 3, and the epoch the kill landed in starts from the copy, at 2 x 1,406 + 300 (the documented behaviour of `backup_every_steps`), so for that one epoch the equation reads plus 300. The first three train batches of the resumed process were not read back from the real fit (it was not traced); the stream its stream seed gives (`with_stream(3112)`), digested the way the CPU resume test does on the real CIFAR-10 unaugmented, differs from epoch 0's stream at all three batches in both families.
-* **Follow-up plans**, named and not started: the language tasks (the next user of `fit_kwargs` and `resume_stream`, after
-  `time_series_forecasting` below), DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`), a `task.json` record with `predict`
-  and `export` for pretrain, and the Phase 5 wrappers (the repo map entry among them).
+* **Follow-up plans**, named and not started: starting a run from an earlier run's weights (Phase 4g,
+  `research/roadmap/20261117_train_api_init_from.md`: one `init` key for every task in place of `checkpoint`, at a new
+  size, with a new head, as a deeper variant or with another task's backbone where the shapes allow, refused by name
+  otherwise), then the pretrain record (Phase 4h: a `task.json` record with `predict` and `export` for pretrain, and
+  classifier families that a BEiT or Energy Transformer encoder can seed through `init`), then the language tasks (the
+  next user of `fit_kwargs` and `resume_stream`, after `time_series_forecasting` and `depth_estimation` below), DINO, the BEiT
+  tokenizer as a method of its own (`beit_tokenizer`), and the Phase 5 wrappers (the repo map entry among them).
 
 **`time_series_forecasting`** (plan 3a8319ef): trains a forecaster on windows of a series, either a synthetic bank of the library's
 generator patterns or one csv of your own. `out`, `model` and `data` are required (every key of `data` has a default, but the group `data` itself must be named: `data.format=builtin` is the synthetic bank); `data.lookback` and `data.horizon` come from the family's recipe. The family chooses the model. Every series is cut BY TIME into a training slice, a slice that selects the best epoch and a
@@ -1104,6 +1108,170 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   **A longer G3 (informational, not gated).** `prism/tiny`, `tirex/tiny` and `xlstm/tiny`, each with `epochs=4 data.steps_per_epoch=500 jit_compile=true` (2,000 steps, GPU 0): prism best `val_mae` 0.7706 against a threshold of 0.8303, met (per epoch 0.9901, 0.8456, 0.7838, 0.7706); tirex best `val_mae` 0.7471 against a threshold of 0.8303, met (per epoch 0.8698, 0.7964, 0.7614, 0.7471); xlstm best `val_mae` 0.8060 against a threshold of 0.8303, met (per epoch 0.9330, 0.8789, 0.8168, 0.8060). The same three families missed the bar at 300 steps without jit (G3 above); at 2,000 steps with jit all three met it, so 300 steps were too few for them; the run is a single seed and says nothing about the two quantile variants.
   The G4 csv is 3,000 rows of `trend_daily_seasonal` and `multi_seasonal` from the bank with a timestamp column; at the recipe's batch of 128 a file that size is refused by name (the selection segment must hold one batch of non-overlapping windows), so G4 ran at batch 32 with lookback 48 and horizon 12.
 
+**`depth_estimation`** (plan 9c7b9096): trains a monocular depth model on MegaDepth, read in place. The one family is
+`depth_anything` (a DINOv2 encoder and a DPT head), and its output is relative disparity per pixel (larger is nearer), defined up to
+a scale and a shift per image, not metric depth. `out`, `model` and `data` are required (every key of `data` has a default, but the
+group itself must be named: `data.format=builtin` is MegaDepth at its default root). The encoder starts from the official DINOv2
+weights unless `model_args.pretrained=false`. The scenes are split three ways: train scenes, selection scenes that pick the best
+epoch and set the bar, and test scenes scored once after `fit`. The run is reproducible, resumable, and `predict` and `export` work on
+its run directory.
+
+```bash
+python -m train list_models task=depth_estimation
+python -m train depth_estimation     # every key of the task, its type and default
+python -m train depth_estimation out=auto model=depth_anything/vit_s data.format=builtin
+python -m train depth_estimation out=auto model=depth_anything/vit_s data.root=/data/megadepth
+```
+
+```python
+from train.api import train_depth_estimation
+result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={"format": "builtin"})
+```
+
+* **Family** (`train/api/depth_models.py`; `python -m train list_models task=depth_estimation` prints the variants). `depth_anything`
+  trains this task only: `model=vit/vit_pico` exits 2 naming it, and the other five tasks refuse it the same way. Its variants are
+  `vit_s`, `vit_b` and `vit_l` (DINOv2 small, base and large). The adapter is held to the factory's signature by `signature_census`:
+  it offers one key, `model_args.pretrained`; it supplies `variant`, `encoder_type` and `image_shape` itself (the last from
+  `transform_args.image_size`); it forces `encoder_kind` to `"real"`, `use_feature_alignment` to false, `include_top` to true and
+  `input_value_range` to null; and it refuses `dpt_features`, `dpt_out_channels`, `output_channels`, `kernel_initializer`,
+  `kernel_regularizer`, `loss_weights`, `cutmix_prob`, `color_jitter_strength`, `enable_semi_supervised` and `encoder` by name, before
+  the claim.
+* **Recipe** (`RECIPE` in `train/api/depth_models.py`, the setting the legacy trainer's gate measured): AdamW at 5e-6 for the encoder
+  with the DPT head at 10x (below), 30 epochs of `data.steps_per_epoch` 100 steps (3,000 steps), batch 8, 252 px crops (an 18 x 18 grid
+  of 14 px DINOv2 patches), weight decay 1e-5, one warmup epoch, cosine over the whole run to 0.01 of the peak, a GLOBAL gradient clip of
+  1.0, and a patience of 30, so early stopping never ends a run of the recipe. `vit_b` and `vit_l` take the same recipe. Measured at
+  batch 8 on an RTX 4090, on batches already in memory: `vit_s` steps in 172 ms and peaks at 3.49 GiB of GPU memory, `vit_b` 190 ms
+  and 9.51 GiB, `vit_l` 410 ms and 16.65 GiB; only `vit_s` was trained. From random weights (`model_args.pretrained=false`) an `auto`
+  `optim_args.lr` is 2e-4, the legacy from-scratch rate, and the head gets no 10x.
+* **Keys of the task** (`python -m train depth_estimation` lists all, with their help; the groups `optim_args`, `checkpoint_args`,
+  `logger_args`, `analysis_args` and `debug_args`, and `epochs`, `batch_size`, `seed`, `devices`, `precision`, `resume_interrupted`
+  and `checkpoint`, are the shared ones and mean what they mean for the other tasks, except where this section says otherwise). The
+  table holds this task's own values; some keys of `data` have other ones in the forecasting task.
+
+<!-- keys-of: depth_estimation -->
+| Key | Default | Read at |
+|---|---|---|
+| `data.format` | `"builtin"` | `DepthEstimationTrainer.build_data`; the only format |
+| `data.dataset` | `"megadepth"` | `DepthData.problems`; the only dataset |
+| `data.root` | `"/media/arxwn/data0_4tb/datasets/megadepth"` | `depth_facts` (a directory whose scenes give at least 3 validation scenes, before the claim), `depth_data.load_depth_batches`; read in place, never copied |
+| `data.train_split` | `0.9` | `depth_facts` and `depth_data.deal_megadepth_scenes`: the share of the scenes that train, the legacy split (176 train and 19 validation scenes of 195) |
+| `data.max_train_files` | `10000` | `DepthEstimationTrainer.build_data`, then `depth_data.load_depth_batches`: the train files the stream draws from, taken evenly across the train scenes; null keeps all of them (121,190) |
+| `data.max_samples` | `null` | `DepthEstimationTrainer.build_data`: a smoke cap on the same list, the smaller of the two wins; it never caps the selection or test crops |
+| `data.n_select` | `128` | `depth_data.load_depth_batches`: the fixed selection crops, rounded down to whole batches (16 batches of 8) |
+| `data.n_test` | `256` | the same path; the fixed test crops |
+| `data.layout_samples` | `512` | `depth_data.load_depth_batches`: the train targets averaged into the layout baseline |
+| `data.min_valid_ratio` | `0.1` | `depth_data.DepthStream` and the fixed crops: the share of valid depth pixels a crop needs |
+| `data.steps_per_epoch` | `100` | `depth_data.load_depth_batches`, then `DepthEstimationTrainer.fit_kwargs` |
+| `data.workers` | `8` | `depth_data.DepthStream`: the processes that read the train stream; 0 reads in the training process |
+| `transform_args.image_size` | `"auto"` | `DepthTransformArgs.resolve_auto` (the recipe's 252), `DepthTransformArgs.problems` (a multiple of 14), then the data and the adapter's `image_shape` |
+| `transform_args.augment` | `"flip"` | `DepthEstimationTrainer.build_data`: a horizontal flip of every train sample with probability 0.5, never of a selection or test crop; `none` turns it off |
+| `metric_args.watch_metric` | `"auto"` | `DepthMetricArgs.problems`, `fit_callbacks.build_callbacks`; auto is `val_loss`, the only value accepted |
+| `metric_args.watch_mode` | `"auto"` | the same path; auto is `min`, the only value accepted |
+
+  `jit_compile` is not a key: `DepthEstimationTrainer.compile_options` passes `false` to the ONE `compile` call, because Keras 3.8
+  resolves `auto` to XLA whenever a GPU is present, so a GPU run and a CPU run would build different graphs. The price, measured on an
+  RTX 4090 at batch 8 on batches in memory: 172 ms a step against 41 ms under XLA (4.2x), plus a compile per process under XLA; a
+  streamed run waits on the disk for much of each step, so the gap shrinks there. `precision` must be `float32`, refused by name before
+  the claim (the masked median of the loss was never measured in a mixed precision). `analysis_args.conformal_alpha` is refused (a
+  conformal set is a set of classes). `debug_args.smoke` runs one epoch on at most 512 train files and applies no bar. The run
+  directory is the shared one plus `task.json` and, every 5 epochs, `visualizations/epoch_NNN_depth.png` (the first 8 selection crops:
+  image, target and the prediction after its per-crop scale and shift).
+* **The scenes, and why the selection numbers are not held out.** `train.common.megadepth.split_megadepth_scenes` deals the 195 scenes
+  of MegaDepth by the legacy rule, 176 train and 19 validation scenes at `data.train_split` 0.9, no scene on both sides. The validation
+  scenes, sorted by name, are dealt alternately into 10 selection scenes and 9 test scenes (`depth_data.deal_megadepth_scenes`; fewer
+  than 3 validation scenes are refused before the claim). The selection crops pick the best epoch and set the bar, so the best
+  selection `val_loss` is the minimum over epochs of a noisy number, measured on the crops that chose it: it is biased low and is not
+  an estimate of the error on new scenes. The test crops, from scenes that neither train nor select, are scored ONCE on the best
+  weights after `fit`, into the summary's `held_out` block (loss, the per-crop Pearson over valid pixels, the constant and the layout
+  on the same crops, and the paired model-minus-layout difference, each with its standard error). The legacy trainer had one
+  validation split for both jobs: on its three gate seeds its best `val_loss` was 0.048, 0.091 and 0.102 below the held-out loss of
+  the same weights on other crops of the same scenes. Here the two sets are different scenes, so their difference mixes the selection
+  bias with scene-to-scene variation (in the 1,000-step run below the test crops scored lower than the selection crops).
+* **The crops and the stream.** A selection or test crop is the crop of pool file `j` under a generator keyed on `(seed, salt, j)`,
+  the pool being 4 files per crop (512 for the selection crops, 1,024 for the test crops) taken evenly across the group's scenes; a
+  file whose crop has too few valid pixels or a constant valid depth is passed over (41.8 and 31.4 percent of the files read at these
+  counts). The crops are read once into read-only arrays (465 MiB; two builds gave equal sha256), and never depend on the stream seed.
+  Train sample `counter` draws its file, crop and flip from a generator keyed on `(stream seed, train salt, counter)`, trying up to 8
+  files, and train batch `i` is samples `i * batch` to `i * batch + batch - 1`: an infinite `PyDataset` read by `data.workers`
+  processes, so a batch is a function of its key and not of the process that read it. The layout is the mask-weighted per-pixel mean
+  of `data.layout_samples` train targets (46 s to build). Every RGB input is ImageNet-standardized, the input the official DINOv2 was
+  trained on.
+* **The bar.** `success_metric` is `val_loss`, the masked affine-invariant loss of Depth Anything V1 on the fixed selection crops (the
+  compiled `abs_rel`, `sq_rel`, `rmse`, `rmse_log` and `delta_1.25` score the prediction after a per-crop scale and shift, on the
+  normalized-disparity scale, not the paper's metric depth). `success_value` is the lowest `val_loss` of the run, and
+  `success_threshold` is the minimum of three terms, all on the same selection crops: the CONSTANT baseline (a constant map scores 1.0
+  under this loss), the average LAYOUT baseline (the layout map, under the compiled loss) and EPOCH ZERO, the untrained model's
+  `val_loss`, read from `checkpoints/fit_state.json` and never from memory, because a resume never evaluates the untrained model. The
+  bar is met only when `success_value` is STRICTLY below the threshold by more than `forecast_run.tie_band` float32 steps (16 at 16
+  selection batches; `forecast_run.beats_bar`). Met is exit 0, missed is exit 1 with the numbers in `results_summary.json`, which also
+  carries `baselines`, `epoch_zero` (the value and whether it was the smallest term) and `held_out`. There is no override. Measured on
+  the crops of the default seed: constant 1.0, layout 1.0194 on the selection crops and 1.0687 on the test crops (layout Pearson
+  0.427 and 0.402), epoch zero 1.5539, so the constant term binds. A `vit_s` run of 1,000 steps (10 epochs of 100) from the official
+  weights on an RTX 4090 reached a best of 0.6597 on the selection crops (0.918 after the first 100 steps); its test crops scored 0.6377
+  +- 0.023, Pearson 0.757, and 0.431 +- 0.027 below the layout on the same crops (paired).
+* **The pretrained start, and its refusal.** `model_args.pretrained` is true unless set: the encoder loads the official DINOv2 weights
+  of its size from `<dir>/dinov2-<size>/model.safetensors` (`small`, `base` or `large`), `<dir>` being
+  `/media/arxwn/data0_4tb/datasets/pretrained/dinov2` or the directory in `DL_TECHNIQUES_DINOV2_WEIGHTS_DIR`. A missing file exits 2
+  BEFORE the run directory is claimed (`depth_models.check_weights`), with a message naming the path, the environment variable, the
+  download URL and `model_args.pretrained=false`; there is no fallback to a random encoder. From random weights a run trains, but the
+  legacy measurement found that the model then learns little beyond the average layout (held-out loss 1.034 to 1.042 against 1.047 for
+  the layout, its predictions correlating 0.96 to 0.97 with it), so the bar is expected to be missed, and the miss is reported. A
+  pretrained start takes `optim_args.optimizer=adamw` only (the head table below is an AdamW feature); another optimizer is refused by
+  name before the claim.
+* **The head at 10x, through the `optimizer_options` seam.** From a pretrained start every trainable variable of the DPT head (60 on
+  `vit_s`) learns at 10 times the encoder's rate, since the encoder is pretrained and the head is random. The task returns
+  `{"lr_multipliers": table}` from `TaskTrainer.optimizer_options(config, model)`, the table built by the legacy trainer's own
+  `decoder_lr_multipliers`, and the shared `build_optimizer_and_schedule` builds an `LRMultiplierAdamW` from it, so the schedule, the
+  warmup and the clip are the ones every task gets. From random weights the table is empty and the optimizer is the plain AdamW of the
+  other tasks. The table is saved with the optimizer, so a resume restores it.
+* **The stream seed on a resume.** The train stream is infinite and a resumed `fit` asks it for batch 0 again, which would replay
+  epoch 0's samples. `DepthEstimationTrainer.resume_stream` returns the data on a stream seed of
+  `int.from_bytes(sha256(f"{seed}:{completed_steps}")[:4], "big")` (`derive_stream_seed`, the pretrain task's function), with
+  `completed_steps` the steps the backup holds. Only the stream seed moves: the scenes, the selection and test crops and the layout
+  keep `seed`, so no selection or test scene reaches the train stream and the bar stays comparable across a kill. The cost: a resumed
+  run is not the unkilled run's continuation, and a killed epoch is trained again from its first batch unless
+  `checkpoint_args.backup_every_steps` bounds the loss. The summary's `stream` block records `seed`, `stream_seed` and the rule.
+* **`predict`.** `python -m train predict model=<run dir or .keras> data=<image or directory> out=<new directory>` writes one
+  `<stem>.npy` per image, the float32 relative-disparity map at the image's own size, and, LAST, `index.json`. Each image is resized
+  bilinearly to the trained size in `task.json` and standardized as in training, and the map is resized back bilinearly. From Python,
+  `load_model(...)` returns a `DepthPredictor`, and `DepthPredictor.predict(x)` (a path, a PIL image, an array or a list of them)
+  returns `{"disparity": [...]}`, always a list. Two images with one stem are refused before the model is loaded, and a model whose
+  size or output disagrees with the record is refused at load. A map is relative: compare maps after a per-image scale and shift,
+  never as depth.
+* **`export`.** All four formats, `keras`, `saved_model`, `tflite` and `onnx`, at the trained size ONLY. The file takes float32 images
+  `(batch, height, width, 3)` at the `input_size` of `<out>.task.json`, pixels scaled to [0, 1] and then ImageNet-standardized, and
+  returns `(batch, height, width, 1)` relative disparity at that size; resizing to and from the picture is the caller's (`predict` does
+  both). Any other size is refused by name before anything is written (`depth_predictor.check_export`), for two measured reasons. The
+  encoder's position embedding is built for the grid of the trained size (325 tokens at 252 px: 18 x 18 patches and the class token),
+  so the model itself raises at 266 px (362 tokens). And asked for another size, the `saved_model`, `tflite` and `onnx` converters
+  WRITE a file anyway: for a 28 px model asked at 42 px, a file that fails when it is run, and at 30 px a file that answers a 30 px
+  image with a 28 x 28 map and no error. The model is never rebuilt at another size. Each format must match Keras within its band, a
+  share of the map's largest value: `keras` exactly, `saved_model` 1e-5, `tflite` 5e-5, `onnx` 3e-5. Measured on the CPU, the
+  pretrained `vit_s` at 252 px (largest value 526.6) gave 2.90e-6, 1.25e-5 and 7.23e-6 for those three, a trained one 1.82e-6,
+  6.54e-6 and 2.20e-6, and a 28 px test model 7.76e-7, 1.16e-6 and 8.62e-7.
+* **What differs from the legacy trainer** (`train.depth_anything.train_depth_anything`), each on purpose. (1) The recipe is the
+  setting the legacy gate measured, not the legacy dataclass's: `vit_s` at 252 px, batch 8, 30 epochs of 100 steps, one warmup epoch
+  and a pretrained start, against `vit_l` at 518 px, batch 16, 100 epochs, 5 warmup epochs, a patience of 20 and a random start (that
+  gate reached a held-out loss of 0.570, 0.593 and 0.588 on three seeds, Pearson 0.813, 0.810 and 0.802, against 1.045 for the layout,
+  on an RTX 4070). (2) Three scene groups, not two: the legacy trainer selects and reports on one validation split (1,000 files, 200
+  validation steps). (3) A bar, and exit 1 on a miss; the legacy trainer has none. (4) Every sample is a function of a key, so a run is
+  reproducible and resumable; the legacy crops come from the global numpy generator and the legacy trainer has no resume. (5)
+  `jit_compile` is false, passed explicitly; the legacy `compile` passes none, so on a GPU it runs under XLA. The loss and metrics
+  (`build_depth_loss`, `build_depth_metrics`) and the head table (`decoder_lr_multipliers`) are imported from the legacy trainer, and
+  the ImageNet standardization and the scene deal from `train.common.megadepth`, which both trainers use.
+* **Limits of the task.** One dataset (MegaDepth, read in place) and one family; no metric depth; one size per model (`predict`
+  resizes, `export` refuses another size); `float32` only; the model analysis is data-free (weights and spectral only, since the stock
+  analyses read class probabilities); `init_scale_warning` is not judged (a random head on the pretrained encoder starts at 1.55 times
+  the constant baseline and then trains). Only `vit_s` was trained; `vit_b` and `vit_l` were built and stepped, and carry no claim. The
+  selection and test sets are 10 and 9 scenes of one dataset, so a held-out number says the model learned depth on MegaDepth scenes it
+  never saw, not that it generalizes beyond MegaDepth.
+* **Gate numbers.**
+<!-- depth-gate:begin -->
+  The GPU gate of this task (a `vit_s` run of the recipe, a run killed inside an epoch and resumed, and `predict` and `export` of the
+  first run's directory on the CPU) has not run yet. Its numbers, each derived by script from the runs' own files, replace this
+  paragraph.
+<!-- depth-gate:end -->
+
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
 the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). A list is JSON with every text
@@ -1126,7 +1294,7 @@ python -m train image_segmentation out=auto model=convunext/tiny data=<out>/data
 **The run directory**: `out=auto` makes `results/<timestamp>...`; an existing `out` is refused,
 nothing is overwritten or deleted. A run writes `config_requested.json` (what was asked),
 `config.json` (resolved), `run.log`, `training_log.csv`, `results_summary.json`, `task.json`
-(class names, input shape, mean and std: what a model needs to be used without its config; a segmentation, denoising or forecasting run writes the keys of its own record, a `pretrain` run writes none),
+(class names, input shape, mean and std: what a model needs to be used without its config; a segmentation, denoising, forecasting or depth run writes the keys of its own record, a `pretrain` run writes none),
 `best_model.keras`, `final_model.keras`, the figures and analysis, and `checkpoints/`
 (`backup/`, `fit_state.json`) and `run.lock` for resume. `run.lock` is a kernel `flock` held for the
 life of the run and released when the process ends, a SIGKILL included, so two resumes cannot both run
@@ -1135,7 +1303,7 @@ and a reused pid blocks nobody; the pid in the file is a label for the refusal m
 **Resume**: `resume_interrupted=true` with the same `out` and the same request continues a killed
 run. It is refused for a finished run (one with a `results_summary.json`), another request, other data, a live
 process holding the run, or a torn backup; `devices` and `analysis_args.eval_batch_size` may differ. The training data
-order replays epoch 0's, except for `pretrain` and `time_series_forecasting`, which train a resumed run on a fresh stream (their sections above), and a half-done epoch is trained again (the key's help lists the rest).
+order replays epoch 0's, except for `pretrain`, `time_series_forecasting` and `depth_estimation`, which train a resumed run on a fresh stream (their sections above), and a half-done epoch is trained again (the key's help lists the rest).
 A run killed **before** a code change that alters training (step 10b of plan 98b866fb: the ConvNeXt V1 layer scale starts at 1e-6 and is
 no longer clamped or decayed; step 10c: ConvNeXt V2 blocks have no layer scale by default and a zero GRN gamma; step 10d: the CIFAR-10
 AutoAugment policy; step 10e: the ResNet decay and clip) and resumed **after** it continues under the new rules: its early epochs trained
@@ -1234,7 +1402,7 @@ is the required end-of-run sequence that calls them. `src/train/AGENTS.md` has t
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is
 searched recursively. `out` must not exist. A segmentation run and a denoising run write a new directory of PNG
-files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above), and a forecasting run takes a csv or a `.npy` or `.npz` of windows and writes one JSON file of forecasts (`time_series_forecasting` above). A `pretrain` run directory is
+files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above), a forecasting run takes a csv or a `.npy` or `.npz` of windows and writes one JSON file of forecasts (`time_series_forecasting` above), and a depth run writes a new directory of float32 `.npy` relative-disparity maps and an `index.json` (`depth_estimation` above). A `pretrain` run directory is
 refused (it has no `task.json`; `pretrain` above has the sentence), and so is its `export`. **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
 words, and so are the `class_names` of `task.json`. The loader sorts the 1,000 ids and takes the position as the class
 index; the devkit's `meta.mat` maps an id to its words:
@@ -1302,7 +1470,7 @@ told apart, and neither are two runs of one family and variant with the same cla
 of version 1 and only `schema_version` changed; a segmentation record has `input_size` as `[height, width]` (not
 necessarily square), `channels`, `ignore_index`, `mask_threshold` and `output` where a classification record has
 `input_shape` and `eval_transform`; a denoising record has `channels`, `size_multiple`, `data_range` and `output` and no class names,
-statistics or input size (see `image_denoising`); a forecasting record has `lookback`, `horizon`, `channels`, `value_cols`, `time_col`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and `data_sha256` and no class names, statistics or input size (see `time_series_forecasting`). `load_model` holds a forecasting record to its model: `lookback` and `channels` against the input the model was BUILT for (every family, a mismatch is a named error that names the field), and the decode row, head, levels, median, horizon and channels against what the model outputs; `time_col` is the time column the run checked, and `predict` of a csv checks the order with the loader's own function (null: the rows are the time order). `scale_floor` is not checked against the model: the model does not carry it, so a hand-edited value cannot be detected, and it changes every forecast (it is the flatness threshold of the standardization). A record of version 1 is refused, in one sentence that names the file and says the
+statistics or input size (see `image_denoising`); a forecasting record has `lookback`, `horizon`, `channels`, `value_cols`, `time_col`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and `data_sha256` and no class names, statistics or input size (see `time_series_forecasting`); a depth record has `input_size` (`[height, width]`, the size the model is built at), `channels` (3), `normalize` (`imagenet`) and `output` (`relative_disparity`) and no class names or statistics (see `depth_estimation`). `load_model` holds a forecasting record to its model: `lookback` and `channels` against the input the model was BUILT for (every family, a mismatch is a named error that names the field), and the decode row, head, levels, median, horizon and channels against what the model outputs; `time_col` is the time column the run checked, and `predict` of a csv checks the order with the loader's own function (null: the rows are the time order). `scale_floor` is not checked against the model: the model does not carry it, so a hand-edited value cannot be detected, and it changes every forecast (it is the flatness threshold of the standardization). A record of version 1 is refused, in one sentence that names the file and says the
 run has to be trained again, by `predict`, by `export` and by `resume_interrupted=true` (the last before the data is
 loaded). There is no converter and no reader: a run directory made before this change cannot be predicted from, exported
 or resumed (its files are not touched, and `best_model.keras` still loads in Keras).
@@ -1311,7 +1479,7 @@ or resumed (its files are not touched, and `best_model.keras` still loads in Ker
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints
 only the path on stdout. Input contract: float32 `(batch, height, width, channels)` pixels scaled
 to `[0, 1]` then standardized, `(x - mean) / std`, with the mean and std in `<out>.task.json`;
-the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A forecasting run** exports raw windows `(batch, lookback, channels)` and returns the forecast in the series' own units, and refuses five of its 36 cells by name (`time_series_forecasting` above). **A segmentation run**
+the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A forecasting run** exports raw windows `(batch, lookback, channels)` and returns the forecast in the series' own units, and refuses five of its 36 cells by name (`time_series_forecasting` above). **A depth run** exports all four formats at its trained size and refuses any other size by name (`depth_estimation` above). **A segmentation run**
 (D-081) exports the same four formats and the output is one score per class per pixel, `(batch, height, width, classes)`,
 at the `input_size` of `<out>.task.json` (a version 2 record, the run's own, byte for byte): height and width are fixed
 to it and may differ, only the batch is free, and the mask is the argmax over the last axis after the caller resizes the
