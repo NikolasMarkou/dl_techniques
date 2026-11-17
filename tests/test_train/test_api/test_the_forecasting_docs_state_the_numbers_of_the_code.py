@@ -194,13 +194,20 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert "`standardize_tf` agrees with it on 3,600 of 3,600 windows at three levels" in text
     # review pass 6 N6: the maxima of pass 5 were measured on 16 windows and exceeded on 64; re-measured on 128 windows per cell (t4, t5) and the sample size is in the text
     assert "within 6e-6 of a window std of `predict` at window spreads from 1e-33 to 1e-19 and from 1e16 to 1e35 (128 windows per cell" in text
-    assert "0.08 to 0.31 window std from `predict` on float64 windows (the largest gap over 128 windows in each of 45 cells" in text and "0.09 to 0.23" not in text
+    assert "0.14 to 0.35 window std from `predict` on float64 windows (the largest gap over the 512 windows of each of 45 cells" in text and "0.09 to 0.23" not in text and "0.08 to 0.31" not in text, "review pass 7 N1"
+    assert "so these are largest values seen and not bounds" in text and "a second sample of 512 windows per cell, two seeds of 256, gave 4.8e-6 and 5.8e-6, still within 6e-6" in text, "review pass 7 N1"
+    assert "to about 3e-7 of its forecast" in text and "within 3.2e-7" not in text and "the largest seen was 2.6e-7 in 512 windows per cell over two seeds, and 3.8e-7 once" in text, "review pass 7 N1"
+    assert "within about 5e-6 of a window std of `predict` at every spread from 1.0001 times 1.18e-38 up, for the windows that `predict` standardizes" in text and "within 4.3e-6 of a window std" not in text, "review pass 7 N1"
+    assert "differs from `predict` on those by up to 0.0073 of the forecast" in text, "review pass 7 N1"
     assert "within 4e-6 of a window std of `predict` at window spreads from 1e-19 to 1e-30" not in text and "(r5_files.log" not in text, "the 16-window numbers are gone"
     assert "7e15 window stds apart" in text and "forecast about 2.6e8 times its own level" in text
     # D-050 (review pass 6 W1): a float32 denormal reads 0 in the decision of every implementation but onnxruntime's; the TensorFlow files also flush the cells
     assert "the decision reads a denormal as 0, as TensorFlow does (D-050)" in text and "both read 0 for a denormal now" in text, "review pass 6 W1"
     assert "the summary said 0 flat and the scoring treated 38 as flat" in text and "1,153 of 2,000 windows at 1.0001 times it at lookback 168" in text, "s11b and t2"
-    assert "8.7 window stds at a spread of 0.9 times 1.18e-38, 5.9 at 1.0001 times, 3.9 at 1.5 times, 1.8 at 3.5 times, 0.32 at 10 times, 0.028 at 100 times, 0.047 at 1e-36 and 3e-6 at 1e-33" in text
+    # review pass 7 N2: the single-seed list read as a smooth curve; it is not monotone, so the text gives ranges and says it varies with the seed
+    assert "up to about 9 window stds at spreads from 0.9 to 1.5 times 1.18e-38 (4 to 9 in every sample measured, with no steady fall over that range" in text, "review pass 7 N2"
+    assert "about 2 at 3 to 3.5 times, 0.3 to 0.6 at 10 times, 0.01 to 0.03 at 100 times, 0.01 to 0.05 at 1e-36 and under 4e-6 at 1e-33" in text, "review pass 7 N2"
+    assert "8.7 window stds at a spread of 0.9 times" not in text and "3.9 at 1.5 times" not in text, "review pass 7 N2: the single-seed digits are gone"
     assert "flush a float32 value below 1.18e-38 to 0 and" not in text and "297 of 2,000 windows at 0.9 times it" not in text, "the pass-5 sentence, measured false in pass 6"
     assert "after the UTF-8 byte-order mark of a spreadsheet's \"CSV UTF-8\", if the file has one" in text, "review pass 6 N5"
     assert "A flat window has no scale" in text and "forecast about 2.6e8 times its own level" in text, "review pass 5 NOTE 8"

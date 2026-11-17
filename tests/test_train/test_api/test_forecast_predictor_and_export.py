@@ -1144,7 +1144,7 @@ def test_the_refused_magnitude_reads_short_and_stays_above_the_bound(value, show
 
 def test_a_window_at_the_bound_is_forecast_by_predict_and_by_a_file_alike(world, tmp_path_factory):
     """The bound itself: a window whose cells reach 1e15 (spread 1e15 about level 0) is accepted, and the keras file agrees with ``predict`` to
-    a thousandth of the window std (measured finite and within 4.3e-6 of it up to a spread of 1e35 on 128 windows per cell, ``scratch_review6b/t5_files_beyond_bound.log``)."""
+    a thousandth of the window std (measured finite and within 6e-6 of it up to a spread of 1e35: 4.3e-6 on 128 windows per cell, ``scratch_review6b/t5_files_beyond_bound.log``, and 5.8e-6 on 512, ``scratch_round_h``)."""
     path = export_cell("nbeats", "keras", tmp_path_factory)
     run = trained_case("nbeats", tmp_path_factory)
     e = raw_windows(4, 1, seed=3)
