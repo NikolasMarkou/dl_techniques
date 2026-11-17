@@ -1118,7 +1118,7 @@ def test_a_small_unit_window_with_a_resolved_spread_is_standardized_and_not_flat
     assert float((np.abs(got - small["point"]) / std).max()) < 1e-3, "the file agrees with predict to a thousandth of the window std"
 
 
-@pytest.mark.parametrize("value", [1.0000001e15, -2e15, 1e19, 1e20, 3.5e38, -1e39, 1e300])
+@pytest.mark.parametrize("value", [float(np.nextafter(1e15, 2e15)), -float(np.nextafter(1e15, 2e15)), 1e15 + 0.25, 1.0000001e15, -2e15, 1e19, 1e20, 3.5e38, -1e39, 1e300])
 def test_a_window_above_the_bound_of_a_training_column_is_refused_by_name(value, one):
     """Review pass 5 NOTE 6 (D-049). ``predict`` refused only above float32's maximum (3.4e38), but a csv column is bounded at 1e15
     (``FLOAT32_RANGE``) and the files failed far below 3.4e38 under the squares guard (spreads of 1e19 and 1e20 gave infinity or NaN from
@@ -1128,7 +1128,7 @@ def test_a_window_above_the_bound_of_a_training_column_is_refused_by_name(value,
     with pytest.raises(ConfigError, match=r"window 0 holds a value of magnitude \S+ at row 5, column 0, above 1e15, the largest max \|x\| a training column may have") as raised:
         one.predictor.predict(window)
     shown = float(re.search(r"magnitude (\S+) at row", str(raised.value))[1])
-    assert shown == pytest.approx(abs(value), rel=1e-8) and shown > 1e15, "the sentence shows a magnitude that IS above the bound (1.0000001e15, not '1e+15 above 1e15')"
+    assert shown == abs(value) and shown > 1e15, "the sentence shows the magnitude exactly, so it IS above the bound for every refused value (review pass 6 N4: 1e15 + 0.125 read '1e+15 above 1e15')"
 
 
 def test_a_window_at_the_bound_is_forecast_by_predict_and_by_a_file_alike(world, tmp_path_factory):
@@ -1153,7 +1153,7 @@ def test_a_csv_whose_last_rows_are_above_the_bound_is_refused_through_predict_to
     values = np.random.default_rng(3).normal(size=rows)
     values[-3] = 4e15
     path.write_text("v\n" + "\n".join(repr(float(v)) for v in values) + "\n")
-    with pytest.raises(ConfigError, match=r"holds a value of magnitude 4e\+15 at row \d+, column 0, above 1e15"):
+    with pytest.raises(ConfigError, match=r"holds a value of magnitude 4000000000000000\.0 at row \d+, column 0, above 1e15"):
         one.predictor.predict(str(path))
 
 
