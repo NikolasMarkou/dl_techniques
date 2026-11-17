@@ -165,7 +165,7 @@ def tie_band(n_batches: int) -> int:
     ``n_batches`` is the number of batches of the selection windows. The band is :data:`TIE_ULPS` (the segmentation task's, defined
     once in ``train.common.segmentation_run``) up to 16 batches and 192 at 2,048. Measured: the compiled ``mae`` of a
     model that outputs the naive-last forecast sits 1 float32 step BELOW the float64 numpy baseline in 2 of 8 seeds at the default
-    sizes; (review, D-043): the float32 accumulation of that metric drifts with the number of terms, +20 steps at 262,144 windows
+    sizes; and (D-043) the float32 accumulation of that metric drifts with the number of terms, +20 steps at 262,144 windows
     (2,048 batches of 128), so the band widens with the square root of the batch count.
     """
     return TIE_ULPS * max(1, math.ceil(math.sqrt(n_batches / 16)))
@@ -350,7 +350,7 @@ class ServedForecaster(keras.layers.Layer):
         super().__init__(**kwargs)
         # DECISION plan-2026-11-13T105600-3a8319ef/D-041
         # This class is registered under the `train` package, which the wheel does not ship (`packages.find` takes `dl_techniques*`
-        # only), so a `.keras` file that holds it loads only where `train` is importable (review W3: Keras stops with "Could not
+        # only), so a `.keras` file that holds it loads only where `train` is importable (Keras stops with "Could not
         # deserialize class 'ServedForecaster' because its parent module train.common.forecast_run cannot be imported"). The file, the
         # export note, the help and the README say so. Do NOT write that the Keras loader alone loads it, and do NOT move the decode
         # table and this layer into `dl_techniques` to make it so (a library change outside this task, D-041).

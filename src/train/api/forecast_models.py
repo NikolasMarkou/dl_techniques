@@ -357,7 +357,7 @@ def window_problems(
     # DECISION plan-2026-11-13T105600-3a8319ef/D-042
     # The minimum of each family is a measured row (`FamilyRow.min_lookback`, `min_horizon`), refused BEFORE the claim: a prism
     # that cannot build at the lookback asked, or an nbeats at horizon 1, used to be refused only after the run directory was
-    # claimed ("'out' is now used", review W8). Do NOT guess a number from the library's message (it names a wavelet tree, not
+    # claimed ("'out' is now used"). Do NOT guess a number from the library's message (it names a wavelet tree, not
     # a lookback) and do NOT raise it to "the largest variant's" for the family: prism/tiny builds at 8 and prism/large at 61, and a
     # family-wide 61 would refuse every tiny run that works.
     row = FAMILIES[family]

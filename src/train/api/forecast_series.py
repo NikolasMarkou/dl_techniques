@@ -116,14 +116,14 @@ FLAT_SHARE = 0.1
 # DECISION plan-2026-11-13T105600-3a8319ef/D-049
 # There is NO absolute spread guard above this one number. D-047 (1e-15) and D-048 (1e-18) kept an absolute floor on the std because the exported
 # function squared RAW deviations and TensorFlow's float32 CPU kernels flush a square below 1.2e-38 to 0; that floor was the one place where the
-# training function (float64), `predict`, the loader's count and the three float32 files could disagree, and passes 3, 4 and 5 each found a new
-# disagreement next to it. The spread is now computed WITHOUT squaring a raw deviation (`span * std(deviation / span)`, `span` the largest
+# training function (float64), `predict`, the loader's count and the three float32 files could disagree, and three successive floors each had a
+# new disagreement next to it. The spread is now computed WITHOUT squaring a raw deviation (`span * std(deviation / span)`, `span` the largest
 # deviation about the first value: the same number in exact arithmetic), so float32 resolves it down to its smallest NORMAL number, and the
 # absolute term is the representability limit and nothing else: a window whose spread is not above 1.18e-38 is flat at any `scale_floor`,
 # because below it the runtimes disagree on what a denormal is (TensorFlow flushes it to 0, numpy and onnxruntime keep it): without this term
-# 200 of 200 windows at a spread of 1e-40 were flat in TensorFlow and standardized by numpy (scratch_review6/r1_proto.log). Do NOT put a larger
-# absolute number back "for margin" (it flattens windows float32 resolves, the pass-4 W2 defect) and do NOT square raw deviations in a
-# float32 twin (the pass-5 W1 defect: a window near 1e-18 was flat in the file and standardized by `predict`).
+# 200 of 200 windows at a spread of 1e-40 were flat in TensorFlow and standardized by numpy (measured). Do NOT put a larger absolute number
+# back "for margin" (it flattens windows that float32 resolves, as the 1e-15 floor did) and do NOT square raw deviations in a float32 twin
+# (with the 1e-18 floor a window near 1e-18 was flat in the file and standardized by `predict`).
 #: The smallest normal float32 number (``2 ** -126``): the one absolute term of the flat rule. A context whose spread is not above it is flat
 #: whatever ``scale_floor`` says (D-049).
 FLOAT32_TINY = 1.1754943508222875e-38
@@ -199,7 +199,7 @@ def check_select_moves(values: "np.ndarray", segment: Tuple[int, int]) -> None:
     # DECISION plan-2026-11-13T105600-3a8319ef/D-042
     # A select segment that is constant in EVERY column makes every window flat: the context is flat (scale 1), the target equals the
     # last context value, naive-last and seasonal-naive score exactly 0 and the bar can be neither met nor judged. It was found only
-    # in `build_data`, after the run directory was claimed (review NOTE 12); it is refused here, before the claim, and by the
+    # in `build_data`, after the run directory was claimed; it is refused here, before the claim, and by the
     # loader through the same function. A segment that is flat only in SOME windows is not seen here (the baselines are
     # numbers of standardized windows, which need TensorFlow): `build_data` still refuses a zero baseline, after the claim.
     lo, hi = segment
@@ -256,8 +256,8 @@ def read_csv_series(
     # DECISION plan-2026-11-13T105600-3a8319ef/D-049
     # A blank line INSIDE the series is a missing row (pandas' default drops it and the series after the gap is shifted by one step with no word said,
     # D-048); a blank line before the header or after the last row shifts nothing, so those are dropped here and the rest is read with
-    # `skip_blank_lines=False`. Do NOT hand pandas the whole file with `skip_blank_lines=False`: the first blank line is then the header (review pass 5
-    # NOTE 1: "has no value column") and a final newline pair is a NaN row. The sha256 is of the bytes as written.
+    # `skip_blank_lines=False`. Do NOT hand pandas the whole file with `skip_blank_lines=False`: the first blank line is then the header ("has no
+    # value column") and a final newline pair is a NaN row. The sha256 is of the bytes as written.
     # A UTF-8 byte-order mark stays (pandas decodes it) and does not hide the blank lines (D-050).
     body = re.sub(rb"\A(\xef\xbb\xbf)?(?:[ \t]*\r?\n)+", rb"\1", raw).rstrip()
     try:
@@ -318,11 +318,11 @@ def served_values(contexts: "np.ndarray") -> "np.ndarray":
     """
     # DECISION plan-2026-11-13T105600-3a8319ef/D-050
     # TensorFlow's float64 to float32 cast (which `standardize_tf` decides on) FLUSHES a denormal to 0, and numpy's cast keeps it: at a context std
-    # of 1.0001 times 1.18e-38, 470 to 841 of 1,000 windows were scored flat by training and counted standardized by the summary (review pass 6 W1;
-    # on an accepted csv the summary said 0 of 72 select windows flat and the scoring treated 38). The flush is the same here. Do NOT cast with numpy
+    # of 1.0001 times 1.18e-38, 470 to 841 of 1,000 windows were scored flat by training and counted standardized by the summary (on an
+    # accepted csv the summary said 0 of 72 select windows flat and the scoring treated 38). The flush is the same here. Do NOT cast with numpy
     # alone and do NOT flush below `FLOAT32_TINY` itself: the hardware decides the underflow on the value rounded to 24 bits with an unbounded exponent,
     # so a float64 value between `FLOAT32_TINY * (1 - 2**-25)` and `FLOAT32_TINY` is KEPT (as the smallest normal number) and everything under
-    # `FLOAT32_TINY * (1 - 2**-25)` is 0, signed (swept at ulp scale against `tf.cast`, scratch_review6b/t1_cast_sweep.log; a test holds it bit for bit).
+    # `FLOAT32_TINY * (1 - 2**-25)` is 0, signed (swept at ulp scale against `tf.cast`; a test holds it bit for bit).
     import numpy as np
 
     values = np.asarray(contexts, np.float64)
@@ -351,7 +351,7 @@ def flat_contexts(contexts: "np.ndarray", scale_floor: float, *, resolution: boo
     # constant") and the csv check, which is about the spread the file cannot hold, would accept the series it exists to refuse.
     # DECISION plan-2026-11-13T105600-3a8319ef/D-049
     # D-048 left `standardize_tf` (training and the scoring of `val_mae`, the baselines and the bar) on the float64 window, so the summary's
-    # `flat_windows` described windows that the scoring did not treat as flat (3 against 0 on an accepted csv, review pass 5 W2). It decides on
+    # `flat_windows` described windows that the scoring did not treat as flat (3 against 0 on an accepted csv). It decides on
     # the float32 value too now: the count, the flag, the scale and the scoring are ONE decision. Do NOT give the training function its own.
     if resolution:
         std, flat = context_spread(contexts, scale_floor)
@@ -389,7 +389,7 @@ def check_csv_level(
     # DECISION plan-2026-11-13T105600-3a8319ef/D-045
     # The csv check counts the quantity the standardization switches on: the windows (stride = horizon, at the resolved lookback and
     # horizon) whose CONTEXT is flat. D-040 compared the whole column's std with 1e-6 of its level, which lets through a series
-    # whose slow drift is large and whose windows are flat (the review's random walk plus a daily sine, shifted by 1e7: all 48
+    # whose slow drift is large and whose windows are flat (a random walk plus a daily sine, shifted by 1e7: all 48
     # selection windows flat, trained in raw units, one val_mae of mixed units) and refuses a series whose windows are not. Do NOT
     # go back to the column statistic, and do NOT refuse on ONE flat window (10 percent is where a stretch becomes a share). The
     # float32 range is checked first: a std over 1e200 overflows float64 and 1e40 trains but its keras file returns NaN.
@@ -400,13 +400,13 @@ def check_csv_level(
     # DECISION plan-2026-11-13T105600-3a8319ef/D-048
     # D-047 said differencing does not help ("the difference of a shifted series is as shifted") and that is FALSE: a first or a 24-lag difference
     # removes a constant level exactly (measured: series shifted by 1e7, 1e9, 1e12 are refused, their differences are accepted and equal the unshifted one
-    # to the float64 ulp of the shift, scratch_review4/p5_difference.log). Name it, with its price: the model then forecasts differences, not values. Do NOT
+    # to the float64 ulp of the shift). Name it, with its price: the model then forecasts differences, not values. Do NOT
     # call the level "too large" where only the float32 floor binds (a window spread at or below FLOAT32_TINY, a column that is too SMALL): there the
     # remedy is a power of ten or an exact 0, and `scale_floor` cannot lower that term.
     # DECISION plan-2026-11-13T105600-3a8319ef/D-049
     # The sentence follows the term the first resolution-flat window FAILS, not the larger of the two terms: a window at 0.9e-12 with a std of 5e-19
     # fails the RELATIVE term (5.6e-7 of its level) and was told to multiply by a power of ten, which is refused again at every power because scaling
-    # keeps std over level (review pass 5 W3; the level remedy, subtract the mean and rescale, is accepted). Do NOT choose the branch by which term is
+    # keeps std over level (the level remedy, subtract the mean and rescale, is accepted). Do NOT choose the branch by which term is
     # larger. The range check above is the range this task trains in, no longer a float32 limit.
     import numpy as np
 

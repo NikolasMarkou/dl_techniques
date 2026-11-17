@@ -781,7 +781,7 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         assert "select" in str(err.value)
 
     def test_a_csv_whose_select_segment_is_constant_is_refused_by_the_loader_with_the_sentence_the_check_before_the_claim_says(self, tmp_path):
-        """D-042 (review NOTE 12): every selection window is flat, so naive-last and seasonal-naive would score exactly 0. The loader and
+        """D-042: every selection window is flat, so naive-last and seasonal-naive would score exactly 0. The loader and
         ``forecast_series.check_split_sizes`` (before the claim) call ONE function; a column that varies elsewhere does not matter."""
         lo, hi = split_bounds(CSV_ROWS, SELECT_FRACTION, TEST_FRACTION)[1]
         values = np.random.default_rng(1).standard_normal(CSV_ROWS)
@@ -830,7 +830,7 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
     @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
     @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
     def test_an_interior_blank_line_is_a_missing_row_refused_with_its_row_and_not_a_skipped_row(self, tmp_path, columns, newline):
-        """Review pass 4 NOTE 7: ``pd.read_csv`` skips a blank line by default, so a hand-written or spreadsheet file with an empty
+        """``pd.read_csv`` skips a blank line by default, so a hand-written or spreadsheet file with an empty
         line trained on a series shifted by one step after the gap and nothing said so. The line is a missing cell now, refused with its
         row, like an ``inf`` or an empty cell (the same function reads the file for ``predict``). Only an INTERIOR blank line shifts the series."""
         text = self.csv_text(columns)
@@ -848,7 +848,7 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
     @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
     @pytest.mark.parametrize("tail", ["\n\n", "\n\n\n\n", "\r\n\r\n", "\n   \n", "\n\t\n\n"], ids=["one", "several", "crlf", "spaces", "tab"])
     def test_blank_lines_after_the_last_row_cannot_shift_the_series_and_are_ignored(self, tmp_path, columns, tail):
-        """Review pass 5 NOTE 1b: one trailing blank line (``row\\n\\n``, or ``\\r\\n\\r\\n`` from a Windows editor) was refused as a non-finite
+        """One trailing blank line (``row\\n\\n``, or ``\\r\\n\\r\\n`` from a Windows editor) was refused as a non-finite
         cell at the next row, though no row is missing and the user sees no NaN. Nothing follows it, so nothing shifts."""
         text = self.csv_text(columns)
         clean = tmp_path / "clean.csv"
@@ -864,9 +864,9 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
     @pytest.mark.parametrize("head", ["\n", "\n\n\n", "\r\n", "  \n", "\ufeff", "\ufeff\n", "\ufeff\r\n\r\n", "\ufeff  \n"],
                              ids=["one", "several", "crlf", "spaces", "bom", "bom then one", "bom then crlf blanks", "bom then spaces"])
     def test_blank_lines_before_the_header_are_ignored_as_pandas_did(self, tmp_path, columns, head):
-        """Review pass 5 NOTE 1a: a blank line BEFORE the header was refused as 'has no value column' (the empty header line became the
-        header). Nothing precedes the series, so it shifts nothing; pandas' default reader skipped it and so does this one. Review pass 6
-        NOTE 5: a UTF-8 byte-order mark ("CSV UTF-8" from a spreadsheet) before the blank line hid it from the pattern: the blank line was the header."""
+        """A blank line BEFORE the header was refused as 'has no value column' (the empty header line became the
+        header). Nothing precedes the series, so it shifts nothing; pandas' default reader skipped it and so does this one. And
+        a UTF-8 byte-order mark ("CSV UTF-8" from a spreadsheet) before the blank line hid it from the pattern: the blank line was the header."""
         text = self.csv_text(columns)
         clean = tmp_path / "clean.csv"
         clean.write_text(text)
@@ -886,7 +886,7 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
     @pytest.mark.parametrize("body", ["v\n\n", "v\n\n\n", "v\r\n\r\n", "v\n   \n", "v\n", "\ufeffv\n\n", "\ufeff\nv\n"],
                              ids=["lf", "lf2", "crlf", "spaces", "no blank", "bom", "bom then blank"])
     def test_a_header_with_only_blank_lines_after_it_has_no_rows(self, tmp_path, body):
-        """Review pass 5 NOTE 1c: the header and one blank line gave 'non-finite cell ... at row 0' instead of 'has no rows'."""
+        """The header and one blank line gave 'non-finite cell ... at row 0' instead of 'has no rows'."""
         path = tmp_path / "header_only.csv"
         path.write_bytes(body.encode())
         with pytest.raises(ConfigError, match="has no rows"):
@@ -895,7 +895,7 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
     @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
     @pytest.mark.parametrize("junk", ["   ", "\t", " \t "], ids=["spaces", "tab", "mixed"])
     def test_a_whitespace_only_line_mid_file_is_refused_with_its_row_and_the_right_cause(self, tmp_path, columns, junk):
-        """Review pass 5 NOTE 2: ``"   "`` mid-file made the column object dtype and was refused as "not numeric ... one text or
+        """``"   "`` mid-file made the column object dtype and was refused as "not numeric ... one text or
         decimal-comma cell", with no row and the wrong cause. The sentence names the row and the cell that is not a number."""
         lines = self.csv_text(columns).split("\n")
         lines.insert(1 + 700, junk)     # frame index 700
@@ -1028,7 +1028,7 @@ REVIEW = dict(lookback=LOOKBACK, horizon=HORIZON, select_fraction=0.15, test_fra
 
 
 def review_series(amp: float = 1.0, rows: int = 3000) -> np.ndarray:
-    """The csv shape of the review probe: a daily sine over a random walk (window std about 5.6 at ``amp`` 1)."""
+    """The csv shape of the probe: a daily sine over a random walk (window std about 5.6 at ``amp`` 1)."""
     rng = np.random.default_rng(0)
     t = np.arange(rows)
     return amp * (8 * np.sin(2 * np.pi * t / 24) + 0.3 * rng.normal(size=rows).cumsum())
@@ -1070,8 +1070,8 @@ class TestTheFlatWindowShareOfACsv:
 
     @pytest.mark.parametrize("offset", [1e7, 2e7, 1e9, 1e12])
     def test_the_review_csv_shifted_beyond_the_bound_is_refused_with_the_segment_the_count_and_the_remedy(self, offset):
-        """The review probe: shifted by 1e7 every select window was flat and the run trained in raw units without a word. The two
-        remedies named are the ones that work (pass 4 W1): subtract the level, or take a first or seasonal difference of the column."""
+        """The probe: shifted by 1e7 every select window was flat and the run trained in raw units without a word. The two
+        remedies named are the ones that work: subtract the level, or take a first or seasonal difference of the column."""
         with pytest.raises(ConfigError) as raised:
             fs.check_csv_level((review_series() + 50 + offset)[:, None], ["v"], **REVIEW)
         text = str(raised.value)
@@ -1086,7 +1086,7 @@ class TestTheFlatWindowShareOfACsv:
 
     @pytest.mark.parametrize("shift", [1e7, 1e9, 1e12])
     def test_differencing_a_shifted_column_is_a_working_remedy(self, shift):
-        """Review pass 4 W1 (probe ``p5_difference.py``): a shifted series is refused, and its first difference and its 24-lag
+        """A shifted series is refused, and its first difference and its 24-lag
         difference are accepted and equal the unshifted one; the old text said "the difference of a shifted series is as shifted"."""
         rng = np.random.default_rng(7)
         t = np.arange(3000)
@@ -1103,7 +1103,7 @@ class TestTheFlatWindowShareOfACsv:
     @pytest.mark.parametrize("level, spread", [(1e-11, 5e-16), (5e-10, 2e-15), (1e-12, 5e-16), (1e-12, 3e-17), (1e-12, 3e-18)])
     @pytest.mark.parametrize("floor", [1e-6, 0.0])
     def test_a_small_unit_column_with_a_spread_float32_resolves_is_not_refused(self, level, spread, floor):
-        """Review pass 4 W2: a column at 1e-11 with a window std of 3.7e-16 (3.7e-5 of its level, 3.1e2 float32 steps) was refused
+        """A column at 1e-11 with a window std of 3.7e-16 (3.7e-5 of its level, 3.1e2 float32 steps) was refused
         as a "level too large" with a remedy that failed, because the absolute guard was 1e-15 and not where float32 stops resolving
         (about 1e-19, ``w2_threshold_probe``); the smallest accepted level is 1e-12, where the default floor is already 1e-18."""
         rng = np.random.default_rng(3)
@@ -1143,7 +1143,7 @@ class TestTheFlatWindowShareOfACsv:
         fs.check_csv_level(zeroed[:, None], ["v"], **args)                    # remedy 2: an exact 0 is a constant stretch, never refused
 
     def test_a_window_under_both_terms_gets_the_level_remedy_and_that_remedy_works(self):
-        """Review pass 5 W3 (probe ``q6 A``): a column at 0.9e-12 with a window std of 5e-19 (5.6e-7 of its level, so under the relative term
+        """A column at 0.9e-12 with a window std of 5e-19 (5.6e-7 of its level, so under the relative term
         1e-6 * level too) was told to multiply by a power of ten, which fails at every power because scaling keeps std over level. The sentence
         is chosen by the term the window FAILS: the relative one here, so the level sentence, and its remedy (subtract the level, rescale
         to about 1) is applied and accepted."""
@@ -1161,7 +1161,7 @@ class TestTheFlatWindowShareOfACsv:
         fs.check_csv_level(((column - column.mean()) * 1e18)[:, None], ["v"], **REVIEW)
 
     def test_the_sentence_follows_the_term_the_window_fails_and_not_the_larger_term(self):
-        """Review pass 5 W3, the rule itself: a stretch at a level of 1e-35 with a jitter of 1e-43 fails the RELATIVE term (std over level 1e-8)
+        """The rule itself: a stretch at a level of 1e-35 with a jitter of 1e-43 fails the RELATIVE term (std over level 1e-8)
         and, since the relative term 1e-41 is below float32's smallest normal number, the larger term is the float32 floor. The sentence follows
         the failing term, so it says the level hides the spread (a power of ten cannot help: scaling keeps std over level)."""
         rng = np.random.default_rng(3)
@@ -1236,7 +1236,7 @@ class TestTheFlatWindowShareOfACsv:
     @pytest.mark.parametrize("shape", ["solar_with_a_3_week_outage", "policy_rate_held_for_2_years", "slow_seller_poisson_0.02",
                                        "energy_zero_for_12_percent", "second_column_back_filled_with_zero"])
     def test_the_real_shapes_the_review_saw_refused_train_at_the_default_window(self, shape):
-        """Review pass 3 W2: five plausible series that are legitimately constant for a stretch (std exactly 0) were refused at the
+        """Five plausible series that are legitimately constant for a stretch (std exactly 0) were refused at the
         default window (168, 24) with a remedy that did not work. None is refused now, and every one is flat in the count."""
         rng = np.random.default_rng(0)
         rows = 24 * 365 * 2
@@ -1318,7 +1318,7 @@ def edge_floors():
     return [(float(np.nextafter(at, np.float32(0))), False), (float(at), True), (float(np.nextafter(at, np.float32(1))), True)]
 
 
-@pytest.mark.filterwarnings("error:Conversion of an array with ndim > 0 to a scalar:DeprecationWarning")   # review pass 4 NOTE 8: take one element, do not convert an array
+@pytest.mark.filterwarnings("error:Conversion of an array with ndim > 0 to a scalar:DeprecationWarning")   # take one element, do not convert an array
 class TestTheOneFlatRuleAtItsThreshold:
     """D-047, D-049: one formula, ``std <= max(FLOAT32_TINY, scale_floor * mean|x|)``, in the numpy function the Predictor and the loader
     read, the tf function that trains, the float64 and float32 keras-ops function the export serves."""
@@ -1358,7 +1358,7 @@ class TestTheFlatDecisionIsTheFilesOnFloat64Windows:
     FLOOR, LENGTH, COUNT = 1e-6, 168, 200
 
     def near_threshold(self, k: float) -> np.ndarray:
-        """float64 windows ``(n, 168, 1)`` at levels 1e-3 to 1e9 with std = threshold * (1 + k) (the review's construction, p1 part C)."""
+        """float64 windows ``(n, 168, 1)`` at levels 1e-3 to 1e9 with std = threshold * (1 + k)."""
         rng = np.random.default_rng(22)
         level = 10.0 ** rng.uniform(-3, 9, size=(self.COUNT, 1, 1))
         e = rng.normal(size=(self.COUNT, self.LENGTH, 1))
@@ -1385,7 +1385,7 @@ class TestTheFlatDecisionIsTheFilesOnFloat64Windows:
 
     @pytest.mark.parametrize("k", [-1e-3, -1e-4, 1e-4, 1e-3])
     def test_training_and_scoring_decide_as_the_flag_the_count_and_the_file_do(self, k):
-        """Review pass 5 W2: ``standardize_tf`` decided on the float64 window while the summary count read the float32 value, so the count
+        """``standardize_tf`` decided on the float64 window while the summary count read the float32 value, so the count
         said 3 where the scoring had 0 flat (5 windows 0.1 percent above the threshold). One decision now: the scored windows ARE the counted ones."""
         windows = self.near_threshold(k)[:60]
         flag = fs.flat_contexts(windows, self.FLOOR)
@@ -1466,12 +1466,12 @@ class TestTheFlatDecisionHasNoSquaresGuard:
         assert np.abs(x.numpy()).max() < 1e-35, "a flat window stays in its own tiny unit"
 
     def test_the_keras_ops_function_takes_an_empty_batch_in_eager_mode(self):
-        """Review pass 6 N2: ``ops.max`` of an empty batch asserts in eager mode (a ``.keras`` file called as ``model(x)`` on zero windows)."""
+        """``ops.max`` of an empty batch asserts in eager mode (a ``.keras`` file called as ``model(x)`` on zero windows)."""
         anchor, offset, scale = fd.context_stats_ops(tf.zeros((0, LOOKBACK, 2)), 1e-6)
         assert tuple(anchor.shape) == tuple(offset.shape) == tuple(scale.shape) == (0, 1, 2)
 
     def test_the_keras_ops_function_states_float32_or_float64_and_float16_is_not_held(self):
-        """Review pass 6 N7: the docstring said "the dtype of ``context``", but in float16 ``FLOAT32_TINY`` underflows to 0 and a constant window has a
+        """The docstring said "the dtype of ``context``", but in float16 ``FLOAT32_TINY`` underflows to 0 and a constant window has a
         NaN scale. The task refuses any precision but float32 (and the Keras layer casts to it), so the contract is narrowed to the two dtypes held."""
         doc = fd.context_stats_ops.__doc__
         assert "float32 or float64" in doc and "float16" in doc and "NaN" in doc, doc
@@ -1487,7 +1487,7 @@ class TestTheFlatDecisionHasNoSquaresGuard:
     @pytest.mark.parametrize("level, spread", [(1e-11, 5e-16), (1e-12, 5e-17), (5e-10, 2e-15), (1e-12, 3e-18), (3e-12, 2e-17), (0.0, 3e-18)])
     @pytest.mark.parametrize("floor", [1e-6, 0.0])
     def test_a_window_with_a_resolved_spread_is_not_flat_in_any_twin(self, level, spread, floor):
-        """Review pass 4 W2 (a column at 1e-11, window std 3.7e-16, was flat and forecast in raw units, 7.3e8 times its own level)."""
+        """A column at 1e-11 with a window std of 3.7e-16 was flat and forecast in raw units, 7.3e8 times its own level."""
         context = self.stretch(spread, level)
         held = context.astype(np.float32).astype(np.float64)
         want = (held - held[:, :1]).std(axis=1)[:, 0]
@@ -1499,14 +1499,14 @@ class TestTheFlatDecisionHasNoSquaresGuard:
 
 
 class TestTheFloat32FlushIsOneRule:
-    """D-050 (review pass 6 W1): TensorFlow's float64 to float32 cast flushes a value below float32's smallest normal number to 0 (signed), and
+    """D-050: TensorFlow's float64 to float32 cast flushes a value below float32's smallest normal number to 0 (signed), and
     ``standardize_tf`` decides on that cast, while ``served_values`` (numpy) kept the denormal, so the count, the flag and ``predict``'s scale
     read a window that training and scoring did not. ``served_values`` is now the same flush, so ONE value of the window is decided on."""
 
     @staticmethod
     def sweep() -> np.ndarray:
         """float64 values around 1.18e-38 at ulp scale, the float32 denormals and zeros, both signs (the boundary of what TensorFlow flushes
-        is half a float32 step below the smallest normal number, not the number itself: measured in ``scratch_review6b/t1_cast_sweep.log``)."""
+        is half a float32 step below the smallest normal number, not the number itself, measured)."""
         tiny = fs.FLOAT32_TINY
         edge = tiny * (1.0 - 2.0 ** -25)                        # the 24-bit midpoint below the smallest normal number
         named = [0.0, 1e-45, 1.4e-45, 1e-41, 5e-40, 1e-39, 1.17e-38, 1.18e-38, tiny, edge, tiny * (1.0 - 2.0 ** -24), tiny * (1.0 - 2.0 ** -26)]
@@ -1536,7 +1536,7 @@ class TestTheFloat32FlushIsOneRule:
     @pytest.mark.parametrize("lookback", [8, 32])
     @pytest.mark.parametrize("k", [0.9, 1.0001, 1.1])
     def test_training_and_scoring_decide_as_the_flag_and_the_scale_at_the_tiny_edge(self, lookback, k):
-        """Review pass 6 W1: at a context std of 1.0001 times 1.18e-38, 470 to 841 of 1,000 windows were scored flat by ``standardize_tf`` and
+        """At a context std of 1.0001 times 1.18e-38, 470 to 841 of 1,000 windows were scored flat by ``standardize_tf`` and
         standardized by the flag and ``predict``'s scale (about 40 percent of the cells sit below the flush)."""
         rng = np.random.default_rng(5 + lookback)
         z = rng.normal(size=(300, lookback, 1))
@@ -1551,7 +1551,7 @@ class TestTheFloat32FlushIsOneRule:
         np.testing.assert_array_equal(context_stats_np(context, 1e-6)[2].reshape(-1) == 1.0, flag)
 
     def test_the_summary_count_is_what_the_scoring_treated_as_flat_at_the_tiny_edge(self, tmp_path):
-        """Review pass 6 s11b: an ACCEPTED csv (every select context has a float64 std of 1.0001 times 1.18e-38, so it is not resolution-flat)
+        """An ACCEPTED csv (every select context has a float64 std of 1.0001 times 1.18e-38, so it is not resolution-flat)
         whose summary counted 0 of 72 select windows flat while the select dataset scored 38 of them in the series' raw unit."""
         lookback = horizon = 8
         rows = 4000
@@ -1617,7 +1617,7 @@ class TestTheFlatCountsOfARun:
         assert flat_oracle(b.bank, b.select_windows, LOOKBACK, 1e-6).sum() == 2
 
     def test_a_constant_column_makes_every_window_flat_and_the_count_is_the_flag_the_predictor_reads(self, tmp_path):
-        """D-047 (review pass 3 W1): one rule, so a csv with a fixed covariate counts every window flat, as ``predict`` flags it."""
+        """D-047: one rule, so a csv with a fixed covariate counts every window flat, as ``predict`` flags it."""
         b = load(**csv_kwargs(write_csv(tmp_path, b=np.full(CSV_ROWS, 7.0)), value_cols=["a", "b"]))
         assert b.flat_windows["select"] == len(b.select_windows) and b.flat_windows["test"] == len(b.test_windows)
         assert b.flat_windows["train_fraction"] == 1.0
@@ -1626,7 +1626,7 @@ class TestTheFlatCountsOfARun:
             assert int(fs.flat_contexts(contexts, 1e-6).sum()) == b.flat_windows[name]
 
     def test_the_summary_count_is_what_the_scoring_treated_as_flat(self, tmp_path):
-        """Review pass 5 W2: the summary's ``flat_windows`` read the float32 value of a window while ``val_mae``, the baselines and the bar
+        """The summary's ``flat_windows`` read the float32 value of a window while ``val_mae``, the baselines and the bar
         were scored through ``standardize_tf`` on the float64 window, so on an accepted csv with 5 windows at level 100 and a std 0.1 percent
         above the threshold the summary said 3 and the scoring treated 0 as flat (and 3 against 5 at 0.1 percent below). The README says a
         non-zero count means part of ``val_mae`` is in the series' own unit, so the count must BE the windows scored in it."""

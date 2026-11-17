@@ -119,8 +119,8 @@ def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarra
     # `context_spread`) here and in `flat_contexts`, the same comparison on the same float32 value in `standardize_tf` and `context_stats_ops`.
     # The std, the anchor and the offset stay float64 so a shift is still held to the float64 limit (casting the whole window rounds a level
     # of 1e5 to 0.0078 and `predict` loses its shift invariance, D-048). Do NOT decide on the float64 window here: the training function
-    # then scores one unit where the summary counts another (review pass 5 W2). The float32 value is TensorFlow's: a denormal cell reads 0
-    # (`served_values`, D-050), because `standardize_tf` casts through TensorFlow, which flushes it (review pass 6 W1).
+    # then scores one unit where the summary counts another. The float32 value is TensorFlow's: a denormal cell reads 0
+    # (`served_values`, D-050), because `standardize_tf` casts through TensorFlow, which flushes it.
     context = np.asarray(context, np.float64)
     anchor = context[..., :1, :]
     offset = (context - anchor).mean(axis=-2, keepdims=True)
@@ -167,7 +167,7 @@ def context_stats_ops(context: Any, scale_floor: float) -> Tuple[Any, Any, Any]:
     # DECISION plan-2026-11-13T105600-3a8319ef/D-049
     # The std is `span * std(deviation / span)`, `span` the largest deviation: the same number as the plain std, but no RAW deviation is
     # squared, so a window near 1e-18 keeps its spread (TensorFlow's float32 CPU kernels flush a square below 1.2e-38 to 0, and the plain std
-    # of such a window came out 0 in the file and not in `predict`, review pass 5 W1). `maximum(span, FLOAT32_TINY)` keeps an all-zero
+    # of such a window came out 0 in the file and not in `predict`). `maximum(span, FLOAT32_TINY)` keeps an all-zero
     # context at 0 / tiny = 0 instead of 0 / 0 = NaN. Do NOT go back to `sqrt(mean(square(deviation)))`.
     ops = keras.ops
     anchor = context[..., :1, :]

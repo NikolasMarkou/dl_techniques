@@ -624,7 +624,7 @@ def export(
     # DECISION plan-2026-11-13T105600-3a8319ef/D-042
     # The task's check runs for EVERY format that writes a traced function, `keras` of a served task included: it was skipped
     # there because no spec is traced for `keras`, so an xlstm trained at lookback 32 was written as a lookback-64 file beside a
-    # `task.json` that says 32 (review W7). The shape is the spec's where there is one and the one the keras wrapper is built at
+    # `task.json` that says 32. The shape is the spec's where there is one and the one the keras wrapper is built at
     # (`input_shape` or the record's) where there is not. Do NOT run it only `if spec is not None`, and do NOT run it for a
     # keras file of a task with no served function: that file is the model itself and nothing is traced.
     if record is not None and (spec is not None or served is not None):

@@ -210,7 +210,7 @@ class TimeSeriesForecastingConfig(StrictConfig):
         # DECISION plan-2026-11-13T105600-3a8319ef/D-041
         # `precision` other than float32 is refused HERE, before the claim: a run under a mixed policy trains and writes its
         # `task.json`, and then `load_model` (so `predict` and `export`) refuses its own file, naming the lookback when the cause
-        # is a float16 against float32 clash in the layers (review W4, measured on nbeats/tiny: an InvalidArgumentError, a half
+        # is a float16 against float32 clash in the layers (measured on nbeats/tiny: an InvalidArgumentError, a half
         # tensor met a float tensor, in a float32 process; the same file runs under a mixed global policy). Do NOT let the option
         # through "because the run itself works" (its reload check passes in the training process, which has the mixed policy) and
         # do NOT restore the saved policy at load (a second precision rule in the predictor for one task).
@@ -563,7 +563,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             "the context's one-step differences) and, for a quantile head, coverage and sharpness",
         ]
         if data.flat_windows["select"] > 0.5 * data.n_select:
-            # D-048 (review pass 4 NOTE 4): a flat window is scored in the series' raw unit, so with most of them flat the bar is a number of that unit;
+            # D-048: a flat window is scored in the series' raw unit, so with most of them flat the bar is a number of that unit;
             # D-049: the count is the decision `standardize_tf` scores with (one decision on the float32 value, a denormal reading 0 in both, D-050), so these ARE the windows scored in it
             notes.append(
                 f"{data.flat_windows['select']} of the {data.n_select} selection windows are flat and scored in the series' own unit, so `val_mae`, "

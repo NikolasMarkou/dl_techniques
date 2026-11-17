@@ -1,4 +1,4 @@
-"""Every ``python -m train time_series_forecasting ...`` command a document prints is a command the CLI accepts (review W2, D-046).
+"""Every ``python -m train time_series_forecasting ...`` command a document prints is a command the CLI accepts (D-046).
 
 The first two commands of the forecasting section of ``src/train/README.md`` exited 2 with ``Missing required key 'data'`` and no test
 ran them. This test reads the documents, takes every such command line (a backslash continuation joined, a shell comment dropped,

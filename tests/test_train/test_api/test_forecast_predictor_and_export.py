@@ -304,7 +304,7 @@ def test_a_window_shifted_by_a_constant_gives_the_forecast_shifted_by_it(trained
 
 @pytest.mark.parametrize("shift", [0.0, 50.0, 1e3, 1e5, 1e6])
 def test_the_shift_error_through_predict_is_inside_the_stated_bound_for_all_nine_decode_rows(trained, shift):
-    """D-047 (review pass 3 NOTE 5): the bound was measured on two rows and stated for every one. Measured on all nine (7 windows of
+    """D-047: the bound was measured on two rows and stated for every one. Measured on all nine (7 windows of
     std about 5.8 each, the five levels): at most 2.4e-11 of a window std; the stated bound is 1e-7 (a float32 rounding of one
     standardized input, which a shift can flip, is of that order), and every row is held to it, the point and the quantiles."""
     windows = raw_windows(7, 1, seed=1)
@@ -371,7 +371,7 @@ def own_windows(summary, values, name):
 
 @pytest.mark.parametrize("which", ["a constant covariate column", "a held stretch inside the select segment"])
 def test_the_summary_counts_the_windows_predict_flags_on_the_runs_own_windows(world, tmp_path, which):
-    """D-047 (review pass 3 W1): ONE rule. A csv with a fixed covariate column was counted 0 flat by the summary while ``predict``
+    """D-047: ONE rule. A csv with a fixed covariate column was counted 0 flat by the summary while ``predict``
     flagged every window; a constant stretch is counted the same by both, and neither refuses it (std exactly 0 is genuine)."""
     v0 = pd.read_csv(write_series_csv(tmp_path / "walk.csv", rows=1200, columns=["v0"]))["v0"].to_numpy(np.float64)
     if which == "a constant covariate column":
@@ -517,7 +517,7 @@ def newest_first(source: Path, target: Path) -> Path:
 
 
 def test_predict_of_a_csv_checks_the_time_order_with_the_function_the_loader_uses(csv_run, tmp_path, monkeypatch, capsys):
-    """Review W6: a newest-first csv was forecast from its OLDEST rows with no warning. The record names ``time_col`` and the
+    """A newest-first csv was forecast from its OLDEST rows with no warning. The record names ``time_col`` and the
     check is ``forecast_series._check_time_column``, the loader's own (one implementation, D-042)."""
     from train.api import forecast_series
 
@@ -574,7 +574,7 @@ def test_a_record_that_names_another_head_levels_or_decode_row_is_refused(traine
 
 @pytest.mark.parametrize("lookback", [LOOKBACK // 2, LOOKBACK + 8])
 def test_a_record_whose_lookback_the_model_was_not_built_for_is_refused_naming_the_field_for_every_family(trained, tmp_path, lookback):
-    """Review W5: four families (ets, xlstm, tirex, timestral) ran a window of the wrong length for a hand-edited lookback, because
+    """Four families (ets, xlstm, tirex, timestral) ran a window of the wrong length for a hand-edited lookback, because
     their forward pass takes any length. The record is held to the model's BUILT input shape (D-042), for all nine decode rows."""
     with pytest.raises(ConfigError, match=rf"lookback is {lookback} in task.json and {LOOKBACK} in the model"):
         load_model(copy_run(trained.run, tmp_path / "run", lookback=lookback))
@@ -896,7 +896,7 @@ def test_every_working_cell_equals_the_predictor_on_raw_windows(case, fmt, world
 
 @pytest.mark.parametrize("case, fmt", cell_params([("nbeats", fmt) for fmt in FORMATS]))
 def test_every_file_takes_an_empty_batch_and_gives_an_empty_forecast(case, fmt, world, tmp_path_factory):
-    """Review pass 6 N2: the keras-ops standardization took ``ops.max`` of an empty batch, which Keras's TensorFlow backend asserts is non-empty in
+    """The keras-ops standardization took ``ops.max`` of an empty batch, which Keras's TensorFlow backend asserts is non-empty in
     eager mode, so a ``.keras`` file called as ``model(x)`` on zero windows raised where the three other files gave ``(0, horizon, channels)``."""
     point, _, _ = run_file(export_cell(case, fmt, tmp_path_factory), fmt, np.zeros((0, LOOKBACK, 1)))
     assert point.shape == (0, HORIZON, 1), (case, fmt, point.shape)
@@ -957,7 +957,7 @@ def test_a_shape_that_is_not_the_records_window_is_refused_before_anything_is_wr
 
 @pytest.mark.parametrize("case", ["nbeats", "xlstm_point"])
 def test_the_library_keras_export_runs_the_shape_check_of_the_other_formats(case, world, tmp_path_factory, tmp_path):
-    """Review W7: ``export(format="keras", input_shape=(64, 1))`` of an xlstm run trained at lookback 32 wrote a lookback-64 file
+    """``export(format="keras", input_shape=(64, 1))`` of an xlstm run trained at lookback 32 wrote a lookback-64 file
     beside a ``task.json`` that says 32, because the shape check ran only where a spec was traced (not for ``keras``). The CLI has no
     ``input_shape`` key, so the library function is the path (D-042)."""
     from train.api import exporting
@@ -972,7 +972,7 @@ def test_the_library_keras_export_runs_the_shape_check_of_the_other_formats(case
     assert written.exists() and read_json(written.with_name("ok.keras.task.json")) == run.record
 
 
-@pytest.mark.filterwarnings("error:Conversion of an array with ndim > 0 to a scalar:DeprecationWarning")   # pass 4 NOTE 8: one element, not float() of an array
+@pytest.mark.filterwarnings("error:Conversion of an array with ndim > 0 to a scalar:DeprecationWarning")   # one element, not float() of an array
 def test_the_keras_ops_standardization_is_the_numpy_twin_rule_for_rule():
     """The function a file runs is ``context_stats_ops``: the first-value anchor, the offset from it, the population std and the unit
     scale of a flat context equal ``context_stats_np`` (the rule the Predictor and the bar use), on the cases where a simpler rule
@@ -1001,7 +1001,7 @@ def test_the_keras_ops_standardization_is_the_numpy_twin_rule_for_rule():
 @pytest.mark.parametrize("fmt", ["keras", "saved_model"])
 @pytest.mark.parametrize("level", [1e3, 1e5, 1e6])
 def test_a_file_agrees_with_predict_at_a_level_far_above_the_spread(case, fmt, level, world, tmp_path_factory):
-    """D-040 (review W1): the same float32 windows, std about 8, at a level of 1e3, 1e5 and 1e6 given to the file and to ``predict``.
+    """D-040: the same float32 windows, std about 8, at a level of 1e3, 1e5 and 1e6 given to the file and to ``predict``.
 
     The agreement is 1e-4 of the window std PLUS one float32 step of the forecast itself: the file answers in float32, so at a level of
     1e5 its numbers sit on a grid of 0.0078 (1e-3 of this std) and at 1e6 on 0.0625, whatever the rule; that representation
@@ -1022,7 +1022,7 @@ def test_a_file_agrees_with_predict_at_a_level_far_above_the_spread(case, fmt, l
 
 @pytest.mark.parametrize("spread", [1e-19, 1e-25, 1e-33])
 def test_a_window_at_a_near_zero_spread_is_standardized_not_flat_in_the_file_and_in_predict(spread, world, tmp_path_factory):
-    """D-049 (review pass 5 W1), replacing D-047's absolute guard: the float32 function used to square the raw deviations, so a window at
+    """D-049, replacing D-047's absolute guard: the float32 function used to square the raw deviations, so a window at
     1e-19 (inside a column whose peak is 1.0: the range check passes) had its std underflow in the file and not in ``predict``
     (7e15 window stds apart near the guard). The spread is computed without squaring a raw deviation now: such a window is standardized
     by both, the forecast is scale-equivariant and the file agrees with ``predict`` to a thousandth of the window std."""
@@ -1057,7 +1057,7 @@ def test_a_window_below_float32_tiny_is_flat_in_the_file_and_in_predict(spread, 
 @pytest.mark.parametrize("fmt", ["keras", "saved_model"])
 @pytest.mark.parametrize("k", [-1e-3, 1e-3])
 def test_a_float64_window_near_the_flat_threshold_is_decided_alike_by_predict_and_the_file(k, fmt, world, tmp_path_factory, monkeypatch):
-    """D-048 (review pass 4 W3): float64 windows at a level of 1e5 with a std 0.1 percent either side of the flat threshold. ``predict``
+    """D-048: float64 windows at a level of 1e5 with a std 0.1 percent either side of the flat threshold. ``predict``
     decided flatness on the float64 window and the file on its float32 value: at +0.1 percent ``predict`` flagged 0 of 16 and the file's
     function 6 of 16, and the four files were 0.32 window stds from ``predict`` (0.039 std is the float32 grid of the forecast alone).
     ``predict`` decides on the float32 value now: the flag is the file function's decision and the forecasts agree to the float32 grid."""
@@ -1100,7 +1100,7 @@ def fs_context_flat(windows: np.ndarray, floor: float) -> np.ndarray:
 
 
 def test_a_small_unit_window_with_a_resolved_spread_is_standardized_and_not_flat_in_file_and_predict(world, tmp_path_factory):
-    """D-048 (review pass 4 W2): a window at 1e-11 with a std of 5e-16 is inside the accepted range and well resolved by float32, so it
+    """D-048: a window at 1e-11 with a std of 5e-16 is inside the accepted range and well resolved by float32, so it
     is standardized: the forecast is scale-equivariant (the same window times an exact power of two, 2**56, gives the forecast times it)
     and the file agrees with ``predict``. Under the 1e-15 guard it was flat and forecast in raw units, 7.3e8 times its own level."""
     path = export_cell("nbeats", "keras", tmp_path_factory)
@@ -1120,7 +1120,7 @@ def test_a_small_unit_window_with_a_resolved_spread_is_standardized_and_not_flat
 
 @pytest.mark.parametrize("value", [float(np.nextafter(1e15, 2e15)), -float(np.nextafter(1e15, 2e15)), 1e15 + 0.25, 1.0000001e15, -2e15, 1e19, 1e20, 3.5e38, -1e39, 1e300])
 def test_a_window_above_the_bound_of_a_training_column_is_refused_by_name(value, one):
-    """Review pass 5 NOTE 6 (D-049). ``predict`` refused only above float32's maximum (3.4e38), but a csv column is bounded at 1e15
+    """D-049: ``predict`` refused only above float32's maximum (3.4e38), but a csv column is bounded at 1e15
     (``FLOAT32_RANGE``) and the files failed far below 3.4e38 under the squares guard (spreads of 1e19 and 1e20 gave infinity or NaN from
     every file while ``predict`` answered). One bound, the training column's, by name, whatever the failing point of the files is now."""
     window = raw_windows(1, 1, seed=3)[0].copy()
@@ -1128,12 +1128,12 @@ def test_a_window_above_the_bound_of_a_training_column_is_refused_by_name(value,
     with pytest.raises(ConfigError, match=r"window 0 holds a value of magnitude \S+ at row 5, column 0, above 1e15, the largest max \|x\| a training column may have") as raised:
         one.predictor.predict(window)
     shown = float(re.search(r"magnitude (\S+) at row", str(raised.value))[1])
-    assert shown == abs(value) and shown > 1e15, "the sentence shows the magnitude exactly, so it IS above the bound for every refused value (review pass 6 N4: 1e15 + 0.125 read '1e+15 above 1e15')"
+    assert shown == abs(value) and shown > 1e15, "the sentence shows the magnitude exactly, so it IS above the bound for every refused value (1e15 + 0.125 once read '1e+15 above 1e15')"
 
 
 @pytest.mark.parametrize("value, shown", [(4e15, "4e+15"), (float(np.nextafter(1e15, 2e15)), "1.0000000000000001e+15"), (-2e15, "2e+15"), (1e300, "1e+300")])
 def test_the_refused_magnitude_reads_short_and_stays_above_the_bound(value, shown, one):
-    """Review pass 7 N3. ``repr`` of 4e15 read 4000000000000000.0 (16 digits to count against ``1e15``); the shortest scientific form of the float
+    """``repr`` of 4e15 read 4000000000000000.0 (16 digits to count against ``1e15``); the shortest scientific form of the float
     reads 4e+15 and still prints one more digit than 1e15 for ``nextafter(1e15)``, so every refusal reads as above the bound."""
     window = raw_windows(1, 1, seed=3)[0].copy()
     window[5, 0] = value
@@ -1144,7 +1144,7 @@ def test_the_refused_magnitude_reads_short_and_stays_above_the_bound(value, show
 
 def test_a_window_at_the_bound_is_forecast_by_predict_and_by_a_file_alike(world, tmp_path_factory):
     """The bound itself: a window whose cells reach 1e15 (spread 1e15 about level 0) is accepted, and the keras file agrees with ``predict`` to
-    a thousandth of the window std (measured finite and within 6e-6 of it up to a spread of 1e35: 4.3e-6 on 128 windows per cell, ``scratch_review6b/t5_files_beyond_bound.log``, and 5.8e-6 on 512, ``scratch_round_h``)."""
+    a thousandth of the window std (measured finite and within 6e-6 of it up to a spread of 1e35: 4.3e-6 on 128 windows per cell and 5.8e-6 on 512)."""
     path = export_cell("nbeats", "keras", tmp_path_factory)
     run = trained_case("nbeats", tmp_path_factory)
     e = raw_windows(4, 1, seed=3)
@@ -1316,7 +1316,7 @@ def test_every_keras_file_reloads_in_a_fresh_interpreter_that_imports_the_train_
 
 
 def test_an_exported_keras_file_does_not_load_in_a_process_where_the_train_package_cannot_be_imported(world, tmp_path_factory, tmp_path):
-    """Review W3: the layer the file holds is a class of ``train``, which the wheel does not ship. The failure a user meets is Keras's
+    """The layer the file holds is a class of ``train``, which the wheel does not ship. The failure a user meets is Keras's
     own sentence, named by the class and the module (a keras version that words it otherwise fails this test, which is the signal)."""
     import subprocess
     import sys
@@ -1360,9 +1360,9 @@ def test_the_requirement_of_the_keras_file_is_stated_in_the_note_the_help_and_th
 
 
 def test_the_note_the_help_and_the_readme_say_what_is_flat_and_where_the_file_and_predict_can_differ(one):
-    """D-047, D-048, D-049 (review pass 5 W1, NOTE 8): a window with std not above max(1.18e-38, floor * mean|x|) is flat in file and
+    """D-047, D-048, D-049: a window with std not above max(1.18e-38, floor * mean|x|) is flat in file and
     ``predict`` and has no scale; both decide on the float32 value of the window and agree except within about 1e-5 of the threshold (a relative distance
-    measured on the float32 values, 1 and 3 channels, ``scratch_review6b/t3_band_distance.log``; review pass 6 N3 replaced the rate "1 window in 4,000") and, at float32's smallest normal number, in the onnx file (D-050: a denormal reads 0 in the
+    measured on the float32 values, 1 and 3 channels; it replaced the rate "1 window in 4,000", which held for one channel only) and, at float32's smallest normal number, in the onnx file (D-050: a denormal reads 0 in the
     decision of training, scoring, the count, the flag, ``predict`` and the three TensorFlow-based files, and onnxruntime keeps it). The claim of
     "two float32 steps" was measured false near the old absolute guard (7e15 window stds apart) and is not repeated anywhere."""
     from train.api import forecast_predictor
@@ -1382,7 +1382,7 @@ def test_the_note_the_help_and_the_readme_say_what_is_flat_and_where_the_file_an
     assert "`max(1.18e-38, scale_floor * mean|x|)` is flat in the file and in `predict` alike" in readme
     assert "disagree only within about 1e-5 of the threshold (a relative distance of the std, measured on the float32 values), except that the onnx file, which keeps a denormal, decides differently for a window whose spread is within 1.3 times 1.18e-38" in readme
     for text in (note, help_text, readme):
-        assert "1 window in 4,000" not in text and "1 window of 4,000" not in text, "review pass 6 N3: a rate that holds for one channel only; the band is a distance"
+        assert "1 window in 4,000" not in text and "1 window of 4,000" not in text, "a rate that holds for one channel only; the band is a distance"
     for text in (note, help_text, readme):
         assert "two float32 steps" not in text and "max(1e-18" not in text, "the claim and the guard of the squares design"
     assert "1e-18" not in note and "1e-18" not in help_text
@@ -1479,7 +1479,7 @@ def test_another_attribute_error_of_the_converter_is_not_taken_for_the_numpy_one
 @needs_onnx
 @pytest.mark.parametrize("failure", [OSError("could not get source code"), TypeError("module, class, method, function, traceback, frame, or code object was expected")])
 def test_an_unavailable_tf2onnx_source_skips_only_the_cause_naming_and_never_the_export(failure, world, tmp_path_factory, tmp_path, monkeypatch, caplog):
-    """D-047 (review pass 3 NOTE 7a): ``inspect.getsource`` runs on every onnx export of every task; a tf2onnx install without its
+    """D-047: ``inspect.getsource`` runs on every onnx export of every task; a tf2onnx install without its
     ``.py`` files raises OSError (a compiled module, TypeError), and that must cost the warning that names the pair, never the file."""
     import inspect
     import logging

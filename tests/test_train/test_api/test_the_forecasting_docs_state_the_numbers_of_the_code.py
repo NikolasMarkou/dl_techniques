@@ -146,7 +146,7 @@ def test_the_readme_says_a_hand_edited_scale_floor_cannot_be_detected():
 
 
 def test_the_required_keys_the_documents_state_are_the_configs_fields_without_a_default():
-    """Review W2: the README said `out` and `model` were required, the module said `out`, `model` and `data`, and the code wanted all three."""
+    """The README said `out` and `model` were required, the module said `out`, `model` and `data`, and the code wanted all three."""
     config = TimeSeriesForecastingConfig
     required = [f.name for f in dataclasses.fields(config) if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING]
     assert required == ["out", "model", "data"], "vacuity guard: the fields that have no default"
@@ -177,51 +177,51 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert FLOAT32_TINY == 1.1754943508222875e-38 and "There is no larger absolute guard" in text and "`span * std(deviation / span)`" in text
     assert "The two earlier guards, 1e-15 and 1e-18," in text and "max(1e-18" not in text and "max(1e-15" not in text, "the old guards are named once, as the ones that were wrong"
     assert "are resolution-flat" in text and "an EXACTLY constant window" in text and "never refused" in text, "the two kinds of flat window"
-    # review pass 4 W1: a difference removes a constant level exactly, so the text names it as a remedy and does not say it does not help
+    # a difference removes a constant level exactly, so the text names it as a remedy and does not say it does not help
     assert "or give the model the first or the seasonal difference of the column" in text and "the model then forecasts differences, not values" in text
     assert "differencing does not help" not in text and "as shifted" not in text
     assert "subtract the level" in text and "multiply the column by a power of ten" in text and "which lowers the RELATIVE term only" in text
     assert "The one override is `transform_args.scale_floor`" in text and "so the override is stated and not advised" in text
-    assert "about one window std at a level of 1e7 over a std of 1" in text, "the cost of the override (review pass 4 NOTE 6)"
-    assert "naive-last MAE of 0.012 and 1.202" in text and "depend on the unit the csv is written in" in text, "review pass 4 NOTE 4"
+    assert "about one window std at a level of 1e7 over a std of 1" in text, "the cost of the override"
+    assert "naive-last MAE of 0.012 and 1.202" in text and "depend on the unit the csv is written in" in text, "a flat window is scored in the column's own unit"
     assert SHIFT_BOUND == 1e-7 and f"holds the shift to {SHIFT_BOUND:.0e}".replace("e-0", "e-") + " of a std for every decode row" in text
     assert "all nine decode rows" in text, "the shift bound says on which rows it was measured"
-    # D-049 (review pass 5): ONE decision for the flag, the count, the scale, the training function and the file, and the measured band it leaves
+    # D-049: ONE decision for the flag, the count, the scale, the training function and the file, and the measured band it leaves
     assert "read ONE decision (D-049)" in text and "counts exactly the windows that were scored in the series' own unit" in text
-    assert "3 counted against 0 scored on a csv with 5 windows 0.1 percent above the threshold" in text, "review pass 5 W2"
+    assert "3 counted against 0 scored on a csv with 5 windows 0.1 percent above the threshold" in text, "the count and the scoring were two decisions"
     assert "disagree only within about 1e-5 of the threshold, as a relative distance of the window's std measured on the float32 values" in text, "the measured band (t3_band_distance.log)"
-    assert "the largest distance of a disagreement in any cell was 1.0e-5, at 3 channels and lookback 1,024" in text and "1 window of 4,000" not in text, "review pass 6 N3"
+    assert "the largest distance of a disagreement in any cell was 1.0e-5, at 3 channels and lookback 1,024" in text and "1 window of 4,000" not in text, "the band is a distance, not a rate"
     assert "`standardize_tf` agrees with it on 3,600 of 3,600 windows at three levels" in text
-    # review pass 6 N6: the maxima of pass 5 were measured on 16 windows and exceeded on 64; re-measured on 128 windows per cell (t4, t5) and the sample size is in the text
+    # maxima once measured on 16 windows were exceeded on 64; re-measured on 128 windows per cell and the sample size is in the text
     assert "within 6e-6 of a window std of `predict` at window spreads from 1e-33 to 1e-19 and from 1e16 to 1e35 (128 windows per cell" in text
-    assert "0.14 to 0.35 window std from `predict` on float64 windows (the largest gap over the 512 windows of each of 45 cells" in text and "0.09 to 0.23" not in text and "0.08 to 0.31" not in text, "review pass 7 N1"
-    assert "so these are largest values seen and not bounds" in text and "a second sample of 512 windows per cell, two seeds of 256, gave 4.8e-6 and 5.8e-6, still within 6e-6" in text, "review pass 7 N1"
-    assert "to about 3e-7 of its forecast" in text and "within 3.2e-7" not in text and "the largest seen was 2.6e-7 in 512 windows per cell over two seeds, and 3.8e-7 once" in text, "review pass 7 N1"
-    assert "within about 5e-6 of a window std of `predict` at every spread from 1.0001 times 1.18e-38 up, for the windows that `predict` standardizes" in text and "within 4.3e-6 of a window std" not in text, "review pass 7 N1"
-    assert "differs from `predict` on those by up to 0.0073 of the forecast" in text, "review pass 7 N1"
+    assert "0.14 to 0.35 window std from `predict` on float64 windows (the largest gap over the 512 windows of each of 45 cells" in text and "0.09 to 0.23" not in text and "0.08 to 0.31" not in text, "the gap is the largest seen over 512 windows per cell"
+    assert "so these are largest values seen and not bounds" in text and "a second sample of 512 windows per cell, two seeds of 256, gave 4.8e-6 and 5.8e-6, still within 6e-6" in text, "the maxima are largest values seen, with the second sample"
+    assert "to about 3e-7 of its forecast" in text and "within 3.2e-7" not in text and "the largest seen was 2.6e-7 in 512 windows per cell over two seeds, and 3.8e-7 once" in text, "flat windows: an order of magnitude, not a bound"
+    assert "within about 5e-6 of a window std of `predict` at every spread from 1.0001 times 1.18e-38 up, for the windows that `predict` standardizes" in text and "within 4.3e-6 of a window std" not in text, "onnx: for the windows predict standardizes"
+    assert "differs from `predict` on those by up to 0.0073 of the forecast" in text, "onnx: the windows predict flags flat"
     assert "within 4e-6 of a window std of `predict` at window spreads from 1e-19 to 1e-30" not in text and "(r5_files.log" not in text, "the 16-window numbers are gone"
     assert "7e15 window stds apart" in text and "forecast about 2.6e8 times its own level" in text
-    # D-050 (review pass 6 W1): a float32 denormal reads 0 in the decision of every implementation but onnxruntime's; the TensorFlow files also flush the cells
-    assert "the decision reads a denormal as 0, as TensorFlow does (D-050)" in text and "both read 0 for a denormal now" in text, "review pass 6 W1"
+    # D-050: a float32 denormal reads 0 in the decision of every implementation but onnxruntime's; the TensorFlow files also flush the cells
+    assert "the decision reads a denormal as 0, as TensorFlow does (D-050)" in text and "both read 0 for a denormal now" in text, "a denormal reads 0 in the decision"
     assert "the summary said 0 flat and the scoring treated 38 as flat" in text and "1,153 of 2,000 windows at 1.0001 times it at lookback 168" in text, "s11b and t2"
-    # review pass 7 N2: the single-seed list read as a smooth curve; it is not monotone, so the text gives ranges and says it varies with the seed
-    assert "up to about 9 window stds at spreads from 0.9 to 1.5 times 1.18e-38 (4 to 9 in every sample measured, with no steady fall over that range" in text, "review pass 7 N2"
-    assert "about 2 at 3 to 3.5 times, 0.3 to 0.6 at 10 times, 0.01 to 0.03 at 100 times, 0.01 to 0.05 at 1e-36 and under 4e-6 at 1e-33" in text, "review pass 7 N2"
-    assert "8.7 window stds at a spread of 0.9 times" not in text and "3.9 at 1.5 times" not in text, "review pass 7 N2: the single-seed digits are gone"
-    assert "flush a float32 value below 1.18e-38 to 0 and" not in text and "297 of 2,000 windows at 0.9 times it" not in text, "the pass-5 sentence, measured false in pass 6"
-    assert "after the UTF-8 byte-order mark of a spreadsheet's \"CSV UTF-8\", if the file has one" in text, "review pass 6 N5"
-    assert "A flat window has no scale" in text and "forecast about 2.6e8 times its own level" in text, "review pass 5 NOTE 8"
+    # the single-seed list read as a smooth curve; it is not monotone, so the text gives ranges and says it varies with the seed
+    assert "up to about 9 window stds at spreads from 0.9 to 1.5 times 1.18e-38 (4 to 9 in every sample measured, with no steady fall over that range" in text, "the tiny-edge gap is a range"
+    assert "about 2 at 3 to 3.5 times, 0.3 to 0.6 at 10 times, 0.01 to 0.03 at 100 times, 0.01 to 0.05 at 1e-36 and under 4e-6 at 1e-33" in text, "the tiny-edge gaps as ranges"
+    assert "8.7 window stds at a spread of 0.9 times" not in text and "3.9 at 1.5 times" not in text, "the single-seed digits are gone"
+    assert "flush a float32 value below 1.18e-38 to 0 and" not in text and "297 of 2,000 windows at 0.9 times it" not in text, "a sentence measured false"
+    assert "after the UTF-8 byte-order mark of a spreadsheet's \"CSV UTF-8\", if the file has one" in text, "a byte-order mark before a blank line"
+    assert "A flat window has no scale" in text and "forecast about 2.6e8 times its own level" in text, "what a flat window costs"
     assert "which means little where the series' unit is far from 1" in text
     for gone in ("within two float32 steps", "0 disagreements at every distance", "squares deviations in float32"):
-        assert gone not in text, f"{gone!r}: a claim of the squares-guard design, measured false in pass 5 (W1)"
+        assert gone not in text, f"{gone!r}: a claim of the squares-guard design, measured false"
     span = ", ".join(f"{x:.0e}".replace("e+", "e") for x in FLOAT32_RANGE)
     assert f"outside [{span}]" in text and "the range this task trains and serves in, and no longer a float32 limit" in text
-    assert f"`predict` refuses a window with a cell above {FLOAT32_RANGE[1]:.0e}".replace("e+", "e") + " in magnitude by name, the same bound as a training column" in text, "review pass 5 NOTE 6"
+    assert f"`predict` refuses a window with a cell above {FLOAT32_RANGE[1]:.0e}".replace("e+", "e") + " in magnitude by name, the same bound as a training column" in text, "predict's bound is the training range"
     assert "a non-finite cell, a cell above 1e15 in magnitude, an empty input" in text
 
 
 def test_the_readme_states_what_a_blank_line_does_in_a_csv():
-    """Review pass 4 NOTE 7 and pass 5 NOTE 1 and NOTE 2: a blank line inside the series is refused with its row, one before the header or
+    """A blank line inside the series is refused with its row, one before the header or
     after the last row shifts nothing and is ignored, and a text cell is refused with its row and the cell as written."""
     text = " ".join(README.read_text().split())
     assert "a blank line INSIDE the series is a missing cell refused with its row" in text
@@ -230,13 +230,15 @@ def test_the_readme_states_what_a_blank_line_does_in_a_csv():
 
 
 def test_the_readme_gate_section_names_the_code_head_it_ran_on_and_says_the_first_gate_is_superseded():
-    """The final gate (plan 3a8319ef, Step 21) ran on one code HEAD; the README is a docs-only commit after it, and says so."""
+    """The final gate (plan 3a8319ef) ran on one code HEAD; the README says what the commits after it change (no behaviour), D-053."""
     text = " ".join(README.read_text().split())
     start = text.index("**Gate numbers** (plan 3a8319ef")
     gate = text[start:start + 12000]
     assert "run on HEAD `c4cffe8fa` of the branch `train-api/phase-4e`" in gate
     assert "the code HEAD `c4cffe8fabccc0539169051cc949f070bc4073a0`" in gate
-    assert "the commit that holds this README is a docs-only commit after that HEAD" in gate
+    assert ("the commits after that HEAD change this README, comments, docstrings, formatting, one equivalent check (`is_count`) "
+            "and where one help paragraph lives, and no behaviour (checked by targeted tests, D-053)") in gate
+    assert "docs-only" not in gate, "the commits after the gate HEAD are not docs-only (D-053)"
     assert "the first gate, run on HEAD `1904f07a8`" in gate and "is superseded and every number below replaces its numbers" in gate
     assert "PENDING" not in text and "NOT YET MEASURED" not in text
     assert gate.count("| G1 |") == 1 and gate.count("| G2 |") == 1 and gate.count("| G3 |") == 1 and gate.count("| G4 |") == 1

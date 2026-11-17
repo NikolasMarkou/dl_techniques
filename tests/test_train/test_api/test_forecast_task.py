@@ -1179,7 +1179,7 @@ def csv_ended(world, tmp_path_factory, csv_file):
 
 
 def test_the_summary_says_the_bar_is_in_the_data_unit_when_most_selection_windows_are_flat(world, tmp_path):
-    """Review pass 4 NOTE 4: a held series (a policy rate) is mostly flat windows, which are scored in the series' own unit, so ``val_mae``
+    """A held series (a policy rate) is mostly flat windows, which are scored in the series' own unit, so ``val_mae``
     and the bar move with the unit the csv is written in (percent against basis points: naive-last 0.012 against 1.202). The note appears
     when MORE THAN HALF of the selection windows are flat, and not at half or below."""
     from types import SimpleNamespace
@@ -1361,7 +1361,7 @@ def refusal(tmp_path: Path, kind: str):
                          "Invalid value for 'data.lookback': expected an int of at least 2 (one value has no spread to standardize "
                          "by) or auto, got 1"),
         "csv-level": ({"data": csv_data(level_csv(tmp_path / "level.csv"))}, "have an unresolved spread"),
-        # D-045: the flat-window share (the review's csv shifted by 1e7) and the float32 range, both before the claim
+        # D-045: the flat-window share (a random walk plus a daily sine shifted by 1e7) and the float32 range, both before the claim
         "csv-flat-1e7": ({"data": csv_data(level_csv(tmp_path / "flat7.csv", 1e7))},
                          "windows of the train segment have an unresolved spread (std above 0 but not above max(1.18e-38, transform_args.scale_floor 1e-06"),
         "csv-float32-range-1e40": ({"data": csv_data(level_csv(tmp_path / "big40.csv", 0.0, 1e40))},
@@ -1370,7 +1370,7 @@ def refusal(tmp_path: Path, kind: str):
                                     "outside [1e-12, 1e15], the range this task trains and serves in"),
         "ets-aaa-without-seasonal-period": ({"model": "ets/AAA"},
                                             "Invalid value for 'model_args.seasonal_period': ets/AAA needs"),
-        # The refusals the review listed as coming AFTER the claim (W4, W8 and the NOTE on late refusals, D-041 and D-042):
+        # The refusals that used to come AFTER the claim (mixed precision, a lookback a family cannot build at, late refusals; D-041 and D-042):
         "precision-mixed-float16": ({"precision": "mixed_float16"}, PRECISION_SENTENCE),
         "precision-mixed-bfloat16": ({"precision": "mixed_bfloat16"}, PRECISION_SENTENCE),
         "n-select-below-batch": ({"data": {**E2E_DATA, "n_select": E2E_BATCH - 1}},
@@ -1414,7 +1414,7 @@ def test_a_refusal_of_invariant_9_is_exit_2_with_its_named_sentence_and_no_run_d
 
 
 def test_the_measured_reason_of_the_precision_refusal_still_holds(tmp_path):
-    """Review W4, D-041: a forecaster built and saved under ``mixed_float16`` does not run when it is loaded in a float32 process (a
+    """D-041: a forecaster built and saved under ``mixed_float16`` does not run when it is loaded in a float32 process (a
     half tensor meets a float tensor in the layers), while it runs under the mixed policy. When Keras or the model stops doing this,
     the refusal's sentence is wrong and this test fails. The global policy is restored whatever happens."""
     import tensorflow as tf

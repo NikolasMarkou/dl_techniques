@@ -107,7 +107,7 @@ def _csv_window(path: Any, record: Mapping[str, Any]) -> Any:
     try:
         # DECISION plan-2026-11-13T105600-3a8319ef/D-042
         # The record's `time_col` goes to the loader's own reader, which refuses a column that is not strictly increasing: a csv
-        # exported newest-first was forecast from its OLDEST rows with no warning (review W6). Do NOT pass `None` "because predict
+        # exported newest-first was forecast from its OLDEST rows with no warning. Do NOT pass `None` "because predict
         # only needs the last rows" (the last rows of a reversed file are the oldest), and do NOT write a second order check here.
         # A run that named no time column (`time_col` null) has no order to check: the rows are the time order.
         values, names, _ = read_csv_series(os.fspath(path), record["value_cols"], record["time_col"])
@@ -147,8 +147,8 @@ def _window(item: Any, index: int, record: Mapping[str, Any]) -> Any:
     # DECISION plan-2026-11-13T105600-3a8319ef/D-049
     # A window is bounded by the largest max |x| a training column may have (`FLOAT32_RANGE[1]`, the csv check's bound), by name. D-048 refused only above
     # float32's maximum, 3.4e38, which is not where anything fails: under the squares guard every file returned infinity or NaN from spreads of 1e19 while
-    # `predict` answered (review pass 5 NOTE 6). The files were measured finite and within 6e-6 of a window std of `predict` up to 1e35 since (128 windows per cell), so the bound is
-    # the training range's and not a limit of the files. Do NOT go back to the float32 maximum, and do NOT write a second bound here.
+    # `predict` answered. The files were measured finite and within 6e-6 of a window std of `predict` up to 1e35 since (128 windows per
+    # cell), so the bound is the training range's and not a limit of the files. Do NOT go back to the float32 maximum, and do NOT write a second bound here.
     high = FLOAT32_RANGE[1]
     beyond = np.argwhere(np.abs(window) > high)
     if len(beyond):
@@ -202,7 +202,7 @@ def check_built_window(model: Any, record: Mapping[str, Any], model_file: Any, t
     # DECISION plan-2026-11-13T105600-3a8319ef/D-042
     # The record is held to the model's BUILT input, for every family, BEFORE the model is called: ets, xlstm, tirex and timestral
     # run a window of any length, so the zero-window forward pass of `load_model` accepted a hand-edited lookback for them and
-    # forecast from a window of the wrong length (review W5). Do NOT replace this by the forward pass (it cannot see the length
+    # forecast from a window of the wrong length. Do NOT replace this by the forward pass (it cannot see the length
     # of a model that takes any), do NOT limit it to those four (for nbeats, prism and mdn the forward pass refuses a wrong
     # length but names the lookback even when the channel count is the wrong one), and do NOT drop the fallback: a model that
     # says nothing of its input still meets the forward pass in `load_model`.

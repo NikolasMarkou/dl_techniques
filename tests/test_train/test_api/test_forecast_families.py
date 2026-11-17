@@ -940,7 +940,7 @@ def refusal_cases(tmp_path):
         "a dataset that is not the synthetic bank": ({"dataset": "etth1"}, "'dataset'"),
         "a non-numeric cell": ({"format": "csv", "path": write_csv(tmp_path / "n.csv", 400, extra={(3, "b"): "abc"})}, "not numeric"),
         "a non-finite cell": ({"format": "csv", "path": write_csv(tmp_path / "f.csv", 400, extra={(3, "b"): "nan"})}, "non-finite"),
-        # review pass 4 NOTE 7: a blank line was skipped by pandas and the series after it shifted by one step with no word said
+        # a blank line was skipped by pandas and the series after it shifted by one step with no word said
         "a blank line": ({"format": "csv", "path": blank_line_csv(tmp_path / "blank.csv", write_csv(tmp_path / "g.csv", 400))},
                          "non-finite cell(s), the first at row 100 (a blank line, an empty cell, NaN or infinity)"),
     }
@@ -1413,7 +1413,7 @@ def test_the_split_sizes_are_checked_before_the_claim_for_a_known_series_count_a
 
 @pytest.mark.parametrize("args", [None, {}, {"seasonal_period": None}, {"seasonal_period": 1}, {"seasonal_period": True}, {"seasonal_period": 2.0}])
 def test_a_seasonal_ets_without_a_usable_period_is_refused_by_name_before_the_claim(args, monkeypatch):
-    """Review NOTE 3a: the library refuses ``variant='AAA' needs seasonal_period > 1`` at the build, after the run directory is claimed;
+    """The library refuses ``variant='AAA' needs seasonal_period > 1`` at the build, after the run directory is claimed;
     the request alone says it, so the pre-claim path (``window_problems``, read by ``check_model_args``) refuses it with the key named."""
     (line,) = fm.window_problems("ets", "AAA", 168, 24, args)
     assert line.startswith("Invalid value for 'model_args.seasonal_period': ets/AAA needs model_args.seasonal_period, an int of at least 2")
