@@ -164,25 +164,29 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
         # It's the initial_learning_rate of the primary schedule (i.e., its value at step 0).
         target_learning_rate = self.primary_schedule(0)
 
-        # Logic for the warmup phase
-        def warmup_fn():
-            warmup_progress = step_float / warmup_steps_float
-            # Correct linear interpolation to the fixed target
-            return self.warmup_start_lr + (target_learning_rate - self.warmup_start_lr) * warmup_progress
+        # Warmup phase: linear interpolation to the fixed target. The division is
+        # divide_no_nan (warmup_steps > 0 here, so the value is step / warmup_steps).
+        # Do NOT write a plain `/`: outside a conditional branch grappler rewrites a
+        # division by this constant into a multiplication by its reciprocal, one ulp
+        # off on most warmup steps (D-025).
+        warmup_progress = keras.ops.divide_no_nan(step_float, warmup_steps_float)
+        warmup_lr = self.warmup_start_lr + (target_learning_rate - self.warmup_start_lr) * warmup_progress
 
-        # Logic for the post-warmup phase
-        def primary_fn():
-            # Adjust the step for the primary schedule
-            # The primary schedule should start its decay *after* the warmup is complete.
-            # So, we pass it a step count that starts from 0 at the end of warmup.
-            return self.primary_schedule(step - self.warmup_steps)
+        # Post-warmup phase: the primary schedule should start its decay *after*
+        # the warmup is complete, so it gets a step count that starts from 0 at
+        # the end of warmup.
+        primary_lr = self.primary_schedule(step - self.warmup_steps)
 
-        # Use TensorFlow conditional to choose between warmup and primary rate
-        return tf.cond(
-            step_float < warmup_steps_float,
-            true_fn=warmup_fn,
-            false_fn=primary_fn
-        )
+        # DECISION plan-2026-11-17T110935-9c7b9096/D-025: both branches are computed
+        # and a select picks one. Do NOT restore a tf.cond: Keras' AdamW reads the
+        # schedule once per decayed variable, so a traced train step builds one
+        # conditional (two branch graphs) per variable: 474 reads over the two traces
+        # of a vit_s depth fit's train step.
+        # During warmup the unselected primary branch runs at a negative step and
+        # can be NaN (CosineDecayRestarts); the select returns the chosen value
+        # exactly and the rate carries no gradient. Bit equality with the
+        # conditional is held by tests/test_optimization/test_warmup_schedule.py.
+        return keras.ops.where(step_float < warmup_steps_float, warmup_lr, primary_lr)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dictionary for serialization.

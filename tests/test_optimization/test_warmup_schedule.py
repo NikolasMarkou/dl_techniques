@@ -618,3 +618,110 @@ class TestWarmupScheduleIntegration:
         assert "warmup_steps=100" in repr_str
         assert "warmup_start_lr=1e-06" in repr_str
         assert "ExponentialDecay" in repr_str
+
+def _tf_cond_reference(schedule: WarmupSchedule, step):
+    """``WarmupSchedule.__call__`` as it was when it chose its branch with a ``tf.cond``, frozen as the oracle.
+
+    The schedule now selects between the two branches with ``keras.ops.where``; this copy of the old body is what
+    every value of the select is compared with, bit for bit.
+    """
+    if schedule.warmup_steps == 0:
+        return schedule.primary_schedule(step)
+    step_float = tf.cast(step, tf.float32)
+    warmup_steps_float = tf.cast(schedule.warmup_steps, tf.float32)
+    target_learning_rate = schedule.primary_schedule(0)
+
+    def warmup_fn():
+        warmup_progress = step_float / warmup_steps_float
+        return schedule.warmup_start_lr + (target_learning_rate - schedule.warmup_start_lr) * warmup_progress
+
+    def primary_fn():
+        return schedule.primary_schedule(step - schedule.warmup_steps)
+
+    return tf.cond(step_float < warmup_steps_float, true_fn=warmup_fn, false_fn=primary_fn)
+
+
+WARMUP_STEPS = 50
+# Before, at and after the warmup boundary, through the primary's own decay and past its end.
+STEPS = list(range(0, 3 * WARMUP_STEPS + 1)) + [399, 400, 1049, 1050, 1051, 5000]
+
+
+def _primaries():
+    """The primary schedules the select is held equal on, by name.
+
+    ``restarts_short`` has a first decay period shorter than the warmup, so during warmup the unselected primary
+    branch is evaluated at a step far enough below zero that ``CosineDecayRestarts`` returns NaN; the selected value
+    must still come back exact.
+    """
+    return {
+        "cosine_alpha": keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=0.01, decay_steps=1000, alpha=0.1),
+        "exponential": keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=0.001, decay_steps=1000, decay_rate=0.9),
+        "restarts_short": keras.optimizers.schedules.CosineDecayRestarts(
+            initial_learning_rate=0.001, first_decay_steps=10, t_mul=2.0, m_mul=0.9),
+    }
+
+
+def _bits(values) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    return values.view(np.uint32)
+
+
+class TestWarmupScheduleSelectsWithoutAConditional:
+    """The schedule picks its branch with a select, equal bit for bit to the conditional it replaced."""
+
+    @pytest.mark.parametrize("name", sorted(_primaries()))
+    def test_eager_values_equal_the_conditional_bit_for_bit(self, name):
+        schedule = WarmupSchedule(warmup_steps=WARMUP_STEPS, warmup_start_lr=1e-5,
+                                  primary_schedule=_primaries()[name])
+        steps = STEPS + [0.0, 24.5, 49.9, 50.0, 50.1, 200.7]
+        new = [schedule(step).numpy() for step in steps]
+        old = [_tf_cond_reference(schedule, step).numpy() for step in steps]
+        assert np.all(np.isfinite(new)), f"{name}: a non-finite learning rate {new}"
+        np.testing.assert_array_equal(_bits(new), _bits(old), err_msg=name)
+
+    @pytest.mark.parametrize("jit_compile", [False, True], ids=["graph", "xla"])
+    @pytest.mark.parametrize("name", sorted(_primaries()))
+    def test_traced_values_equal_the_conditional_bit_for_bit(self, name, jit_compile):
+        """Grappler rewrites a division by a constant in the main graph into a multiplication by its reciprocal
+        (one ulp off on most warmup steps), which the conditional's branch escaped; this is what catches it."""
+        schedule = WarmupSchedule(warmup_steps=WARMUP_STEPS, warmup_start_lr=1e-5,
+                                  primary_schedule=_primaries()[name])
+        spec = [tf.TensorSpec((), tf.int64)]
+        new_fn = tf.function(lambda step: schedule(step), input_signature=spec, jit_compile=jit_compile)
+        old_fn = tf.function(lambda step: _tf_cond_reference(schedule, step), input_signature=spec,
+                             jit_compile=jit_compile)
+        new = [new_fn(tf.constant(step, tf.int64)).numpy() for step in STEPS]
+        old = [old_fn(tf.constant(step, tf.int64)).numpy() for step in STEPS]
+        assert np.all(np.isfinite(new)), f"{name}: a non-finite learning rate {new}"
+        # Traced against traced: a traced value is not always the eager one (the conditional's own
+        # ExponentialDecay differs by one ulp at one step between the two modes), so each mode has its own oracle.
+        np.testing.assert_array_equal(_bits(new), _bits(old), err_msg=name)
+
+    def test_the_restarts_primary_is_nan_below_zero_so_the_select_meets_a_nan(self):
+        """The NaN case of ``restarts_short`` is real, so the equality above is not vacuous about it."""
+        primary = _primaries()["restarts_short"]
+        assert np.isnan(primary(0 - WARMUP_STEPS).numpy())
+
+    def test_no_warmup_returns_the_primary_unchanged(self):
+        primary = _primaries()["cosine_alpha"]
+        schedule = WarmupSchedule(warmup_steps=0, primary_schedule=primary)
+        values = [schedule(step).numpy() for step in STEPS]
+        np.testing.assert_array_equal(_bits(values), _bits([primary(step).numpy() for step in STEPS]))
+
+    def test_two_hundred_reads_in_one_trace_build_no_conditional(self):
+        """Keras' AdamW reads the learning rate once per decayed variable, so a train step traces the schedule once
+        per variable; each read must add no ``If`` or ``StatelessIf`` (a conditional is two branch graphs built per
+        read). The second trace below is the control: the same counter sees the conditional when it is there."""
+        schedule = WarmupSchedule(warmup_steps=WARMUP_STEPS, warmup_start_lr=1e-5,
+                                  primary_schedule=_primaries()["cosine_alpha"])
+        spec = [tf.TensorSpec((), tf.int64)]
+
+        def conditionals(fn, reads):
+            traced = tf.function(lambda step: tf.add_n([fn(step) for _ in range(reads)]), input_signature=spec)
+            ops = [op.type for op in traced.get_concrete_function().graph.get_operations()]
+            return sum(op_type in ("If", "StatelessIf") for op_type in ops)
+
+        assert conditionals(schedule, 200) == 0
+        assert conditionals(lambda step: _tf_cond_reference(schedule, step), 3) == 3
