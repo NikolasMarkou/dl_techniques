@@ -164,31 +164,27 @@ def discover_megadepth_pairs(
     return rgb_paths, depth_paths
 
 
-def split_megadepth_pairs(
+def split_megadepth_scenes(
     root: str,
     train_split: float = 0.9,
-    max_train_files: Optional[int] = None,
-    max_val_files: Optional[int] = None,
-) -> Tuple[List[str], List[str], List[str], List[str]]:
-    """A scene-disjoint train/validation split of MegaDepth.
+) -> Tuple[List[Tuple[str, List[str], List[str]]], List[Tuple[str, List[str], List[str]]]]:
+    """The scene-disjoint train/validation deal of MegaDepth, as scene entries.
 
-    Interface contract: returns ``(train_rgb, train_depth, val_rgb,
-    val_depth)``. The scenes (sorted by name) are dealt so that
-    ``1 - train_split`` of them, spread evenly over the sorted list, are
-    validation scenes and the rest training scenes; no scene contributes to
-    both. Each side is then capped at its ``max_*_files``, taken evenly
-    across its scenes (``None`` keeps every pair). Deterministic: the same
-    root and arguments give the same lists. Raises ``ValueError`` when
-    ``train_split`` is not in ``(0, 1)`` or a side would get no scene.
+    Interface contract (callers: :func:`split_megadepth_pairs` and
+    ``train.common.depth_data``): returns ``(train_scenes, val_scenes)``, each
+    a list of :func:`discover_megadepth_scenes` entries in scene order. The
+    scenes (sorted by name) are dealt so that ``1 - train_split`` of them,
+    spread evenly over the sorted list, are validation scenes and the rest
+    training scenes; no scene is in both. Deterministic. Raises
+    ``ValueError`` when ``train_split`` is not in ``(0, 1)`` or a side would
+    get no scene.
 
     Args:
         root: Path to the MegaDepth dataset root directory.
         train_split: Fraction of the scenes used for training.
-        max_train_files: Cap on the training pairs, or ``None``.
-        max_val_files: Cap on the validation pairs, or ``None``.
 
     Returns:
-        The four path lists.
+        The training scenes and the validation scenes.
 
     Raises:
         ValueError: If ``train_split`` is outside ``(0, 1)`` or either side
@@ -205,6 +201,39 @@ def split_megadepth_pairs(
         raise ValueError(
             f"train_split={train_split} over {len(scenes)} scenes leaves "
             f"{len(train_scenes)} training and {len(val_scenes)} validation scenes")
+    return train_scenes, val_scenes
+
+
+def split_megadepth_pairs(
+    root: str,
+    train_split: float = 0.9,
+    max_train_files: Optional[int] = None,
+    max_val_files: Optional[int] = None,
+) -> Tuple[List[str], List[str], List[str], List[str]]:
+    """A scene-disjoint train/validation split of MegaDepth.
+
+    Interface contract: returns ``(train_rgb, train_depth, val_rgb,
+    val_depth)``. The scenes are dealt by :func:`split_megadepth_scenes`; no
+    scene contributes to both sides. Each side is then capped at its
+    ``max_*_files``, taken evenly across its scenes (``None`` keeps every
+    pair). Deterministic: the same root and arguments give the same lists.
+    Raises ``ValueError`` when ``train_split`` is not in ``(0, 1)`` or a side
+    would get no scene.
+
+    Args:
+        root: Path to the MegaDepth dataset root directory.
+        train_split: Fraction of the scenes used for training.
+        max_train_files: Cap on the training pairs, or ``None``.
+        max_val_files: Cap on the validation pairs, or ``None``.
+
+    Returns:
+        The four path lists.
+
+    Raises:
+        ValueError: If ``train_split`` is outside ``(0, 1)`` or either side
+            has no scene.
+    """
+    train_scenes, val_scenes = split_megadepth_scenes(root, train_split)
     train_rgb, train_depth = _take_across_scenes(train_scenes, max_train_files)
     val_rgb, val_depth = _take_across_scenes(val_scenes, max_val_files)
     logger.info(
