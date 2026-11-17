@@ -33,7 +33,7 @@ Interface contract
         training and scoring use. The decision is taken on the float32 value of the window (what the exported file is handed, D-048, D-049); the
         statistics stay float64. A window is forecast from its own statistics only, so a window scaled by a constant gives
         the forecast scaled, and a window shifted by a constant the forecast shifted while its ``flat`` stays False.
-    :raises ConfigError: for a window of another length or channel count, a non-finite or non-numeric value or one beyond the float32 range, an empty list or
+    :raises ConfigError: for a window of another length or channel count, a non-finite or non-numeric value or one above 1e15 in magnitude (the bound of a training column), an empty list or
         array, an input of another kind, and a csv that is missing, has too few rows, lacks a column, holds a non-numeric or
         non-finite one or is not in time order.
 
@@ -76,7 +76,7 @@ from typing import Any, Dict, List, Mapping, NoReturn, Optional, Sequence, Tuple
 
 from .errors import ConfigError
 from .exporting import check_free
-from .forecast_series import flat_contexts
+from .forecast_series import FLOAT32_RANGE, flat_contexts
 from .predictor import FORECASTING, check_record
 from .run_dir import TASK_FILE
 
@@ -141,11 +141,19 @@ def _window(item: Any, index: int, record: Mapping[str, Any]) -> Any:
         _refuse_window(
             f"window {index} holds a non-finite value (NaN or infinity) at row {int(bad[0][0])}, column {int(bad[0][1])}"
         )
-    beyond = np.argwhere(np.abs(window) > np.finfo(np.float32).max)
-    if len(beyond):   # D-048: predict decides on the float32 value of the window, the file's; a cell float32 cannot hold would become infinity
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-049
+    # A window is bounded by the largest max |x| a training column may have (`FLOAT32_RANGE[1]`, the csv check's bound), by name. D-048 refused only above
+    # float32's maximum, 3.4e38, which is not where anything fails: under the squares guard every file returned infinity or NaN from spreads of 1e19 while
+    # `predict` answered (review pass 5 NOTE 6). The files were measured finite and within 3e-6 of a window std of `predict` up to 1e35 since, so the bound is
+    # the training range's and not a limit of the files. Do NOT go back to the float32 maximum, and do NOT write a second bound here.
+    high = FLOAT32_RANGE[1]
+    beyond = np.argwhere(np.abs(window) > high)
+    if len(beyond):
+        row, col = int(beyond[0][0]), int(beyond[0][1])
+        bound = f"{high:.0e}".replace("e+", "e")
         _refuse_window(
-            f"window {index} holds a value beyond the float32 range at row {int(beyond[0][0])}, column {int(beyond[0][1])}: the "
-            "model and its exported files read float32 windows"
+            f"window {index} holds a value of magnitude {abs(float(window[row, col])):.3g} at row {row}, column {col}, above {bound}, "
+            "the largest max |x| a training column may have (the model and its exported files read float32 windows)"
         )
     return window
 

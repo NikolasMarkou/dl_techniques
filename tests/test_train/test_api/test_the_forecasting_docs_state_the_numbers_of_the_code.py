@@ -198,6 +198,8 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
         assert gone not in text, f"{gone!r}: a claim of the squares-guard design, measured false in pass 5 (W1)"
     span = ", ".join(f"{x:.0e}".replace("e+", "e") for x in FLOAT32_RANGE)
     assert f"outside [{span}]" in text and "the range this task trains and serves in, and no longer a float32 limit" in text
+    assert f"`predict` refuses a window with a cell above {FLOAT32_RANGE[1]:.0e}".replace("e+", "e") + " in magnitude by name, the same bound as a training column" in text, "review pass 5 NOTE 6"
+    assert "a non-finite cell, a cell above 1e15 in magnitude, an empty input" in text
 
 
 def test_the_readme_states_what_a_blank_line_does_in_a_csv():

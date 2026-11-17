@@ -1110,13 +1110,41 @@ def test_a_small_unit_window_with_a_resolved_spread_is_standardized_and_not_flat
     assert float((np.abs(got - small["point"]) / std).max()) < 1e-3, "the file agrees with predict to a thousandth of the window std"
 
 
-@pytest.mark.parametrize("value", [3.5e38, -1e39, 1e300])
-def test_a_window_beyond_the_float32_range_is_refused_by_name_not_forecast_as_nan(value, one):
-    """D-048: ``predict`` reads the float32 value of the window (the file's), so a cell that float32 cannot hold is refused, not turned into infinity."""
+@pytest.mark.parametrize("value", [1.0000001e15, -2e15, 1e19, 1e20, 3.5e38, -1e39, 1e300])
+def test_a_window_above_the_bound_of_a_training_column_is_refused_by_name(value, one):
+    """Review pass 5 NOTE 6 (D-049). ``predict`` refused only above float32's maximum (3.4e38), but a csv column is bounded at 1e15
+    (``FLOAT32_RANGE``) and the files failed far below 3.4e38 under the squares guard (spreads of 1e19 and 1e20 gave infinity or NaN from
+    every file while ``predict`` answered). One bound, the training column's, by name, whatever the failing point of the files is now."""
     window = raw_windows(1, 1, seed=3)[0].copy()
     window[5, 0] = value
-    with pytest.raises(ConfigError, match=r"window 0 holds a value beyond the float32 range at row 5, column 0"):
+    with pytest.raises(ConfigError, match=r"window 0 holds a value of magnitude \S+ at row 5, column 0, above 1e15, the largest max \|x\| a training column may have"):
         one.predictor.predict(window)
+
+
+def test_a_window_at_the_bound_is_forecast_by_predict_and_by_a_file_alike(world, tmp_path_factory):
+    """The bound itself: a window whose cells reach 1e15 (spread 1e15 about level 0) is accepted, and the keras file agrees with ``predict`` to
+    a thousandth of the window std (measured finite and within 3e-6 of it up to a spread of 1e35, ``scratch_review6/r5_files.log``)."""
+    path = export_cell("nbeats", "keras", tmp_path_factory)
+    run = trained_case("nbeats", tmp_path_factory)
+    e = raw_windows(4, 1, seed=3)
+    e = (e - e.mean(axis=1, keepdims=True)) / e.std(axis=1, keepdims=True)
+    windows = np.asarray(0.99e15 * e / np.abs(e).max(axis=1, keepdims=True), np.float32).astype(np.float64)
+    assert float(np.abs(windows).max()) <= 1e15, "vacuity guard: inside the bound"
+    want = run.predictor.predict(windows)
+    got, _, _ = run_file(path, "keras", windows)
+    assert np.isfinite(got).all() and np.isfinite(want["point"]).all() and not want["flat"].any()
+    assert float((np.abs(got - want["point"]) / windows.std(axis=1)[:, None, :]).max()) < 1e-3
+
+
+def test_a_csv_whose_last_rows_are_above_the_bound_is_refused_through_predict_too(world, tmp_path_factory, one):
+    """The window of a csv path goes through the same refusal (``_csv_window`` hands it to ``_window``)."""
+    rows = LOOKBACK + 4
+    path = tmp_path_factory.mktemp("big_csv") / "big.csv"
+    values = np.random.default_rng(3).normal(size=rows)
+    values[-3] = 4e15
+    path.write_text("v\n" + "\n".join(repr(float(v)) for v in values) + "\n")
+    with pytest.raises(ConfigError, match=r"holds a value of magnitude 4e\+15 at row \d+, column 0, above 1e15"):
+        one.predictor.predict(str(path))
 
 
 # --- the spec: rank 2 only for a rule whose shape_of returns it -------------------------------------
