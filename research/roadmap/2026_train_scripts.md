@@ -209,6 +209,20 @@ whose body takes an argparse `Namespace` (e.g. `cliffordnet.train_model(args)`),
 
 **Phase 4: other tasks, one pattern at a time** in the order approved in Phase 0. Exemplars per `src/train/AGENTS.md`.
 
+**Phase 4g: start from trained weights.** Between the depth task (Phase 4f) and the language tasks. One top-level key
+`init`, shared by every task, names an earlier `python -m train` run directory and replaces `checkpoint` outright (no
+alias): the new run builds its own model, then takes the source's weights before `compile`. Every weight is copied,
+resampled by a rule its family declares (one rule: the ViT position table, bicubic, to a larger grid), or left fresh as a
+declared head or a new block of a deeper variant; anything else is refused by name before any weight is copied. Covered:
+a new image size or lookback where the family keeps its weights (depth, the spatial families, ViT through the rule;
+tirex, xlstm, ets, timestral), a new head (classes, horizon), a deeper variant (vit, resnet, resnet_seg), and three
+cross-task pairs (resnet and convnext_v1 classifiers into their segmenters, segmentation ConvUNext to and from biased
+denoising). Pretrain is refused as source and target until it writes a record. The run records the source, its sha256,
+its split identity and the transfer counts in `task.json` and `results_summary.json`; a source whose split leaks into
+this run's selection rows is refused; under `init` the bar also needs a strict improvement over the loaded weights'
+epoch-zero score. It supersedes item 8 of Section 1 and the `checkpoint` row of Section 4. Design, decisions, steps and
+gate: `research/roadmap/20261117_train_api_init_from.md`.
+
 **Phase 5: `load_model`, `export`, `list_models`, `list_tasks`.**
 
 **Phase 6: docs.** Section in root `README.md`; new section in `src/train/AGENTS.md` ("Front door: `train.api`") with
