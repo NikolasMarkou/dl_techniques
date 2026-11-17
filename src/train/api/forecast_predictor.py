@@ -289,7 +289,7 @@ class ForecastPredictor:
             )
 
     def predict(self, x: Any) -> Dict[str, Any]:
-        """Return ``{"point", "quantiles", "quantile_levels"}`` for ``x``; see the module contract."""
+        """Return ``{"point", "quantiles", "quantile_levels", "flat"}`` for ``x``; see the module contract."""
         import numpy as np
 
         from train.common import forecast_data
@@ -484,6 +484,6 @@ def export_note(record: Mapping[str, Any]) -> str:
         "below float32's smallest normal number 1.18e-38) reads 0, and agree on it except within about 1e-5 of the threshold (a relative distance, measured on the float32 values of the window) "
         "and, in the onnx file, which keeps a denormal, for a window whose spread is within 1.3 times 1.18e-38; the keras, saved_model and tflite files also "
         "flush the cells below 1.18e-38 that predict keeps, so they forecast such a window differently; the .keras file names ServedForecaster, a class of the train package, "
-"which the wheel does not ship, so it loads only where the train package is importable (the source tree on the path, or "
+        "which the wheel does not ship, so it loads only where the train package is importable (the source tree on the path, or "
         "an editable install)"
     )
