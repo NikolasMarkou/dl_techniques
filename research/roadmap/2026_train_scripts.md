@@ -219,9 +219,17 @@ tirex, xlstm, ets, timestral), a new head (classes, horizon), a deeper variant (
 cross-task pairs (resnet and convnext_v1 classifiers into their segmenters, segmentation ConvUNext to and from biased
 denoising). Pretrain is refused as source and target until it writes a record. The run records the source, its sha256,
 its split identity and the transfer counts in `task.json` and `results_summary.json`; a source whose split leaks into
-this run's selection rows is refused; under `init` the bar also needs a strict improvement over the loaded weights'
+this run's selection or test rows is accepted, counted and marks the verdict as
+biased; under `init` the bar also needs a strict improvement over the loaded weights'
 epoch-zero score. It supersedes item 8 of Section 1 and the `checkpoint` row of Section 4. Design, decisions, steps and
 gate: `research/roadmap/20261117_train_api_init_from.md`.
+
+**Phase 4h: the pretrain record.** Straight after 4g and before the language tasks (user, 2026-11-17). The pretrain task
+writes a schema-v2 `task.json` with `predict` and `export` like the other tasks, and image_classification gains BEiT and
+Energy Transformer classifier families whose trunks match the pretrain models, so a pretrain run seeds a classifier
+through 4g's `init` (the family declares the pretrain source, its prefix map and the head reset; the BEiT relative
+position bias and the Energy Transformer position table get resample rules only where a reference check measures them).
+It lifts 4g's refusal of pretrain as a source and target. Planned in full when 4g closes, from 4g's transfer engine.
 
 **Phase 5: `load_model`, `export`, `list_models`, `list_tasks`.**
 
