@@ -1029,7 +1029,7 @@ def test_a_window_with_a_spread_below_the_absolute_guard_is_flat_in_the_file_and
 
 @pytest.mark.parametrize("fmt", ["keras", "saved_model"])
 @pytest.mark.parametrize("k", [-1e-3, 1e-3])
-def test_a_float64_window_near_the_flat_threshold_is_decided_alike_by_predict_and_the_file(k, fmt, world, tmp_path_factory):
+def test_a_float64_window_near_the_flat_threshold_is_decided_alike_by_predict_and_the_file(k, fmt, world, tmp_path_factory, monkeypatch):
     """D-048 (review pass 4 W3): float64 windows at a level of 1e5 with a std 0.1 percent either side of the flat threshold. ``predict``
     decided flatness on the float64 window and the file on its float32 value: at +0.1 percent ``predict`` flagged 0 of 16 and the file's
     function 6 of 16, and the four files were 0.32 window stds from ``predict`` (0.039 std is the float32 grid of the forecast alone).
@@ -1040,10 +1040,18 @@ def test_a_float64_window_near_the_flat_threshold_is_decided_alike_by_predict_an
     e = raw_windows(16, 1, seed=3)
     e = (e - e.mean(axis=1, keepdims=True)) / e.std(axis=1, keepdims=True)
     windows = 1e5 + e * 1e5 * floor * (1 + k)                      # float64, not float32-exact; std = threshold * (1 + k)
+    fed, decode = [], run.predictor._decode
+    monkeypatch.setattr(run.predictor, "_decode", lambda batch: (fed.append(np.array(batch)), decode(batch))[1])
     want = run.predictor.predict(windows)
+    monkeypatch.undo()
     file_flat = np.asarray(fd.context_stats_ops(windows.astype(np.float32), floor)[2]).reshape(-1) == 1.0
     assert (fs_context_flat(windows, floor) != file_flat).any(), "vacuity: the float64 rule alone decides differently on these windows"
     np.testing.assert_array_equal(want["flat"], file_flat)
+    # the SCALE follows the same decision as the flag (what the model is fed): a flat window enters in raw units (its own std, 0.1 here),
+    # every other window standardized (std 1); a flag and a scale decided on different numbers would feed a standardized window flagged flat
+    spread = np.concatenate(fed).std(axis=1).reshape(-1)
+    np.testing.assert_allclose(spread[~file_flat], 1.0, rtol=1e-4)
+    assert (np.abs(spread[file_flat] - 1.0) > 0.5).all(), spread[file_flat]
     held = windows.astype(np.float32).astype(np.float64)
     same = run.predictor.predict(held)
     np.testing.assert_array_equal(same["flat"], want["flat"])
