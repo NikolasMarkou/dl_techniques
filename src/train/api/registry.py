@@ -59,7 +59,7 @@ Interface contract
     (without the model's root). Standard library only, so a row stays on the help path.
 
     :raises ValueError: for a ``resample`` rule name that ``init_from.RULES`` does not hold, or a
-        ``positional`` entry that is not one top-level path component.
+        ``positional`` entry that is not a regex of one top-level path component (it holds a ``/``).
 
 ``load_attr(path)``
     :param path: ``"module:attr"`` or ``"module:Class.attr"``.
@@ -153,7 +153,7 @@ class TransferSpec:
             if unknown:
                 raise ValueError(f"unknown resample rule(s) {unknown}; the rules are {sorted(RULES)}")
         if any(not name or "/" in name for name in self.positional):
-            raise ValueError(f"TransferSpec.positional names top-level path components, got {self.positional!r}")
+            raise ValueError(f"TransferSpec.positional matches top-level path components, got {self.positional!r}")
 
 
 @dataclass(frozen=True)

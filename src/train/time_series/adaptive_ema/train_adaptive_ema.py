@@ -670,7 +670,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the AdaptiveEMA CLI on top of the shared TS argument parser.
 
     Starts from :func:`create_ts_argument_parser` (the shared TS args:
-    ``--experiment_name``/``--seed``/``--n_samples``/``--noise_level``/
+    ``--experiment_name``/``--seed``/``--n_samples``/
     ``--epochs``/``--batch_size``/``--steps_per_epoch``/``--learning_rate``/
     warmup/``--max_patterns_per_category``/``--plot_top_k_patterns``/analysis/
     ``--gpu`` etc.), restores AdaptiveEMA's tuned defaults via ``set_defaults``,

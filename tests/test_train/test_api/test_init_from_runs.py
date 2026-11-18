@@ -921,9 +921,15 @@ def test_resume_a_record_without_an_init_block_is_refused_before_anything_is_wri
     assert sorted(p.name for p in run_dir.iterdir()) == before
 
 
-def test_resume_a_run_started_before_init_whose_request_holds_checkpoint_is_refused_naming_both_keys(vit_64, tmp_path):
+#: The refusal of a run recorded before init replaced checkpoint (review P2): no request can resume it, so it says so.
+PRE_INIT = (r"Cannot resume (?P<run>\S+): the run was recorded before 'init' replaced 'checkpoint' \(its "
+            r"config_requested\.json holds 'checkpoint'\), so it cannot be resumed\. Start a new run with another "
+            r"'out', and pass init=(?P=run) if its weights are wanted \(init reads its best_model\.keras\)$")
+
+
+def test_resume_a_run_started_before_init_is_refused_as_not_resumable_naming_init_before_any_write(vit_64, tmp_path):
     # A run interrupted before init existed: its config_requested.json holds "checkpoint": null and its record no init
-    # block. There is no alias, so the resume is refused before anything is written, naming the two keys.
+    # block. No request can resume it (checkpoint is an unknown key now), so the refusal names the way forward instead.
     run_dir = tmp_path / "run"
     shutil.copytree(vit_64.out, run_dir)
     (run_dir / "results_summary.json").unlink()
@@ -938,9 +944,18 @@ def test_resume_a_run_started_before_init_whose_request_holds_checkpoint_is_refu
     with pytest.raises(ConfigError) as refused:
         train_image_classification(**{**vit_64.request, "out": str(run_dir), "resume_interrupted": True, "init": None})
     logger.info(f"pre-init resume refused: {refused.value}")
-    assert re.search(r"Cannot resume .*: the request differs from config_requested\.json in checkpoint: None -> "
-                     r"<absent>; init: <absent> -> None\. Resume with the request the run started with", str(refused.value))
+    assert re.fullmatch(PRE_INIT, str(refused.value)).group("run") == str(run_dir)
     assert {path.name: path.stat().st_mtime_ns for path in run_dir.iterdir()} == before
+
+
+def test_resume_a_pre_init_forecasting_request_is_refused_by_checkpoint_before_any_request_difference(tmp_path):
+    # A pre-4g forecasting run also recorded data.noise_level, which is gone too; the refusal names neither difference.
+    from train.api.run_dir import load_resume_point
+
+    (tmp_path / "config_requested.json").write_text(json.dumps({"checkpoint": None, "data": {"noise_level": 0.1}}))
+    with pytest.raises(ConfigError) as refused:
+        load_resume_point(tmp_path, {"init": None, "data": {}})
+    assert re.fullmatch(PRE_INIT, str(refused.value)) and "noise_level" not in str(refused.value)
 
 
 def test_resume_a_user_value_against_the_records_pin_is_refused_before_the_claim(vit_64, tmp_path):
@@ -1230,18 +1245,17 @@ def test_bar_under_init_a_fine_tune_must_beat_the_loaded_weights_epoch_zero_read
     trainer._identity = {"psnr": net_of}  # the input's PSNR, which denoising's success value is net of
     held = score - net_of  # what the fine-tune reaches when it only holds the loaded weights' score
     assert trainer.bar_is_met(config, held, threshold) is True  # the absolute bar alone: today's verdict
-    trainer._loaded = init_from.loaded_value(config, tmp_path, key, net_of)
-    assert trainer._loaded == held
-    assert trainer.bar_is_met(config, held, threshold) is False
+    loaded = init_from.loaded_value(config, tmp_path, key, net_of)
+    assert loaded == held
+    assert trainer.bar_is_met(config, held, threshold, loaded) is False
     raw = np.float32(score)  # the band is in float32 steps of the metric's own value (review R3), not of the gain
     step = np.spacing(raw)
-    assert trainer.bar_is_met(config, float(raw + np.float32(16) * step) - net_of, threshold) is False  # in the band
-    assert trainer.bar_is_met(config, float(raw + np.float32(17) * step) - net_of, threshold) is True
-    assert trainer.bar_is_met(config, held - 0.1, threshold) is False
+    assert trainer.bar_is_met(config, float(raw + np.float32(16) * step) - net_of, threshold, loaded) is False  # band
+    assert trainer.bar_is_met(config, float(raw + np.float32(17) * step) - net_of, threshold, loaded) is True
+    assert trainer.bar_is_met(config, held - 0.1, threshold, loaded) is False
     # Without init nothing is read (not even a missing file) and the verdict is today's.
     assert init_from.loaded_value(SimpleNamespace(init=None), tmp_path / "missing", key) is None
-    trainer._loaded = None
-    assert trainer.bar_is_met(config, held, threshold) is True
+    assert trainer.bar_is_met(config, held, threshold, None) is True
     # A sidecar without the value under init is named, not read as zero.
     write_sidecar(tmp_path / "bare", {"loss": 1.0})
     with pytest.raises(ValueError, match=rf"initial\.metrics\.{key}"):
@@ -1255,10 +1269,11 @@ def test_bar_the_denoising_band_is_on_the_raw_val_psnr_so_a_low_gain_keeps_its_b
     config = SimpleNamespace(init="/the/source")
     trainer = object.__new__(ImageDenoisingTrainer)
     trainer._identity = {"psnr": 20.0}
-    trainer._loaded = init_from.loaded_value(config, tmp_path, "psnr", 20.0)
+    loaded = init_from.loaded_value(config, tmp_path, "psnr", 20.0)
     raw = np.float32(20.5)
     for steps, met in ((1, False), (16, False), (17, True)):
-        assert trainer.bar_is_met(config, float(raw + np.float32(steps) * np.spacing(raw)) - 20.0, 0.1) is met, steps
+        reached = float(raw + np.float32(steps) * np.spacing(raw)) - 20.0
+        assert trainer.bar_is_met(config, reached, 0.1, loaded) is met, steps
 
 
 def test_bar_a_classifier_that_does_not_improve_on_its_loaded_weights_misses_and_its_resume_reads_the_sidecar(

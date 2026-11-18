@@ -32,9 +32,9 @@ Interface contract
     depth-indexed block a deeper variant may add; ``pinned``: factory arguments the target takes
     from the source; ``fixed``: geometry keys the family cannot change (``channels``,
     ``lookback``, ``horizon``); ``sources``: ``(task, family)`` of another task to the
-    :class:`~train.api.registry.CrossTask` that maps its paths; ``positional``: top-level path
-    components inside which weights whose paths differ pair by order, when both sides hold the
-    same count and every pair has equal shape and dtype.
+    :class:`~train.api.registry.CrossTask` that maps its paths; ``positional``: regexes, each
+    matching whole top-level path components, inside which weights whose paths differ pair by
+    order, when both sides hold the same count and every pair has equal shape and dtype.
 
 ``plan_transfer(source_model, target_model, spec, relation=None, head_reset=False, name=...)``
     :param source_model: the source model (anything with ``name`` and ``weights``).
@@ -174,13 +174,14 @@ def _side(variable: Any) -> str:
     return f"{_shape(variable)} {variable.dtype}" if variable is not None else "none"
 
 
-def _pair_by_position(source: Dict[str, Any], target: Dict[str, Any], components: Sequence[str]) -> None:
-    """Re-key ``source`` inside each component to the target's paths, by order, when that pairs every weight."""
+def _pair_by_position(source: Dict[str, Any], target: Dict[str, Any], patterns: Sequence[str]) -> None:
+    """Re-key ``source`` inside each component a pattern matches to the target's paths, by order, if all pair."""
     # DECISION plan-2026-11-18T072904-0fd54b91/D-031: order pairing ONLY inside the declared components
     # and ONLY when counts, shapes and dtypes all agree; otherwise leave the paths for the usual
     # refusal. Do not widen it to the whole model or rename paths: xlstm's rnn/m_lstm_cell become
     # rnn_2/m_lstm_cell_1 when a source loads beside its target, and nothing else drifts.
-    for component in components:
+    tops = {path.partition("/")[0] for path in target}
+    for component in sorted(top for top in tops if any(re.fullmatch(pattern, top) for pattern in patterns)):
         theirs = [path for path in source if _under(path, (component,))]
         ours = [path for path in target if _under(path, (component,))]
         pairs = list(zip(theirs, ours))

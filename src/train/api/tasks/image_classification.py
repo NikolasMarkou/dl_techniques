@@ -542,7 +542,7 @@ class ImageClassificationTrainer(TaskTrainer):
         # The one thing kept is the reload check of ``best_model.keras``, run on the
         # selection split with its metrics discarded.
         has_test = data.test_ds is not None
-        self._loaded = init_from.loaded_value(config, fit.run_dir, "accuracy")
+        loaded = init_from.loaded_value(config, fit.run_dir, "accuracy")
         if checkpoint_cfg.save_best:
             # The in-memory model holds the BEST weights here (EarlyStopping restored them).
             reloaded, load_error, max_diff = classification_run.check_best_checkpoint(
@@ -611,6 +611,7 @@ class ImageClassificationTrainer(TaskTrainer):
             analysis=analysis,
             test_metrics_final=test_final,
             load_check=load_check,
+            loaded=loaded,
         )
 
 # ---------------------------------------------------------------------

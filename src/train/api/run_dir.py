@@ -887,6 +887,15 @@ def load_resume_point(run_dir: Path, mapping: Any) -> Any:
         raise ConfigError(f"Cannot resume: {path} is not valid JSON ({exc})") from exc
     if not isinstance(earlier, dict):
         raise ConfigError(f"Cannot resume: {path} does not hold a JSON object")
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-050: a request holding `checkpoint` predates `init`, and no
+    # request can match it (`checkpoint` is an unknown key now), so say it cannot be resumed and name the way
+    # forward. Do NOT list it as a request difference (that advice loops) and do NOT map it onto `init` (no alias).
+    if "checkpoint" in earlier:
+        raise ConfigError(
+            f"Cannot resume {run_dir}: the run was recorded before 'init' replaced 'checkpoint' (its "
+            f"{REQUESTED_CONFIG_NAME} holds 'checkpoint'), so it cannot be resumed. Start a new run with another "
+            f"'out', and pass init={run_dir} if its weights are wanted (init reads its best_model.keras)"
+        )
     lines = request_differences(earlier, mapping)
     if lines:
         raise ConfigError(

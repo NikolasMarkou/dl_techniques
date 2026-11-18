@@ -828,7 +828,11 @@ def report(run: Run) -> TrainResult:
         # the bar is not applied: the run is a success when it finished, and the
         # summary says "not applicable" rather than a miss (review-iter-2 concern 6).
         threshold = None if smoke else trainer.success_threshold(config)
-        met = True if smoke else trainer.bar_is_met(config, reached, threshold)
+        # DECISION plan-2026-11-18T072904-0fd54b91/D-050: the loaded weights' value comes through the VALUE
+        # evaluate_and_report returns (D-004 above), and reaches the bar only when it is set, so a run without init
+        # calls every bar override as before. Do NOT read it back from trainer state.
+        bar_args = {} if evaluated.loaded is None else {"loaded": evaluated.loaded}
+        met = True if smoke else trainer.bar_is_met(config, reached, threshold, **bar_args)
         # DECISION plan-2026-11-10T095307-d483ffab/D-004
         # A check that failed after training blocks the verdict whatever the bar says, and the run is
         # kept: ``success`` false, ``success_blocked_by`` names the checks, the exit code is 1 (not 2).
@@ -865,8 +869,8 @@ def report(run: Run) -> TrainResult:
         )
         if blocked:
             summary["success_blocked_by"] = list(blocked)
-        if trainer._loaded is not None:  # the loaded weights' epoch-zero success value, which the bar had to beat
-            summary["loaded_success_value"] = trainer._loaded
+        if evaluated.loaded is not None:  # the loaded weights' epoch-zero success value, which the bar had to beat
+            summary["loaded_success_value"] = evaluated.loaded
         # DECISION plan-2026-11-10T095307-d483ffab/D-004
         # The task's post-fit keys come through the VALUE ``evaluate_and_report`` returns, merged last
         # and never over a key the summary holds. Do NOT stash them on the trainer during

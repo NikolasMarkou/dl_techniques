@@ -209,8 +209,8 @@ whose body takes an argparse `Namespace` (e.g. `cliffordnet.train_model(args)`),
 
 **Phase 4: other tasks, one pattern at a time** in the order approved in Phase 0. Exemplars per `src/train/AGENTS.md`.
 
-**Phase 4g: start from trained weights. Done** (branch `train-api/phase-4g`; the GPU gate's numbers go into
-`src/train/README.md`). One top-level key `init`, on every task's config, names an earlier `python -m train` run directory
+**Phase 4g: start from trained weights. Code done, GPU gate pending** (branch `train-api/phase-4g`; the gate's numbers go
+into `src/train/README.md`). One top-level key `init`, on every task's config, names an earlier `python -m train` run directory
 and replaced `checkpoint` outright (no alias): the new run builds its own model, then takes the source's weights before
 `compile`. Every weight is copied, resampled by a rule its family declares (one rule: the ViT position table, bicubic, to a
 larger grid), or left fresh as a declared head or a new block of a deeper variant; anything else is refused by name before

@@ -21,6 +21,7 @@ here and logged as ``CENSUS`` lines.
 """
 
 import dataclasses
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import keras
@@ -276,28 +277,30 @@ def judge_cross(family: str, task: str, source_family: str, source: Any, target:
     assert len(plan.copied) + len(plan.reset) == plan.n_target and len(plan.reset) > 0
 
 
-def test_xlstm_pairs_its_drifting_blocks_by_position_in_the_production_order(tmp_path):
+#: xlstm in the production order: each variant at its defaults, and the offered ``model_args`` that change the blocks
+#: (``num_layers`` 6 adds mlstm_block_2 to slstm_block_5; ``mlstm_ratio`` 0 builds sLSTM blocks only, from
+#: slstm_block_0).
+XLSTM_CASES = [("tiny", {}), ("small", {}), ("tiny", {"num_layers": 6}), ("tiny", {"mlstm_ratio": 0.0})]
+
+
+@pytest.mark.parametrize("variant,model_args", XLSTM_CASES, ids=[f"{v}-{sorted(a.items())}" for v, a in XLSTM_CASES])
+def test_xlstm_pairs_its_drifting_blocks_by_position_in_the_production_order(variant, model_args, tmp_path):
     # D-031: the target is built first, then the source's file is loaded; its auto-named rnn and cell layers take the
     # next free names (rnn_2, m_lstm_cell_1), so the paths inside those blocks differ while every weight pairs by order.
     spec = registry.MODELS["xlstm"].transfer
-    variants = sorted(registry.load_attr(registry.MODELS["xlstm"].variants_attr))
-    drifting = set()
-    for variant in variants:
-        source, _ = build("xlstm", variant, SOURCE[FORECASTING])
-        path = tmp_path / f"xlstm_{variant}.keras"
-        source.save(path)
-        target, _ = build("xlstm", variant, SOURCE[FORECASTING])
-        loaded = keras.saving.load_model(path, compile=False)
-        root = f"{target.name}/"
-        pairs = list(zip(target.weights, loaded.weights))
-        found = {t.path[len(root):].split("/")[0] for t, s in pairs if t.path != s.path}
-        assert found and found <= set(spec.positional), (variant, sorted(found))
-        drifting |= found
-        got, plan, message = verdict("xlstm", f"{variant} production order", loaded, target, spec)
-        assert got == "PASS" and len(plan.copied) == plan.n_target, message
-        plain = dataclasses.replace(spec, positional=())
-        assert verdict("xlstm", f"{variant} production order, no positional", loaded, target, plain)[0] == "REFUSE"
-    assert drifting == set(spec.positional)
+    source, _ = build("xlstm", variant, SOURCE[FORECASTING], model_args)
+    source.save(tmp_path / "xlstm.keras")
+    target, _ = build("xlstm", variant, SOURCE[FORECASTING], model_args)
+    loaded = keras.saving.load_model(tmp_path / "xlstm.keras", compile=False)
+    root = f"{target.name}/"
+    found = {t.path[len(root):].split("/")[0] for t, s in zip(target.weights, loaded.weights) if t.path != s.path}
+    # Every drifting block matches a declared pattern, and no pattern is dead.
+    assert found and all(any(re.fullmatch(p, c) for p in spec.positional) for c in found), sorted(found)
+    assert all(any(re.fullmatch(p, c) for c in found) for p in spec.positional), spec.positional
+    got, plan, message = verdict("xlstm", f"{variant} {model_args} production order", loaded, target, spec)
+    assert got == "PASS" and len(plan.copied) == plan.n_target, message
+    plain = dataclasses.replace(spec, positional=())
+    assert verdict("xlstm", f"{variant} {model_args} no positional", loaded, target, plain)[0] == "REFUSE"
 
 
 # --- the production order: the target built first, then the source's archive loaded beside it -----------------------

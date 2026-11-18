@@ -207,11 +207,12 @@ Hooks (override in a task)
     The number the run is judged by (read from ``hist``, the history of ``summarize_fit``, under
     the ``success_metric`` class variable) and the bar it must reach. Required, and a task must
     set ``success_metric`` (it is written to the summary). Smoke runs apply no bar.
-``bar_is_met(config, reached, threshold)``
+``bar_is_met(config, reached, threshold, loaded=None)``
     Whether ``reached`` (``success_value``) clears ``threshold`` (``success_threshold``). Default:
     ``reached >= threshold``. A task whose bar is the score of a constant predictor overrides it
-    to say STRICTLY above in one dtype (``image_segmentation``, D-087). Under ``init`` a task that sets
-    ``_loaded`` also needs ``reached`` strictly above it (:func:`train.api.init_from.beats_loaded`, D-013).
+    to say STRICTLY above in one dtype (``image_segmentation``, D-087). ``loaded`` is passed only when
+    ``evaluate_and_report`` returned ``Evaluation.loaded`` (under ``init``), and ``reached`` must then be
+    strictly above it too (:func:`train.api.init_from.beats_loaded`, D-013).
 ``extra_callbacks(config, data)``
     Callbacks inserted after ``LastEpochWeights``. Default: none.
 ``figure_callbacks(config, data, vis_dir)``
@@ -466,6 +467,9 @@ class Evaluation:
     #: homogeneity probe). Any entry makes the run's ``success`` false whatever the bar says and is
     #: written as the summary's ``success_blocked_by``; the training is kept (D-004). Default: none.
     failed_checks: Tuple[str, ...] = ()
+    #: Under ``init``: the loaded weights' epoch-zero ``success_value``, which the bar must beat and the summary records
+    #: as ``loaded_success_value`` (D-013). Default: none, so a run without ``init`` is judged as before.
+    loaded: Optional[float] = None
 
 
 def _non_json_values(value: Any, path: str, found: List[Tuple[str, str]]) -> None:
@@ -583,8 +587,6 @@ class TaskTrainer:
     task: ClassVar[str] = ""
     success_metric: ClassVar[str] = ""
     resume_order: ClassVar[Optional[str]] = None
-    #: Under ``init``: the loaded weights' epoch-zero ``success_value``, set by ``evaluate_and_report`` (D-013).
-    _loaded: Optional[float] = None
 
     def __init__(self, config: StrictConfig) -> None:
         missing = [name for name in CONFIG_FIELDS if not hasattr(config, name)]
@@ -650,9 +652,10 @@ class TaskTrainer:
     def build_loss_and_metrics(self, config: StrictConfig, data: Any) -> Tuple[Any, List[Any]]:
         raise NotImplementedError
 
-    def bar_is_met(self, config: StrictConfig, reached: float, threshold: float) -> bool:
-        """Return whether ``reached`` clears ``threshold``; default: ``reached >= threshold`` (and ``_loaded``'s term)."""
-        return bool(reached >= threshold) and init_from.beats_loaded(reached, self._loaded, self.success_metric)
+    def bar_is_met(self, config: StrictConfig, reached: float, threshold: float,
+                   loaded: Optional[float] = None) -> bool:
+        """Return whether ``reached`` clears ``threshold``; default: ``reached >= threshold`` (and ``loaded``'s)."""
+        return bool(reached >= threshold) and init_from.beats_loaded(reached, loaded, self.success_metric)
 
     def extra_callbacks(self, config: StrictConfig, data: Any) -> List[Any]:
         return []

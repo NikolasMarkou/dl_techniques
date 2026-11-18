@@ -582,13 +582,14 @@ class ImageDenoisingTrainer(TaskTrainer):
         window = hist[self.success_metric][self._window_start:]
         return float(max(window)) - float(self._identity["psnr"])
 
-    def bar_is_met(self, config: ImageDenoisingConfig, reached: float, threshold: float) -> bool:
+    def bar_is_met(self, config: ImageDenoisingConfig, reached: float, threshold: float,
+                   loaded: Optional[float] = None) -> bool:
         """The base bar, with the loaded-weights term on the raw ``val_psnr`` (the gain plus the input's PSNR)."""
         # DECISION plan-2026-11-18T072904-0fd54b91/D-045
         # The tie band is float32 steps of the value the metric rounds, the raw val_psnr. Do NOT band the gain: at a gain
         # of 0.5 dB over a 20 dB input, 16 steps of 0.5 are half a step of 20.5, so a re-evaluation one step higher passes.
         offset = (self._identity or {}).get("psnr", 0.0)
-        return bool(reached >= threshold) and init_from.beats_loaded(reached, self._loaded, self.success_metric, offset)
+        return bool(reached >= threshold) and init_from.beats_loaded(reached, loaded, self.success_metric, offset)
 
     def success_threshold(self, config: ImageDenoisingConfig) -> float:
         # DECISION plan-2026-11-10T095307-d483ffab/D-013
@@ -777,7 +778,7 @@ class ImageDenoisingTrainer(TaskTrainer):
         metric_cfg: DenoiseMetricArgs = config.metric_args
         load_error: Optional[str] = None
         max_diff: Optional[float] = None
-        self._loaded = init_from.loaded_value(config, fit.run_dir, "psnr", (self._identity or {}).get("psnr", 0.0))
+        loaded = init_from.loaded_value(config, fit.run_dir, "psnr", (self._identity or {}).get("psnr", 0.0))
         # The bias-free probes read the same first validation patches the pre-fit check read. The in-memory model
         # holds the BEST weights until `finalize_last_epoch` swaps the last epoch's in, so the best reading comes
         # first and the final one after it.
@@ -854,6 +855,7 @@ class ImageDenoisingTrainer(TaskTrainer):
             load_detail=load_detail,
             extras=extras,
             failed_checks=failed,
+            loaded=loaded,
         )
 
     def _held_out_spec(self, config: ImageDenoisingConfig) -> Any:

@@ -826,8 +826,9 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   The exactness claims above, now on the GPU: the best checkpoint's reload gap is exactly 0.0 in all five runs; the zero-predictor baseline is the same float in G1 and in the ET kill run (1.0040831565856934 and 1.0040831565856934); the untrained `val_loss` is not the same float across two processes with one seed in either family: ET 2.3379111289978027 in G1 and 2.3379108905792236 in the ET kill run (relative difference 1.0e-07), BEiT 6.2661356925964355 in G3 and 6.266140460968018 in the BEiT kill run (7.6e-07), so equality across processes on the GPU is measured for the baseline and not for the untrained model's `val_loss` (the earlier gate's ET pair was equal, its BEiT pair was not).
   **Legacy rescore (Step 18, report only, no parity claimed, D-012).** The legacy trainer (`train.energy_transformer.train_masked_completion`, `et_tiny`, cifar10, 12 epochs, its own defaults and stateful masks, 252,913 parameters like G1) was run once and its `best_model.keras` scored on the API's fixed selection stream under the API's loss: 0.17493 against 0.17435 for the earlier gate's G1 best checkpoint scored the same way (the control reproduces that run's logged 0.17435 to 3e-8; the final gate's G1 logged 0.17422 and was not rescored); on the test stream 0.17504 against 0.17450. The two runs differ in their train masks and streams, so the numbers are reported and not graded.
   **Kill and resume (G4).** Each run was started with `checkpoint_args.backup_every_steps=300`, its PID recorded, and sent SIGKILL (that PID only) when the backup's metadata first read epoch 2 batch 299, that is after 2 CSV rows and 300 batches of the third epoch (the process exit status was 137); the same command with `resume_interrupted=true` then finished with exit 0 in ET and exit 0 in BEiT. The copy held 3112 optimizer steps (2 x 1,406 + 300), the final copy 5624 (4 x 1,406): no step lost or run twice after the copy. The CSV has one row per epoch (0 to 3) and the two rows written before the kill are unchanged. The learning rate the CSV records at each epoch start equals the run's own schedule evaluated at 0, 1,406, 3,112 and 4,218 steps, exactly, in both families: `optimizer.iterations == epoch * steps_per_epoch` at the starts of epochs 0, 1 and 3, and the epoch the kill landed in starts from the copy, at 2 x 1,406 + 300 (the documented behaviour of `backup_every_steps`), so for that one epoch the equation reads plus 300. The first three train batches of the resumed process were not read back from the real fit (it was not traced); the stream its stream seed gives (`with_stream(3112)`), digested the way the CPU resume test does on the real CIFAR-10 unaugmented, differs from epoch 0's stream at all three batches in both families.
-* **Follow-up plans**: starting a run from an earlier run's weights is done (Phase 4g, the `init` key, "Starting from an
-  earlier run" below; design and decisions in `research/roadmap/20261117_train_api_init_from.md`). Named and not started: the
+* **Follow-up plans**: starting a run from an earlier run's weights is in the code, its GPU gate pending (Phase 4g,
+  `init`, "Starting from an earlier run" below; design and decisions in
+  `research/roadmap/20261117_train_api_init_from.md`). Named and not started: the
   pretrain record next (Phase 4h: a `task.json` record with `predict` and `export` for pretrain, and
   classifier families that a BEiT or Energy Transformer encoder can seed through `init`), then the language tasks (the
   next user of `fit_kwargs` and `resume_stream`, after `time_series_forecasting` and `depth_estimation` below), DINO, the BEiT
@@ -1419,7 +1420,10 @@ the 2 head weights; `vit_pico` to `vit_tiny` copies 80 and grows 72, `resnet18` 
 `convnext_v1/cifar10` into `convnext_seg/cifar10` copies 98 under `backbone/`, drops the classifier's 4 head weights and resets
 the 18 of `segmentation_head`; `resnet/resnet18` into `resnet_seg/resnet18` copies 100 when the classifier was built with
 `model_args.stem_type=imagenet` (the 32 px recipe resolves the cifar stem, which the segmenter never builds, and the weight check
-refuses it); `convunext/tiny` (segmentation) into `convunext_biased/tiny` (denoising) and back copies 156 and resets
+refuses it); `convnext_v1` into `convnext_seg` likewise needs equal `strides`: the segmenter builds at 2, the classifier's
+`mnist`, `cifar10` and `cifar100` recipes train at 2 and its `imagenet` and `imagenette` recipes at 4, so a source of those
+two is refused after the claim unless the segmenter is given `model_args.strides=4`; `convunext/tiny` (segmentation) into
+`convunext_biased/tiny` (denoising) and back copies 156 and resets
 `final_output`; `tirex/tiny` from lookback 168 to 336 copies 47 of 47; `depth_anything/vit_s` at another size copies 235 of 235
 (the DINOv2 table is resampled inside the model at call time). Those are the four declared cross-task pairs (the ConvUNext
 pair counts once each way); any other pair, and a width change (`convnext_v2` atto to femto: 139 of 140 weights differ), are
@@ -1430,6 +1434,7 @@ refused.
 | Case | Message |
 |---|---|
 | `checkpoint` given | `Unknown key 'checkpoint': it was replaced by 'init', which takes the directory of an earlier run (python -m train <task> help)` |
+| a resume of a run recorded with `checkpoint` | `Cannot resume <run>: the run was recorded before 'init' replaced 'checkpoint' (its config_requested.json holds 'checkpoint'), so it cannot be resumed. Start a new run with another 'out', and pass init=<run> if its weights are wanted (init reads its best_model.keras)` |
 | `init` on `pretrain` | `Invalid value for 'init': pretrain does not start from earlier weights: it writes no record, and no family of another task shares the BEiT or Energy Transformer trunk (follow-up: the pretrain record)` |
 | a file, not a directory | `Invalid value for 'init': <path> is a file; give the run directory that holds it (init reads task.json, config.json and best_model.keras)` |
 | no `task.json` | `Invalid value for 'init': <run>/task.json does not exist; a source is a python -m train run of a task that writes a record (pretrain runs and legacy trainer runs write none)` |

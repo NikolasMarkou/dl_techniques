@@ -407,7 +407,8 @@ class ImageSegmentationTrainer(TaskTrainer):
             )
         return float(self._baseline["miou"])
 
-    def bar_is_met(self, config: ImageSegmentationConfig, reached: float, threshold: float) -> bool:
+    def bar_is_met(self, config: ImageSegmentationConfig, reached: float, threshold: float,
+                   loaded: Optional[float] = None) -> bool:
         # DECISION plan-2026-10-31T180033-2faf890a/D-087
         # Against the majority-class baseline the best `val_miou` must be STRICTLY above it,
         # compared in float32 with a tie band (`segmentation_run.beats_baseline`): the constant
@@ -415,11 +416,11 @@ class ImageSegmentationTrainer(TaskTrainer):
         # success in 8 of 20 measured cases. A bar the caller STATED
         # (`metric_args.success_threshold`) keeps the shared "reached" rule, `>=`.
         if config.metric_args.success_threshold is not None:
-            return super().bar_is_met(config, reached, threshold)
+            return super().bar_is_met(config, reached, threshold, loaded)
         from train.common import segmentation_run
 
         return segmentation_run.beats_baseline(reached, threshold) and init_from.beats_loaded(
-            reached, self._loaded, self.success_metric)
+            reached, loaded, self.success_metric)
 
     # -- the log and the summary ---------------------------------------
 
@@ -666,7 +667,7 @@ class ImageSegmentationTrainer(TaskTrainer):
         # thing kept is the reload check of ``best_model.keras``, run on the selection split with
         # its metrics discarded.
         has_test = data.test_ds is not None
-        self._loaded = init_from.loaded_value(config, fit.run_dir, "miou")
+        loaded = init_from.loaded_value(config, fit.run_dir, "miou")
         if checkpoint_cfg.save_best:
             # The in-memory model holds the BEST weights here (EarlyStopping restored them).
             reloaded, load_error, max_diff = classification_run.check_best_checkpoint(
@@ -736,6 +737,7 @@ class ImageSegmentationTrainer(TaskTrainer):
             test_metrics_final=test_final,
             load_check=load_check,
             load_detail=load_detail or None,
+            loaded=loaded,
         )
 
 # ---------------------------------------------------------------------

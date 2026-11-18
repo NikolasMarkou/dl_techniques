@@ -419,8 +419,6 @@ def create_ts_argument_parser(description: str) -> argparse.ArgumentParser:
     # Synthetic data generation
     parser.add_argument("--n_samples", type=int, default=10000,
                         help="Number of synthetic series samples to generate")
-    parser.add_argument("--noise_level", type=float, default=0.1,
-                        help="Default noise level for the synthetic generator")
 
     # Training
     parser.add_argument("--epochs", type=int, default=200,
@@ -481,19 +479,15 @@ def build_generator_config(args: argparse.Namespace) -> TimeSeriesGeneratorConfi
 
     Deduplicates the copy-pasted ``TimeSeriesGeneratorConfig(...)`` triple
     previously scattered across the synthetic time-series trainers, wiring the
-    shared CLI flags (``--n_samples``, ``--seed``, ``--noise_level``) into the
-    generator config's corresponding fields.
+    shared CLI flags (``--n_samples``, ``--seed``) into the generator config's
+    corresponding fields. There is no noise flag: each pattern draws at its own
+    level, and the generator's ``default_noise_level`` reaches none of them.
 
     Args:
         args: Parsed namespace from a parser produced by
-            ``create_ts_argument_parser`` (must carry ``n_samples``, ``seed``,
-            and ``noise_level`` attributes).
+            ``create_ts_argument_parser`` (must carry ``n_samples`` and ``seed``).
 
     Returns:
         A ``TimeSeriesGeneratorConfig`` populated from ``args``.
     """
-    return TimeSeriesGeneratorConfig(
-        n_samples=args.n_samples,
-        random_seed=args.seed,
-        default_noise_level=args.noise_level,
-    )
+    return TimeSeriesGeneratorConfig(n_samples=args.n_samples, random_seed=args.seed)

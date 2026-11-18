@@ -301,12 +301,12 @@ FAMILIES: Dict[str, FamilyRow] = {
                               fixed=("lookback", "channels"))),
     TIREX: FamilyRow(f"{_TS}.tirex.model:TiRexCore.MODEL_VARIANTS", 1, "TiRexCore reads one series, (B, L, 1)",
                      transfer=TransferSpec(head=("quantile_head",))),
-    # DECISION plan-2026-11-18T072904-0fd54b91/D-031: positional names the blocks of both variants whose inner rnn and
-    # cell layers are auto-named and take the next free name when a source loads beside its target (tiny:
-    # mlstm_block_0, slstm_block_1; small: blocks 0 to 3). Do not drop it: without it every xlstm init is refused.
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-031 (amended by D-050): positional matches EVERY block whose inner
+    # rnn and cell layers are auto-named and take the next free name when a source loads beside its target. Do NOT list
+    # the default variants' block names: model_args.num_layers and mlstm_ratio add or rename blocks, and an
+    # identical-config init would then be refused after the claim. Without it every xlstm init is refused.
     XLSTM: FamilyRow(f"{_TS}.xlstm.forecaster:xLSTMForecaster.MODEL_VARIANTS", transfer=TransferSpec(
-        head=("point_head", "quantile_head"), fixed=("channels",),
-        positional=("mlstm_block_0", "mlstm_block_1", "slstm_block_1", "slstm_block_2", "slstm_block_3"))),
+        head=("point_head", "quantile_head"), fixed=("channels",), positional=(r"[ms]lstm_block_\d+",))),
     ETS: FamilyRow(
         f"{_TS}.ets.model:ETS_VARIANTS", 1, "ETSModel is a recursion over one scalar series, (B, L, 1)",
         min_lookback_over={"AAA": ("seasonal_period", 1)},

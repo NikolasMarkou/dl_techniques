@@ -24,6 +24,7 @@ What this file holds:
 The tests write only under ``tmp_path``.
 """
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -183,6 +184,10 @@ def test_the_run_sequence_takes_the_verdict_from_the_trainers_hook(tmp_path):
         def bar_is_met(self, config, reached, threshold):
             return False
 
+    class Loaded(ImageClassificationTrainer):  # review P6: the loaded value reaches the bar through the return value
+        def evaluate_and_report(self, config, data, fit):
+            return dataclasses.replace(super().evaluate_and_report(config, data, fit), loaded=2.0)
+
     stated = {"metric_args.success_threshold": 0.0}
     with pytest.MonkeyPatch.context() as patch:
         from train.api import recipes, registry
@@ -193,6 +198,10 @@ def test_the_run_sequence_takes_the_verdict_from_the_trainers_hook(tmp_path):
         recipes.register_builtin_models()
         plain = ImageClassificationTrainer(make_config(tmp_path / "plain", epochs=1, **stated)).run()
         never = Never(make_config(tmp_path / "never", epochs=1, **stated)).run()
+        loaded = Loaded(make_config(tmp_path / "loaded", epochs=1, **stated)).run()
     assert plain.success is True, "control: a bar of 0.0 is reached by any run, under the shared >= rule"
     assert never.success is False
     assert json.loads(never.summary_path.read_text())["success"] is False
+    assert "loaded_success_value" not in json.loads(plain.summary_path.read_text())
+    summary = json.loads(loaded.summary_path.read_text())  # no accuracy beats 2.0
+    assert (loaded.success, summary["success"], summary["loaded_success_value"]) == (False, False, 2.0)

@@ -723,10 +723,10 @@ classification task calls the same `train.common.classification_run` helpers as 
   - **The summary and the bar.** `TaskTrainer._summary_head` takes a keyword `init_block`, `None` for a run without `init`, so
     its other callers are unchanged; with a block it writes `init`, `epoch_zero_of` and the three flags of `init_from.bias_of`
     after `init_scale_warning`, for a finished and a diverged run alike (D-040). Under `init` `run_sequence.epoch_zero` calls
-    `init_from.evaluate_loaded` instead of the task's `initial_loss_check`, and a task whose bar is absolute sets
-    `TaskTrainer._loaded` in `evaluate_and_report` from `init_from.loaded_value` (the fit sidecar's `initial.metrics`) and checks
-    `init_from.beats_loaded` in `bar_is_met` (D-039). Tests: `tests/test_train/test_api/test_init_from_engine.py`,
-    `test_init_from_families.py` and `test_init_from_runs.py`.
+    `init_from.evaluate_loaded` instead of the task's `initial_loss_check`, and a task whose bar is absolute returns
+    `Evaluation.loaded` from `evaluate_and_report` (`init_from.loaded_value`, the fit sidecar's `initial.metrics`); `report`
+    passes it to `bar_is_met(..., loaded=)`, which checks `init_from.beats_loaded` (D-039, D-050); no trainer attribute carries
+    it. Tests: `tests/test_train/test_api/test_init_from_engine.py`, `test_init_from_families.py` and `test_init_from_runs.py`.
 - **The mask-key rule** (D-004, D-005; why a pretrain run is reproducible and a resume does not leak). A mask is a function of a key
   and nothing stateful: `make_stateless_masked_patch_map_fn` (`dl_techniques/datasets/vision/masked_patches.py`) and
   `make_stateless_beit_mim_map_fn` (`beit_masking.py`) return `fn(index, image, *_)`. The SELECT and TEST masks are keyed on
