@@ -209,20 +209,21 @@ whose body takes an argparse `Namespace` (e.g. `cliffordnet.train_model(args)`),
 
 **Phase 4: other tasks, one pattern at a time** in the order approved in Phase 0. Exemplars per `src/train/AGENTS.md`.
 
-**Phase 4g: start from trained weights.** Between the depth task (Phase 4f) and the language tasks. One top-level key
-`init`, shared by every task, names an earlier `python -m train` run directory and replaces `checkpoint` outright (no
-alias): the new run builds its own model, then takes the source's weights before `compile`. Every weight is copied,
-resampled by a rule its family declares (one rule: the ViT position table, bicubic, to a larger grid), or left fresh as a
-declared head or a new block of a deeper variant; anything else is refused by name before any weight is copied. Covered:
-a new image size or lookback where the family keeps its weights (depth, the spatial families, ViT through the rule;
-tirex, xlstm, ets, timestral), a new head (classes, horizon), a deeper variant (vit, resnet, resnet_seg), and three
-cross-task pairs (resnet and convnext_v1 classifiers into their segmenters, segmentation ConvUNext to and from biased
-denoising). Pretrain is refused as source and target until it writes a record. The run records the source, its sha256,
-its split identity and the transfer counts in `task.json` and `results_summary.json`; a source whose split leaks into
-this run's selection or test rows is accepted, counted and marks the verdict as
-biased; under `init` the bar also needs a strict improvement over the loaded weights'
-epoch-zero score. It supersedes item 8 of Section 1 and the `checkpoint` row of Section 4. Design, decisions, steps and
-gate: `research/roadmap/20261117_train_api_init_from.md`.
+**Phase 4g: start from trained weights. Done** (branch `train-api/phase-4g`; the GPU gate's numbers go into
+`src/train/README.md`). One top-level key `init`, on every task's config, names an earlier `python -m train` run directory
+and replaced `checkpoint` outright (no alias): the new run builds its own model, then takes the source's weights before
+`compile`. Every weight is copied, resampled by a rule its family declares (one rule: the ViT position table, bicubic, to a
+larger grid), or left fresh as a declared head or a new block of a deeper variant; anything else is refused by name before
+any weight is copied. Covered: a new image size or lookback where the family keeps its weights (depth, the spatial families,
+ViT through the rule; tirex, xlstm, ets, timestral), a new head (classes, horizon), a deeper variant (vit, resnet,
+resnet_seg), and four cross-task pairs (resnet and convnext_v1 classifiers into their segmenters, segmentation ConvUNext to
+and from biased denoising). Pretrain is refused as source and target until it writes a record. The run records the source,
+its sha256, the pins, the transfer counts and the split relation in `task.json` and `results_summary.json`; a source whose
+training data reaches this run's selection or test data is accepted, counted and marks the verdict as biased; under `init`
+the classification, segmentation and denoising bars also need a strict improvement over the loaded weights' epoch-zero
+score, and the forecasting and depth bars' epoch-zero term is the loaded weights. A resume never reads the source. It
+supersedes item 8 of Section 1 and the `checkpoint` row of Section 4. Design, decisions and what changed on the way:
+`research/roadmap/20261117_train_api_init_from.md`; user-facing rules: `src/train/README.md`, "Starting from an earlier run".
 
 **Phase 4h: the pretrain record.** Straight after 4g and before the language tasks (user, 2026-11-17). The pretrain task
 writes a schema-v2 `task.json` with `predict` and `export` like the other tasks, and image_classification gains BEiT and

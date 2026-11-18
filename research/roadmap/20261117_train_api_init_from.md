@@ -1,10 +1,68 @@
 # Phase 4g: start a run from an earlier run's weights (`init`), for every task and family
 
-Status: design, not started. Placement: after Phase 4f (`depth_estimation`, branch `train-api/phase-4f`) and before the language tasks. Origin: the user asked whether a trained depth model can be reused to fine-tune at a higher resolution, then asked for a general phase instead of a depth-only patch (4f D-020).
+Status: shipped (plan 0fd54b91, branch `train-api/phase-4g`, 2026-11-18); the GPU gate runs on the final code and its numbers go into `src/train/README.md`. Sections 1 to 11 are the design as written before the plan; Section 0 says what shipped where it differs, each change named by the plan's decision (D-NNN of plan 0fd54b91). The user-facing rules and the shipped refusal messages are in `src/train/README.md` ("Starting from an earlier run: `init`"), the contributor's side in `src/train/AGENTS.md`. Placement: after Phase 4f (`depth_estimation`, branch `train-api/phase-4f`) and before the language tasks. Origin: the user asked whether a trained depth model can be reused to fine-tune at a higher resolution, then asked for a general phase instead of a depth-only patch (4f D-020).
 
 Evidence. The numbers in this design were measured while Phase 4f was planned, by three read-only passes: a shape matrix of 156 rows (each family's smallest variant built at a source setting and at a changed size, head, channel count, lookback, horizon, variant or task, its weights compared path by path and shape by shape; CPU only, about 6 minutes, nothing written under `results/`), a read of the existing warm-start code (the `checkpoint` key, `load_weights_from_checkpoint`, the legacy trainers' flags, what a run directory holds), and a pass over cross-task pairs, split overlap, bars, the optimizer and prior art. Those notes are planning scratch outside the repository, so every fact this design rests on is stated where it is used; a `file:line` reference points into `src/` as it was at writing time.
 
-Everything marked UNMEASURED is settled by Step 1 before any code is written.
+Everything marked UNMEASURED was to be settled by Step 1 before any code was written; Section 0 says how each was settled.
+
+## 0. As shipped
+
+Decision map (design id, plan decision): 4g-D1 D-002, 4g-D2 D-003, 4g-D3 D-004, 4g-D4 D-005, 4g-D5 D-006, 4g-D6 D-007, 4g-D7
+D-008, 4g-D8 D-009, 4g-D9 D-010, 4g-D10 D-011, 4g-D11 D-012, 4g-D12 D-013, 4g-D13 D-014, 4g-D14 D-015, 4g-D15 D-016, 4g-D16
+D-020, 4g-D17 D-021, load cost D-022. Kept as designed: 4g-D2, 4g-D5, 4g-D8, 4g-D14, 4g-D16, 4g-D17. Changed:
+
+- **4g-D1 (D-002).** The named refusal of `checkpoint` reaches the command line, a `config=` file and a YAML mapping through the
+  one unknown-key message builder. The Python keyword no longer exists, so `train_<task>(checkpoint=...)` is a plain `TypeError`
+  (a `**kwargs` catch to name it would be a compatibility path).
+- **4g-D3 (D-004).** "Resolves `pretrained` to false" is split in two: under `init` the depth factory gets `pretrained=False` and
+  the official-weights check is skipped, while the learning rate and the DPT head's 10x follow the warm start (5e-6). Any explicit
+  depth `model_args.pretrained` under `init` is refused; a classifier refuses any `pretrained` other than false.
+- **4g-D4 (D-005, D-030, D-031).** Every subclassed model roots its weight paths at its own instance name
+  (`vision_transformer_pico` against `vision_transformer_tiny`, `res_net` against the segmenter's `backbone/`), so on raw paths
+  the vit grow and both classifier-to-segmenter pairs were refused. Weights are keyed by their path relative to the model: only a
+  leading `<model.name>/` is dropped, on both sides, and nothing inside is renamed. xlstm's auto-named inner `rnn` and cell
+  layers still differ in the production order (target built, then the source loaded beside it), so `TransferSpec.positional`
+  pairs weights by order inside the named top-level blocks, only when the counts, shapes and dtypes all agree.
+- **4g-D6 (D-007, D-032, D-033).** `TransferSpec` and `CrossTask` live in `src/train/api/registry.py`, which imports no
+  third-party package, so `python -m train help` stays free of numpy. `ModelSpec` does not validate "a spec or a reason" (that
+  broke `ModelSpec` constructions in unrelated tests); the census `tests/test_train/test_api/test_init_from_families.py` requires
+  it of every row, and a row with neither is refused at run time. The 7 forecasting rows declare it once per `FamilyRow`. 23 rows
+  declare a spec and the 2 pretrain rows a reason. A seventh field, `positional`, is xlstm's (above).
+- **4g-D7 (D-008).** The head identity is compared after the claim, from the two records (a folder target's class names exist
+  only once its data is read); input scaling and `fixed` geometry are compared before the claim, against what the task's
+  `init_identity(config, context)` hook says this run will record.
+- **4g-D9 (D-010, D-018).** The pins reach the build through `AutoContext.pinned`, read only by `recipes.merge_model_args`
+  (laid over the computed values; a differing user value refused, an equal one accepted). They are read from the source's
+  `config.json` `used.model_args` only. On a resume they come from the run's own `task.json` `init` block.
+- **4g-D10 (D-011, D-034).** The source is read first among the pre-claim checks. "Pre-claim code imports no TensorFlow" was
+  never true of the existing pre-claim phase (`TaskTrainer.run` imports Keras first); what holds: a pre-claim refusal exits 2,
+  never reaches `setup_gpu` and claims nothing, `read_source` loads no TensorFlow, Keras or numpy for an absolute path, and `help`
+  stays TensorFlow-free.
+- **4g-D11 (D-012, D-037, D-038).** Each task counts its own overlap in a second hook, `init_overlap(source, config, data)`
+  (default `unknown`), never in the engine. The `split` block is `relation`, `unit`, `n_select_overlap`, `n_test_overlap`,
+  `reason`, `keys`; the units are rows (classification, segmentation), files (denoising), windows (forecasting) and scenes
+  (depth). Forecasting rebuilds the source's train segment from its `config.json`: another seed, series length or noise level is
+  `different_data`; other patterns or realizations of the same seed are `unknown`, because the two banks share series (calling
+  it different data would report 0 for them); other fractions count the windows that start inside the source's train segment.
+  Imagenette against ImageNet, and ImageNet itself (held out per class), are `unknown`. The CIFAR-10 count is re-derived by the
+  test's own numpy oracle: a seed 42 source trained on 4,531 of a seed 43 run's 5,000 selection rows.
+- **4g-D12 (D-013, D-039).** Under `init` the epoch-zero evaluation is one function for every task
+  (`init_from.evaluate_loaded`, "Evaluate of the loaded weights before fit"), so the five "Untrained evaluate BEFORE fit" sites
+  are untouched and a run without `init` logs as before. The bar term is `init_from.beats_loaded`: strictly above the loaded
+  value by more than `forecast_run.tie_band(1)`, 16 float32 steps, read through `TaskTrainer._loaded`.
+- **4g-D13 (D-014, D-040).** Five record kinds, not six, and one generic `predictor.OPTIONAL_RECORD_KEYS`; the block is added
+  once, at the `task.json` write site. The summary takes it in `TaskTrainer._summary_head` (`init`, `epoch_zero_of`, the three
+  flags, also for a diverged run) and adds `loaded_success_value` for classification, segmentation and denoising.
+- **4g-D15 (D-016, D-017).** A resume without a backup was already refused, so the re-transfer before the first backup and its
+  sha256 refusal row (Section 1.4, last row) are dropped: a resume never reads the source. `init` stays a compared resume key.
+- **Not in the design.** The denoising bias-free probe stays on the fresh model before the copy (D-019). A classifier that seeds
+  a segmenter is trained with `transform_args.normalize=unit`, because a segmenter never standardizes and the scaling refusal
+  stays (D-035).
+- **Section 1.4** holds the design's message forms; the shipped wording is quoted in the README.
+- **Section 4.** Step 1's measurements were replaced by setup only (D-028): what the code needed was settled by the steps' own
+  tests (paths, `SeedGenerator` state, pins, epoch-zero metrics, split rows), the rest by the gate. The gate gained a denoising
+  and a forecasting arm (D-023). 18 mutants were planted (M1 to M18), each failing its guard before the code was restored.
 
 ---
 

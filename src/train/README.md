@@ -225,9 +225,9 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   16 fits `resnet18`, `resnet50`, `resnet152`, `convnext_seg/cifar10` and `convnext_seg/tiny` (peaks 1.4 to 2.8 GB);
   `convnext_seg/base` needs batch 8 (16 completes with an allocator collection) and `convnext_seg/xlarge` did not fit at any
   batch from 16 down to 1 on the card as it was shared (it asked 9.0 GiB at batch 16 and 5.1 GiB at 8; from batch 4 down the
-  353M parameters, their optimizer state and the workspace had already taken the 8.6 GiB that were free). `checkpoint=` from a
-  classification run of the same backbone loads NO layer (measured: the helper compares the top-level layers, `backbone` and
-  `segmentation_head` against `stem`, `stage1_block1` ..., "No overlapping layers"); the classes' own `pretrained=<path>`
+  353M parameters, their optimizer state and the workspace had already taken the 8.6 GiB that were free). `init=` takes a
+  classification run of the backbone's family (`resnet` for `resnet_seg`, `convnext_v1` for `convnext_seg`): its weights land
+  under `backbone/` and `segmentation_head` starts fresh (see "Starting from an earlier run" below); the classes' own `pretrained=<path>`
   does load the backbone (9 layers for `resnet18`, 25 for `convnext_v1/tiny`), which these families refuse as a model
   argument for now.
 * **Losses** (`loss_args.name`, plan 98b866fb step 3, D-014): `ce` (the default, Keras' sparse cross-entropy on logits with
@@ -637,7 +637,8 @@ the input, which is 32 and 29 of 64 patches on CIFAR-10 and 98 and 88 of 196 on 
 75 in blocks of at least 16 on the 14 x 14 one (the auto rule below).
 * **Keys of the task** (`python -m train pretrain` lists all, with their help; the groups `optim_args`, `checkpoint_args`,
   `logger_args`, `analysis_args` and `debug_args`, and `epochs`, `batch_size`, `seed`, `devices`, `precision`, `resume_interrupted`
-  and `checkpoint`, are the shared ones and mean what they mean for the other tasks, except where this section says otherwise).
+  and `init`, are the shared ones and mean what they mean for the other tasks, except where this section says otherwise; `init` is
+  refused here by name, see Limits).
   Required: `out`, `model`, `data.dataset` (`cifar10` or `imagenette`) and, for `beit`, `model_args.tokenizer_checkpoint`.
 
 | Key | Default | Read at |
@@ -790,8 +791,8 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   * No DINO: it has no `validation_data` (its centering is state that an evaluate pass mutates), a k-NN probe as its validation and EMA
     callbacks, so it needs a sequence variant of its own. Imagenette and CIFAR-10 only (`data.format` has the one value `builtin`).
   * No record: no `predict`, `export` or `load_model` of a pretrain run, and no warm start of a classifier from a pretrained encoder
-    through `python -m train`. The backbones keep the layer names `et_backbone` and `beit_backbone`, which such a warm start would
-    transfer by; the shared `checkpoint` key was not exercised for this task.
+    through `python -m train`: `init` is refused for this task, as a target ("pretrain does not start from earlier weights")
+    and as a source (a pretrain run has no `task.json`); the pretrain record is Phase 4h.
   * The tokenizer is made by hand with the legacy script, and the floor rests on two tokenizers.
   * The recipe's learning rate and batch are doubted, not measured, and `run.log` says so (a recipe notice): ET lr 5e-4 is the paper's
     Table 4 value at a batch of 768, 24 times the batch here, and BEiT lr 1.5e-3 is the recipe's at a global batch of 2,048 (128 on 16
@@ -825,10 +826,9 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   The exactness claims above, now on the GPU: the best checkpoint's reload gap is exactly 0.0 in all five runs; the zero-predictor baseline is the same float in G1 and in the ET kill run (1.0040831565856934 and 1.0040831565856934); the untrained `val_loss` is not the same float across two processes with one seed in either family: ET 2.3379111289978027 in G1 and 2.3379108905792236 in the ET kill run (relative difference 1.0e-07), BEiT 6.2661356925964355 in G3 and 6.266140460968018 in the BEiT kill run (7.6e-07), so equality across processes on the GPU is measured for the baseline and not for the untrained model's `val_loss` (the earlier gate's ET pair was equal, its BEiT pair was not).
   **Legacy rescore (Step 18, report only, no parity claimed, D-012).** The legacy trainer (`train.energy_transformer.train_masked_completion`, `et_tiny`, cifar10, 12 epochs, its own defaults and stateful masks, 252,913 parameters like G1) was run once and its `best_model.keras` scored on the API's fixed selection stream under the API's loss: 0.17493 against 0.17435 for the earlier gate's G1 best checkpoint scored the same way (the control reproduces that run's logged 0.17435 to 3e-8; the final gate's G1 logged 0.17422 and was not rescored); on the test stream 0.17504 against 0.17450. The two runs differ in their train masks and streams, so the numbers are reported and not graded.
   **Kill and resume (G4).** Each run was started with `checkpoint_args.backup_every_steps=300`, its PID recorded, and sent SIGKILL (that PID only) when the backup's metadata first read epoch 2 batch 299, that is after 2 CSV rows and 300 batches of the third epoch (the process exit status was 137); the same command with `resume_interrupted=true` then finished with exit 0 in ET and exit 0 in BEiT. The copy held 3112 optimizer steps (2 x 1,406 + 300), the final copy 5624 (4 x 1,406): no step lost or run twice after the copy. The CSV has one row per epoch (0 to 3) and the two rows written before the kill are unchanged. The learning rate the CSV records at each epoch start equals the run's own schedule evaluated at 0, 1,406, 3,112 and 4,218 steps, exactly, in both families: `optimizer.iterations == epoch * steps_per_epoch` at the starts of epochs 0, 1 and 3, and the epoch the kill landed in starts from the copy, at 2 x 1,406 + 300 (the documented behaviour of `backup_every_steps`), so for that one epoch the equation reads plus 300. The first three train batches of the resumed process were not read back from the real fit (it was not traced); the stream its stream seed gives (`with_stream(3112)`), digested the way the CPU resume test does on the real CIFAR-10 unaugmented, differs from epoch 0's stream at all three batches in both families.
-* **Follow-up plans**, named and not started: starting a run from an earlier run's weights (Phase 4g,
-  `research/roadmap/20261117_train_api_init_from.md`: one `init` key for every task in place of `checkpoint`, at a new
-  size, with a new head, as a deeper variant or with another task's backbone where the shapes allow, refused by name
-  otherwise), then the pretrain record (Phase 4h: a `task.json` record with `predict` and `export` for pretrain, and
+* **Follow-up plans**: starting a run from an earlier run's weights is done (Phase 4g, the `init` key, "Starting from an
+  earlier run" below; design and decisions in `research/roadmap/20261117_train_api_init_from.md`). Named and not started: the
+  pretrain record next (Phase 4h: a `task.json` record with `predict` and `export` for pretrain, and
   classifier families that a BEiT or Energy Transformer encoder can seed through `init`), then the language tasks (the
   next user of `fit_kwargs` and `resume_stream`, after `time_series_forecasting` and `depth_estimation` below), DINO, the BEiT
   tokenizer as a method of its own (`beit_tokenizer`), and the Phase 5 wrappers (the repo map entry among them).
@@ -890,7 +890,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   do not; the next bullet names each difference.
 * **Keys of the task** (`python -m train time_series_forecasting` lists all, with their help; the groups `optim_args`,
   `checkpoint_args`, `logger_args`, `analysis_args` and `debug_args`, and `epochs`, `batch_size`, `seed`, `devices`, `precision`,
-  `resume_interrupted` and `checkpoint`, are the shared ones and mean what they mean for the other tasks, except where this section says
+  `resume_interrupted` and `init`, are the shared ones and mean what they mean for the other tasks, except where this section says
   otherwise). Required: `out`, `model` and `data`; the group `data` itself must be named (`data.format=builtin` is the synthetic bank), and a csv run also needs `data.format` and `data.path`.
 
 | Key | Default | Read at |
@@ -1145,7 +1145,7 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   `optim_args.lr` is 2e-4, the legacy from-scratch rate, and the head gets no 10x.
 * **Keys of the task** (`python -m train depth_estimation` lists all, with their help; the groups `optim_args`, `checkpoint_args`,
   `logger_args`, `analysis_args` and `debug_args`, and `epochs`, `batch_size`, `seed`, `devices`, `precision`, `resume_interrupted`
-  and `checkpoint`, are the shared ones and mean what they mean for the other tasks, except where this section says otherwise). The
+  and `init`, are the shared ones and mean what they mean for the other tasks, except where this section says otherwise). The
   table holds this task's own values; some keys of `data` have other ones in the forecasting task.
 
 <!-- keys-of: depth_estimation -->
@@ -1380,6 +1380,125 @@ same-sized files swapped, or a pixel edited, go unseen; `data.fingerprint=conten
 file's bytes, streamed, which reads all the data once (a pass over the disk tree, minutes on a large one on a
 spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or digest, and a sidecar written before the rows were hashed in listing order
 (no `data_fingerprint_scheme`).
+
+**Starting from an earlier run: `init`** (plan 0fd54b91, `train/api/init_from.py`; the design and its decisions are in
+`research/roadmap/20261117_train_api_init_from.md`). `init=<run directory>` names an earlier `python -m train` run whose
+weights start this one, for `image_classification`, `image_segmentation`, `image_denoising`, `time_series_forecasting` and
+`depth_estimation`; `pretrain` refuses it. A relative path starts at the repo root, as `out` does, and `train_<task>(init=...)`
+takes a str or a `Path`. It replaced `checkpoint`, which is gone with no alias: `checkpoint=` on the command line, in a
+`config=` file or in a YAML mapping is refused by name, and a Python call with `checkpoint=` is a `TypeError`. The run builds its
+own model from its own config, then, before `compile`, copies the source's `best_model.keras` into it one weight at a time,
+keyed by its Keras variable path with the model's own name dropped. Every weight of the new model is copied, resampled by a
+rule its family declares (one rule, `vit_pos_bicubic`: the ViT position table, torch's bicubic without antialiasing, to a
+larger grid only), or left fresh as a declared head or as a block a deeper variant adds; every source weight is used or
+dropped as a declared head. Anything else is refused before the first weight is copied. The optimizer is always fresh, at the
+recipe's learning rates (no fine-tune rate is measured in this repository), and nothing is frozen.
+
+```bash
+# the same task at a new size and class count: patch 4 kept, the position table resampled, the head reset
+python -m train image_classification out=results/vit_c10_32 model=vit/vit_pico data.dataset=cifar10
+python -m train image_classification out=results/vit_c100_64 model=vit/vit_pico data.dataset=cifar100 \
+    transform_args.image_size=64 init=results/vit_c10_32
+# a deeper variant: the blocks vit_tiny adds start fresh
+python -m train image_classification out=results/vit_tiny_c10 model=vit/vit_tiny data.dataset=cifar10 init=results/vit_c10_32
+# another task: a classifier's backbone into its segmenter (the classifier must take its input in [0, 1])
+python -m train image_classification out=results/convnext_c10 model=convnext_v1/cifar10 data.dataset=cifar10 \
+    transform_args.normalize=unit
+python -m train image_segmentation out=results/convnext_seg_pet model=convnext_seg/cifar10 data.dataset=oxford_pet \
+    init=results/convnext_c10
+# forecasting at a longer lookback
+python -m train time_series_forecasting out=results/tirex_336 model=tirex/tiny data.format=builtin data.lookback=336 \
+    init=results/tirex_168
+# depth at a higher resolution
+python -m train depth_estimation out=results/depth_364 model=depth_anything/vit_s transform_args.image_size=364 \
+    init=results/depth_252
+```
+
+What each kind moves, derived on the smallest variants by the engine on the real models: `vit_pico` from 32 px and 10 classes
+to 64 px and 100 classes copies 77 weights, resamples `pos_embed/pos_embedding` from (1, 65, 192) to (1, 257, 192) and resets
+the 2 head weights; `vit_pico` to `vit_tiny` copies 80 and grows 72, `resnet18` to `resnet34` copies 102 and grows 80;
+`convnext_v1/cifar10` into `convnext_seg/cifar10` copies 98 under `backbone/`, drops the classifier's 4 head weights and resets
+the 18 of `segmentation_head`; `resnet/resnet18` into `resnet_seg/resnet18` copies 100 when the classifier was built with
+`model_args.stem_type=imagenet` (the 32 px recipe resolves the cifar stem, which the segmenter never builds, and the weight check
+refuses it); `convunext/tiny` (segmentation) into `convunext_biased/tiny` (denoising) and back copies 156 and resets
+`final_output`; `tirex/tiny` from lookback 168 to 336 copies 47 of 47; `depth_anything/vit_s` at another size copies 235 of 235
+(the DINOv2 table is resampled inside the model at call time). Those are the four declared cross-task pairs (the ConvUNext
+pair counts once each way); any other pair, and a width change (`convnext_v2` atto to femto: 139 of 140 weights differ), are
+refused.
+
+**What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed):
+
+| Case | Message |
+|---|---|
+| `checkpoint` given | `Unknown key 'checkpoint': it was replaced by 'init', which takes the directory of an earlier run (python -m train <task> help)` |
+| `init` on `pretrain` | `Invalid value for 'init': pretrain does not start from earlier weights: it writes no record, and no family of another task shares the BEiT or Energy Transformer trunk (follow-up: the pretrain record)` |
+| a file, not a directory | `Invalid value for 'init': <path> is a file; give the run directory that holds it (init reads task.json, config.json and best_model.keras)` |
+| no `task.json` | `Invalid value for 'init': <run>/task.json does not exist; a source is a python -m train run of a task that writes a record (pretrain runs and legacy trainer runs write none)` |
+| no `best_model.keras` | `Invalid value for 'init': <run> holds no best_model.keras (the run ended before its first epoch)` |
+| a pair not declared | `Invalid value for 'init': <family> (<task>) cannot seed <family> (<task>); <family> takes weights from <its declared sources>` |
+| a geometry the family sizes its weights by | `Invalid value for 'init': nbeats sizes its weights by data.lookback; the source trained at 168, this run asks for 336 (families of time_series_forecasting that keep every weight across a data.lookback change: ets, timestral, tirex, xlstm)` |
+| another input scaling | `Invalid value for 'init': the source standardizes its input and this run takes its input in [0, 1] (transform_args.normalize)` |
+| a pinned argument changed | `Invalid value for 'model_args.patch_size': the source was built with patch_size=4 and init keeps the source's architecture` |
+| a classifier `model_args.pretrained` other than false | `Invalid value for 'model_args.pretrained': only false is offered, got True; a classifier is built with fresh weights (a path is not offered, and no official weights are read); init takes a run directory` |
+| depth `model_args.pretrained` under `init` | `Invalid value for 'model_args.pretrained': init replaces every weight, so the official weights would be read and overwritten` (for `false`: `so no official weights are read and the run keeps the warm-start rate with the head at 10x; remove model_args.pretrained`) |
+
+After the claim, before any weight is copied (exit 2, the claimed directory is kept, as for any error after the claim): `Invalid value for
+'init': <n> of <m> weights of <family/variant> have no source weight of their shape and no declared rule: <the first 5 paths,
+both shapes> (+<k> more); nothing was copied (paths without the model's own name)`, and the same for the other direction (`...
+of the source run are neither used nor dropped by a declared rule`); a smaller ViT grid, `vit pos_embed would shrink its grid
+from 16x16 to 8x8; only a larger grid is resampled (bicubic, no antialiasing)`. The archive is hashed before the claim and again
+after the copy, and a run whose `best_model.keras` changed in between stops before it trains, naming both sha256.
+
+**The head** is copied only when the two `task.json` records say it means the same thing: classification and segmentation
+`class_names` equal as ordered lists (the same names in another order reset it), denoising `channels`, forecasting `horizon`,
+`head`, `quantile_levels` and `channels`; depth always copies (one output). Otherwise the family's declared head is fresh and
+the source's is dropped; across tasks the head is always fresh. A channel change of the input is a stem change and refused,
+except for `timestral`, whose weights do not depend on it.
+
+**Pins and resume.** Where the recipe derives an architecture argument from the size or the dataset (vit `patch_size`, resnet
+`stem_type`, convnext_v1 and convnext_v2 `strides`), the target takes the source's value from the source's `config.json`
+(`used.model_args`); a `model_args` value equal to it is accepted, another is refused, so `vit_pico` at 64 px keeps patch 4.
+Depth under `init`: the factory is called with `pretrained` false, the official weights are neither read nor checked, and the
+warm-start rate (5e-6, the DPT head at 10x) is kept. A resume, full or reporting-only, never reads the source (it may be moved
+or deleted): the pins come from the run's own `task.json` `init` block and the backup restores every weight. `init` is a
+compared resume key, so the resume repeats the same text; a resume with `init` of a run whose `task.json` has no block is
+refused before the claim.
+
+**Split overlap is counted, never refused.** After the data is built, each task compares the source's training data with this
+run's selection and test data, by the source's own split keys, and records `split` in the `init` block: `same_split` (counts
+0), `different_data` (counts 0), `overlap` (`n_select_overlap`, `n_test_overlap`, and a reason naming the keys that would give
+0) or `unknown` (the reason). The unit is the task's: rows for classification and segmentation (both seeded cuts rebuilt with
+each run's own `seed`, `data.validation_split` and `data.max_samples`; the test rows are another split; another built-in
+dataset is `different_data`; Imagenette against ImageNet, ImageNet itself, and file data under other paths or of another
+fingerprint are `unknown`),
+files for denoising (every file of the source's `data.train_dirs` among this run's validation and held-out files), windows for
+forecasting (other `seed`, `data.series_length` or `data.noise_level` is `different_data`, other `data.patterns` or
+`data.realizations` of the same seed and another csv file `unknown`, other fractions count the windows that start inside the
+source's train segment)
+and scenes for depth (the source's train scenes among this run's selection and test scenes). A CIFAR-10 source trained at
+seed 42 seeds a run at seed 43: 4,531 of its 5,000 selection rows were trained on. `results_summary.json` then sets
+`selection_biased`, `test_biased` (a count above 0) and `overlap_unknown`, the log line `init split: <relation>: <reason>` is a
+warning, and the success line ends in `(selection-biased)`, `(selection-biased, test-biased)` or `(split overlap unknown)`. No
+exit code changes.
+
+**The bar under `init`.** The epoch-zero evaluation is of the loaded weights (`Evaluate of the loaded weights before fit: val
+<metric> <value>, ...`), so `initial_loss_ratio` and `init_scale_warning` are null and the summary's notes say why.
+Classification, segmentation and denoising, whose bars a good source meets at epoch 0, also need the best success value
+strictly above the loaded weights' epoch-zero value (read from the fit sidecar, so a resume judges the same number), by more
+than 16 float32 steps (`forecast_run.tie_band(1)`); a fine-tune that only holds its source's score is a miss, exit 1.
+Forecasting and depth keep `min(..., epoch zero)`, whose epoch-zero term is now the loaded weights.
+
+**What the run records.** `task.json` and `results_summary.json` carry the `init` block: `source` (absolute), `file`,
+`sha256`, `task`, `family`, `variant`, `geometry`, `relation` (`same_task` or `cross_task`), `pinned`, `transfer` (`copied`, a
+count; `resampled`, with path, rule and both shapes; `reset`, `grown`, `dropped`, path lists) and `split`. The summary adds
+`epoch_zero_of: "init"`, the three flags and, for classification, segmentation and denoising, `loaded_success_value` (the
+loaded weights' epoch-zero `accuracy`, `miou` or PSNR gain, the value the bar had to beat; forecasting and depth hold it in
+their `epoch_zero` block). `predict` and `export` of a fine-tuned run are those of any run of its task at its own trained
+size; they read only the run's own files, and `export` carries the block into `<out>.task.json`.
+
+<!-- init-gate:begin -->
+**Measured: the `init` gate.** Not run yet: the numbers of the GPU gate on the final code go here.
+<!-- init-gate:end -->
 
 **Figures, analysis and TensorBoard**: five keys decide what is written besides the models and the
 summary. The region between the markers below is read by

@@ -686,13 +686,44 @@ classification task calls the same `train.common.classification_run` helpers as 
   `time_series_forecasting` and `depth_estimation`; the language tasks are the next.
 - **A sixth seam, for a per-variable learning rate** (plan 9c7b9096; a no-op by default, proven in
   `test_the_sequence_seams_default_to_nothing.py`, with the goldens EXACT after the shared edit).
-  `TaskTrainer.optimizer_options(config, model)` (default `{}`) is called ONCE in `run_sequence`, after the model is built and any
-  `checkpoint` is loaded, and its result goes to `build_optimizer_and_schedule(..., options=)`, the one builder, so the schedule
+  `TaskTrainer.optimizer_options(config, model)` (default `{}`) is called ONCE in `run_sequence`, after the model is built and,
+  under `init`, the source's weights are copied, and its result goes to `build_optimizer_and_schedule(..., options=)`, the one builder, so the schedule
   and clip rules stay in one place. The keys are a closed set, `optim.OPTION_KEYS` (only `lr_multipliers`, a mapping of variable
   path to multiplier). An unknown key, a bad entry (`lr_multiplier_problem`, the optimizer's own rule) or a non-empty table with an
   optimizer other than `adamw` is a `ConfigError` naming it, raised after the claim because the table names the built model's
   variables; an empty mapping or an empty table leaves the builder's config as it was. Do not build an optimizer in a task, and do
   not spread the options into `compile`. `depth_estimation` is its one user (the DPT head at 10x from a pretrained start).
+- **`init`: a run from an earlier run's weights** (plan 0fd54b91; the user-facing rules and the refusal messages are in
+  [`README.md`](README.md)). The engine is `api/init_from.py`, which imports no TensorFlow, Keras or numpy at module scope:
+  `read_source` before the claim (files, record, task and family pair, `fixed` geometry, input scaling, pins, sha256), `transfer`
+  after it, in `run_sequence.build_model` on a fresh run only (`plan_transfer`, `check`, `apply`: complete-or-raise in both
+  directions, nothing assigned before every check passed), and `recorded_init` on a resume, which reads the run's own `task.json`
+  and never the source. Weights are keyed by their path relative to the model: only a leading `<model.name>/` is dropped (D-030);
+  never normalize another component. `AutoContext.pinned` carries the pins and only `recipes.merge_model_args` reads it.
+  - **`TransferSpec` per family.** `registry.TransferSpec` and `registry.CrossTask` (frozen dataclasses, standard library only, so
+    the help path stays light, D-032) are declared on each `ModelSpec` as `transfer=`: `head` (path prefixes of the final layer),
+    `resample` (path to a rule of `init_from.RULES`, today only `vit_pos_bicubic`), `grow` (a regex of the depth-indexed blocks a
+    deeper variant adds), `pinned` (factory arguments the target takes from the source's `used.model_args`), `fixed` (`channels`,
+    `lookback`, `horizon`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask` of a target
+    prefix and the dropped source head) and `positional` (top-level components whose weights pair by order, xlstm only, D-031).
+    A new family of a task that takes `init` declares `transfer=TransferSpec(...)`, or `transfer=None` with a non-empty
+    `transfer_reason` (the pretrain rows do), which `init` then quotes in its refusal. `ModelSpec` does not enforce this
+    (D-033): `tests/test_train/test_api/test_init_from_families.py` does, and builds each row's smallest variant (its `VARIANT`
+    table) at the source geometry and at every change the spec names, requiring the engine's verdict to be the declared one, so a
+    new row adds its variant there. Today 23 rows declare a spec and the 2 pretrain rows give a reason.
+  - **Two hooks.** `TaskTrainer.init_identity(config, context)`, before the claim and without TensorFlow, returns the record keys
+    this run will write about its input (`channels`, `lookback`, `horizon`, `normalize`, `data_range`; those its record has),
+    which `read_source` compares with the source's record; the base class refuses `init` naming the task (`pretrain` keeps it,
+    though a user meets its rows' `transfer_reason` first, which `read_source` checks before the hook). `TaskTrainer.init_overlap(source, config, data)`, after `build_data` on a fresh run, returns the `split` of the
+    block through `init_from.split_block` (helpers `same_split`, `counted_split`, `seeded_rows_split`); the base class returns
+    `unknown` with "this task does not rebuild a source's rows". It never refuses: an overlap is counted and marked (D-012, D-038).
+  - **The summary and the bar.** `TaskTrainer._summary_head` takes a keyword `init_block`, `None` for a run without `init`, so
+    its other callers are unchanged; with a block it writes `init`, `epoch_zero_of` and the three flags of `init_from.bias_of`
+    after `init_scale_warning`, for a finished and a diverged run alike (D-040). Under `init` `run_sequence.epoch_zero` calls
+    `init_from.evaluate_loaded` instead of the task's `initial_loss_check`, and a task whose bar is absolute sets
+    `TaskTrainer._loaded` in `evaluate_and_report` from `init_from.loaded_value` (the fit sidecar's `initial.metrics`) and checks
+    `init_from.beats_loaded` in `bar_is_met` (D-039). Tests: `tests/test_train/test_api/test_init_from_engine.py`,
+    `test_init_from_families.py` and `test_init_from_runs.py`.
 - **The mask-key rule** (D-004, D-005; why a pretrain run is reproducible and a resume does not leak). A mask is a function of a key
   and nothing stateful: `make_stateless_masked_patch_map_fn` (`dl_techniques/datasets/vision/masked_patches.py`) and
   `make_stateless_beit_mim_map_fn` (`beit_masking.py`) return `fn(index, image, *_)`. The SELECT and TEST masks are keyed on
