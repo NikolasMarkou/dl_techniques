@@ -29,7 +29,13 @@ Interface contract
     :raises UnresolvedAutoError: when ``optim_args`` still holds ``"auto"``.
     :raises ConfigError: when ``model_args`` names a key the library supplies
         (``variant``, ``num_classes``, ``input_shape``), or hands an AdamW run
-        a ``kernel_regularizer``.
+        a ``kernel_regularizer``; for the six classifiers, also a ``pretrained``
+        other than ``false`` (:func:`refuse_classifier_pretrained`).
+
+``refuse_classifier_pretrained(model_args)``
+    :raises ConfigError: when ``model_args`` holds a ``pretrained`` other than ``false``: a
+        classifier is built with fresh weights (a path would reach the factory's own name-matching
+        loader, and ``true`` reads no official file), and an earlier run's weights come through ``init``.
 
 ``serialize_model_args(kwargs)``
     :param kwargs: the output of a resolver.
@@ -523,6 +529,17 @@ def merge_model_args(
     return merged
 
 
+def refuse_classifier_pretrained(model_args: Mapping[str, Any]) -> None:
+    """Refuse a classifier ``model_args.pretrained`` other than ``false``; see the module contract."""
+    value = model_args.get("pretrained", False)
+    if value is not False:
+        raise ConfigError(
+            f"Invalid value for 'model_args.pretrained': only false is offered, got {value!r}; a classifier is "
+            "built with fresh weights (a path is not offered, and no official weights are read); init takes a run "
+            "directory"
+        )
+
+
 def resolve_vit_args(
     context: AutoContext, optim_args: OptimArgs, model_args: Mapping[str, Any]
 ) -> Dict[str, Any]:
@@ -531,6 +548,7 @@ def resolve_vit_args(
     ``patch_size`` is 4 on 32 px images and 16 otherwise (train_vit.py:426-428, by dataset there).
     ``kernel_regularizer`` is always passed, as the legacy trainer does.
     """
+    refuse_classifier_pretrained(model_args)
     patch = 4 if context.image_size == SMALL_IMAGE_SIZE else 16
     return merge_model_args(
         context,
@@ -549,6 +567,7 @@ def resolve_resnet_args(
     ``stem_type`` is ``"cifar"`` on 32 px images and ``"imagenet"`` otherwise.
     The CIFAR stem is new behaviour (D-003): the legacy trainer never passed it.
     """
+    refuse_classifier_pretrained(model_args)
     stem = "cifar" if context.image_size == SMALL_IMAGE_SIZE else "imagenet"
     return merge_model_args(
         context,
@@ -567,6 +586,7 @@ def _resolve_regularizer_on_request(
     both run AdamW. With sgd the weight decay has nowhere else to go, so it is
     passed rather than dropped without a word.
     """
+    refuse_classifier_pretrained(model_args)
     regularizer = _weight_decay_regularizer(optim_args)
     computed = {} if regularizer is None else {"kernel_regularizer": regularizer}
     return merge_model_args(context, optim_args, model_args, computed)

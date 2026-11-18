@@ -25,7 +25,7 @@ The stages, in order, each a function of one :class:`Run` (the state they share,
 2. :func:`load_data`: ``build_data``, ``input_check``, the refusals that need the data's length, the
    resume's checks of that data (``resume_decisions``) and, for a resume that trains, the task's
    ``resume_stream`` once the backup pair is settled.
-3. :func:`build_model`: the model, its optional ``checkpoint`` weights, the optimizer, ``compile``.
+3. :func:`build_model`: the model, its optional ``init`` weights, the optimizer, ``compile``.
 4. :func:`epoch_zero`: the untrained model's evaluation (or the sidecar's copy of it on a resume),
    the checks of the monitor against the names ``compile`` produced, the summary head.
 5. :func:`train_or_restore`: ``fit`` (or the files, for a run with no epoch left), then
@@ -525,17 +525,18 @@ def load_data(run: Run) -> None:
 
 
 def build_model(run: Run) -> None:
-    """Build the model, load the optional ``checkpoint`` weights, build the optimizer and ``compile``."""
+    """Build the model, load the optional ``init`` weights, build the optimizer and ``compile``."""
     from dl_techniques.utils.logger import logger
 
     trainer, config, data = run.trainer, run.config, run.data
+    if config.init is not None:
+        raise NotImplementedError("init passed its checks before the claim, but its weight transfer is not wired "
+                                  "into build_model yet; the run stops rather than train from fresh weights")
     optim_cfg: OptimArgs = config.optim_args
     with _bad_value_is_a_config_error(run.run_dir, "the model factory"):
         run.model = trainer.build_model(config, run.context, data)
         if not run.model.built:
             run.model.build((None, *data.input_shape))
-    if config.checkpoint is not None:
-        trainer._load_checkpoint(run.model, config.checkpoint)
     # DECISION plan-2026-11-17T110935-9c7b9096/D-003: the task's optimizer options are asked
     # for ONCE, here, with the built model, and go to the one builder call below. Do NOT build a
     # second optimizer in the task or spread the options into ``compile``: the schedule and clip

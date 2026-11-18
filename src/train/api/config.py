@@ -120,7 +120,8 @@ RUN_HELP: Dict[str, str] = {
     "seed": "seed of the weights, the split and the augmentation",
     "devices": "GPU index inside the visible devices; auto or null leaves every visible GPU",
     "precision": "float32, mixed_float16 or mixed_bfloat16",
-    "checkpoint": "a .keras model whose same-named layers give their weights to this one",
+    "init": "the directory of an earlier python -m train run (a relative path starts at the repo root) whose "
+            "weights start this one; null starts from fresh weights",
     "model_args": "keywords of the model factory; they win over the family's",
 }
 
@@ -172,13 +173,13 @@ def run_request(
     devices: Any,
     precision: str,
     resume_interrupted: bool,
-    checkpoint: Any,
+    init: Any,
     model_args: Optional[Mapping[str, Any]],
     groups: Mapping[str, Any],
 ) -> Dict[str, Any]:
     """Return the mapping a task function hands to :func:`validate`.
 
-    Interface contract: ``out`` and ``checkpoint`` may be a ``Path`` (stored as text);
+    Interface contract: ``out`` and ``init`` may be a ``Path`` (stored as text);
     ``model_args`` ``None`` is ``{}``; ``groups`` maps each group's field name to a mapping, a
     group instance or ``None``, and a ``None`` is left out so the config's default stands. The
     two task functions (classification and segmentation) differ in their ``data`` and group
@@ -196,7 +197,7 @@ def run_request(
         "devices": devices,
         "precision": precision,
         "resume_interrupted": resume_interrupted,
-        "checkpoint": str(checkpoint) if isinstance(checkpoint, Path) else checkpoint,
+        "init": str(init) if isinstance(init, Path) else init,
         "model_args": {} if model_args is None else model_args,
     }
     given.update({name: value for name, value in groups.items() if value is not None})
@@ -335,6 +336,13 @@ def unknown_key_message(prefix: str, name: str, siblings: Any) -> str:
     :param name: the unknown key, without its prefix.
     :param siblings: the names (without prefix) of the keys that do exist there.
     """
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-002: the removed top-level key gets ONE named sentence here, the one
+    # builder of the command line, a config= file and a YAML mapping. Do NOT add a ``checkpoint`` alias or a
+    # ``**kwargs`` catch to the task functions (a compatibility path in all but name): a Python call with it is a
+    # TypeError. Without this sentence the closest-key suggestion would point at ``checkpoint_args``.
+    if prefix == "" and name == "checkpoint":
+        return ("Unknown key 'checkpoint': it was replaced by 'init', which takes the directory of an earlier run "
+                "(python -m train <task> help)")
     message = f"Unknown key {join_path(prefix, name)!r}."
     close = difflib.get_close_matches(name, list(siblings), n=1)
     if close:

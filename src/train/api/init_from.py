@@ -10,6 +10,12 @@ directions), so a refusal leaves every target weight as it was. Pass ``model.wei
 3.8 it holds the BatchNorm moving statistics and no ``SeedGenerator`` state (that is in
 ``model.variables``), so a dropout seed is never transferred.
 
+The pre-claim half, :func:`read_source`, checks a source run directory before the run directory is
+claimed: its files, its record, the task and family pair, the family's ``fixed`` geometry and the
+input scaling against what this run will record, the pinned factory arguments, and the archive's
+sha256. It reads JSON and hashes bytes; it loads no model, and for an absolute path imports no
+TensorFlow, Keras or numpy.
+
 Nothing here imports TensorFlow, Keras or numpy at module scope (``registry`` rows import the
 declarations, and ``python -m train help`` stays light); numpy and the DINOv2 bicubic matrix are
 imported inside the functions that use them.
@@ -48,6 +54,21 @@ Interface contract
 ``apply(plan)``
     Calls :func:`check`, then assigns every copy and resample. Returns ``None``.
 
+``read_source(init, trainer, config, context)``
+    :param init: the ``init`` value (text or ``Path``); a relative path is anchored at the repo root as ``out``
+        is (:func:`train.api.run_dir.resolve_out`).
+    :param trainer: the task's trainer: its ``task`` and its ``init_identity(config, context)`` hook.
+    :param config: this run's resolved config (its ``model_args`` are the request's).
+    :param context: the ``AutoContext`` of this run (``family``).
+    :return: a :class:`Source`. Nothing is written; ``best_model.keras`` is hashed, not opened as a model.
+    :raises ConfigError: naming ``init`` (or the ``model_args`` key a pin refuses), in this order: the row
+        declares no transfer (its ``transfer_reason``); the trainer's ``init_identity`` refuses (the default
+        does); the directory is missing or is a file; ``task.json``, ``config.json`` or ``best_model.keras``
+        is missing; the record fails the predictor's record check or ``config.json`` is no JSON object; the
+        source's task and family are neither this run's nor a declared cross-task pair; a ``fixed`` key of
+        this family or the input scaling differs; a pinned argument is not recorded in the source's
+        ``config.json`` ``used.model_args``, or the request's ``model_args`` gives it another value.
+
 ``vit_pos_bicubic(value, target_shape)``
     :param value: a ``(1, 1 + m * m, d)`` table, class row first, then the row-major grid.
     :param target_shape: ``(1, 1 + n * n, d)`` with ``n > m``.
@@ -56,12 +77,16 @@ Interface contract
     :raises ConfigError: a smaller grid, a non-square grid, or another batch or width.
 """
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 
+from . import registry
 from .errors import ConfigError
 from .registry import CrossTask, TransferSpec
 
@@ -230,6 +255,150 @@ def vit_pos_bicubic(value: Any, target_shape: Tuple[int, ...]) -> Any:
     grid = value[:, 1:].astype(np.float64).reshape(value.shape[0], m, m, value.shape[2])
     grid = np.einsum("ai,bijd,cj->bacd", matrix, grid, matrix).reshape(value.shape[0], n * n, value.shape[2])
     return np.concatenate([value[:, :1], grid.astype(value.dtype)], axis=1)
+
+
+# ---------------------------------------------------------------------
+# The source run, read before the claim
+# ---------------------------------------------------------------------
+
+#: The files a source run directory must hold.
+SOURCE_FILES = ("task.json", "config.json", "best_model.keras")
+
+#: How a refusal names a geometry key of the records.
+GEOMETRY_NAMES = {"channels": "the input channels", "lookback": "data.lookback", "horizon": "data.horizon"}
+
+#: How a refusal describes an input scaling, by the value :func:`_scaling` gives it.
+SCALING_WORDS = {"standardize": "standardizes its input", "unit": "takes its input in [0, 1]",
+                 "imagenet": "standardizes its input with the ImageNet statistics"}
+
+
+@dataclass(frozen=True)
+class Source:
+    """A source run as read before the claim: what the run after the claim loads and records."""
+
+    path: Path
+    record: Mapping[str, Any]
+    config: Mapping[str, Any]
+    sha256: str
+    relation: Optional[CrossTask]
+    pins: Mapping[str, Any]
+
+
+def _refuse_init(text: str) -> ConfigError:
+    return ConfigError(f"Invalid value for 'init': {text}")
+
+
+def _scaling(record: Mapping[str, Any]) -> Optional[str]:
+    """The input scaling a record (or a target's identity) states: ``normalize``, else the denoisers' ``data_range``."""
+    if "normalize" in record:
+        return record["normalize"]
+    if "data_range" in record:
+        from .predictor import unit_domain_stamp
+
+        return "unit" if record["data_range"] == unit_domain_stamp() else f"data_range {record['data_range']}"
+    return None
+
+
+def _source_dir(init: Any) -> Path:
+    text = str(init)
+    # Anchored as ``out`` is; an absolute path needs no anchor (and so no import of the anchoring helper).
+    path = Path(text) if Path(text).is_absolute() else _anchor(text)
+    if not path.exists():
+        raise _refuse_init(f"{path} does not exist; give the directory of an earlier python -m train run")
+    if not path.is_dir():
+        raise _refuse_init(f"{path} is a file; give the run directory that holds it (init reads task.json, "
+                           "config.json and best_model.keras)")
+    task_file, config_file, model_file = (path / name for name in SOURCE_FILES)
+    if not task_file.is_file():
+        raise _refuse_init(f"{task_file} does not exist; a source is a python -m train run of a task that writes "
+                           "a record (pretrain runs and legacy trainer runs write none)")
+    if not config_file.is_file():
+        raise _refuse_init(f"{config_file} does not exist; a source is a python -m train run directory")
+    if not model_file.is_file():
+        raise _refuse_init(f"{path} holds no best_model.keras (the run ended before its first epoch)")
+    return path
+
+
+def _anchor(text: str) -> Path:
+    from .run_dir import _anchor as anchor
+
+    return anchor(text)
+
+
+def _declared_sources(task: str, family: str, spec: TransferSpec) -> str:
+    pairs = [(task, family), *sorted(spec.sources)]
+    return " or ".join(f"{name} ({kind})" for kind, name in pairs)
+
+
+def _check_identity(family: str, task: str, spec: TransferSpec, source: Mapping[str, Any],
+                    target: Mapping[str, Any]) -> None:
+    for key in spec.fixed:
+        if key in source and key in target and source[key] != target[key]:
+            keeping = sorted(name for name, row in registry.MODELS.items()
+                             if task in row.tasks and row.transfer is not None and key not in row.transfer.fixed)
+            kept = f" (families of {task} that keep every weight across a {GEOMETRY_NAMES[key]} change: " \
+                   f"{', '.join(keeping)})" if keeping else ""
+            raise _refuse_init(f"{family} sizes its weights by {GEOMETRY_NAMES[key]}; the source trained at "
+                               f"{source[key]}, this run asks for {target[key]}{kept}")
+    theirs, ours = _scaling(source), _scaling(target)
+    if theirs is not None and ours is not None and theirs != ours:
+        raise _refuse_init(f"the source {SCALING_WORDS.get(theirs, f'has {theirs}')} and this run "
+                           f"{SCALING_WORDS.get(ours, f'has {ours}')} (transform_args.normalize)")
+
+
+def _pins(path: Path, spec: TransferSpec, used: Mapping[str, Any], asked: Mapping[str, Any]) -> Dict[str, Any]:
+    pins: Dict[str, Any] = {}
+    for key in spec.pinned:
+        if key not in used:
+            raise _refuse_init(f"{path / 'config.json'} records no used.model_args.{key}, which init keeps from the "
+                               "source (the family derives it from the data, so a source without it cannot say "
+                               "how it was built)")
+        if key in asked and asked[key] != used[key]:
+            raise ConfigError(f"Invalid value for 'model_args.{key}': the source was built with {key}={used[key]!r} "
+                              "and init keeps the source's architecture")
+        pins[key] = used[key]
+    return pins
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_source(init: Any, trainer: Any, config: Any, context: Any) -> Source:
+    """Check a source run directory before the claim (contract in the module docstring)."""
+    from .predictor import read_record
+
+    family, task = context.family, trainer.task
+    row = registry.MODELS[family]
+    if row.transfer is None:
+        raise _refuse_init(row.transfer_reason or f"the family {family!r} declares no transfer, so it takes no "
+                                                   "earlier run's weights")
+    spec = row.transfer
+    identity = trainer.init_identity(config, context)
+    path = _source_dir(init)
+    try:
+        record = read_record(path / "task.json")
+    except ConfigError as exc:
+        raise _refuse_init(f"the source's record cannot be used: {exc}") from exc
+    try:
+        recorded = json.loads((path / "config.json").read_text())
+    except ValueError as exc:
+        raise _refuse_init(f"{path / 'config.json'} is not JSON ({exc})") from exc
+    if not isinstance(recorded, dict):
+        raise _refuse_init(f"{path / 'config.json'} is not a JSON object")
+    pair = (record["task"], record["family"])
+    relation = None if pair == (task, family) else spec.sources.get(pair)
+    if pair != (task, family) and relation is None:
+        raise _refuse_init(f"{record['family']} ({record['task']}) cannot seed {family} ({task}); {family} takes "
+                           f"weights from {_declared_sources(task, family, spec)}")
+    _check_identity(family, task, spec, record, identity)
+    used = (recorded.get("used") or {}).get("model_args") or {}
+    pins = _pins(path, spec, used, config.model_args or {}) if relation is None else {}
+    return Source(path, record, recorded, _sha256(path / "best_model.keras"), relation, pins)
 
 
 #: Resample rules by the name a :class:`TransferSpec` declares.

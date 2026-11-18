@@ -272,8 +272,8 @@ READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS: Dict[Tuple[str, str], Dict[str,
     },
     # The same task-agnostic reads for the pretrain task (it reads `model` through `TaskTrainer.run` as well: the family
     # and the variant come out of it, and the task reads neither again), and the four the shared sequence reads for every
-    # task: the GPU choice and the precision (`TaskTrainer.run`), the epochs (`train_or_restore`) and the warm-start
-    # checkpoint (`run_sequence.build_model`).
+    # task: the GPU choice and the precision (`TaskTrainer.run`), the epochs (`train_or_restore`) and the source run of
+    # `init` (`TaskTrainer._resolve`, which reads it before the claim; pretrain's row refuses it there).
     ("train/api/tasks/pretrain.py", "PretrainConfig"): {
         "debug_args": ("train/api/trainer.py", "TaskTrainer.run"),
         "logger_args": ("train/api/fit_callbacks.py", "build_callbacks"),
@@ -282,7 +282,7 @@ READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS: Dict[Tuple[str, str], Dict[str,
         "devices": ("train/api/trainer.py", "TaskTrainer.run"),
         "precision": ("train/api/trainer.py", "TaskTrainer.run"),
         "epochs": ("train/api/run_sequence.py", "train_or_restore"),
-        "checkpoint": ("train/api/run_sequence.py", "build_model"),
+        "init": ("train/api/trainer.py", "TaskTrainer._resolve"),
     },
     # The same task-agnostic reads for the forecasting task (`model` is parsed by `TaskTrainer.run`; the forecasting
     # trainer takes the family and the variant from the context).
@@ -294,7 +294,7 @@ READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS: Dict[Tuple[str, str], Dict[str,
         "devices": ("train/api/trainer.py", "TaskTrainer.run"),
         "precision": ("train/api/trainer.py", "TaskTrainer.run"),
         "epochs": ("train/api/run_sequence.py", "train_or_restore"),
-        "checkpoint": ("train/api/run_sequence.py", "build_model"),
+        "init": ("train/api/trainer.py", "TaskTrainer._resolve"),
         # The resume switch and the metric group are read by the shared sequence (`TaskTrainer.run` opens the run for a
         # resume; `epoch_zero` checks the monitor the group names), not by the forecasting trainer.
         "resume_interrupted": ("train/api/trainer.py", "TaskTrainer.run"),
@@ -315,7 +315,7 @@ READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS: Dict[Tuple[str, str], Dict[str,
         "model": ("train/api/trainer.py", "TaskTrainer.run"),
         "devices": ("train/api/trainer.py", "TaskTrainer.run"),
         "epochs": ("train/api/run_sequence.py", "train_or_restore"),
-        "checkpoint": ("train/api/run_sequence.py", "build_model"),
+        "init": ("train/api/trainer.py", "TaskTrainer._resolve"),
         "resume_interrupted": ("train/api/trainer.py", "TaskTrainer.run"),
         "metric_args": ("train/api/run_sequence.py", "epoch_zero"),
     },

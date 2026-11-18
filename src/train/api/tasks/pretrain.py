@@ -66,8 +66,9 @@ Interface contract
     :param data: a mapping (``{"dataset": "cifar10"}``), a :class:`~train.api.pretrain_args.PretrainData`, or the path of
         a YAML file holding one.
     :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` /
-        ``checkpoint`` / ``model_args`` and the groups: as in
-        :func:`~train.api.tasks.image_classification.train_image_classification`.
+        ``init`` / ``model_args`` and the groups: as in
+        :func:`~train.api.tasks.image_classification.train_image_classification`; a non-null ``init`` is refused by
+        name before the claim (a pretrain run writes no record, and no other task's family shares its trunk).
     :return: the :class:`~train.api.trainer.TrainResult`.
     :raises ConfigValidationError: for every bad key, listed together.
     :raises ConfigError: for a request that cannot be honoured; see :meth:`~train.api.trainer.TaskTrainer.run`. A family
@@ -165,7 +166,7 @@ class PretrainConfig(StrictConfig):
         default=False,
         metadata={"help": resume_help("an epoch of the larger datasets takes minutes", order=_RESUME_ORDER)},
     )
-    checkpoint: Optional[str] = dataclasses.field(default=None, metadata={"help": RUN_HELP["checkpoint"]})
+    init: Optional[str] = dataclasses.field(default=None, metadata={"help": RUN_HELP["init"]})
     model_args: Dict[str, Any] = dataclasses.field(
         default_factory=dict,
         metadata={
@@ -708,7 +709,7 @@ def train_pretrain(
     devices: Union[int, str, None] = AUTO,
     precision: str = "float32",
     resume_interrupted: bool = False,
-    checkpoint: Union[str, Path, None] = None,
+    init: Union[str, Path, None] = None,
     model_args: Optional[Mapping[str, Any]] = None,
     optim_args: Union[OptimArgs, Mapping[str, Any], None] = None,
     transform_args: Union[PretrainTransformArgs, Mapping[str, Any], None] = None,
@@ -725,7 +726,7 @@ def train_pretrain(
     given = run_request(
         out=out, model=model, data=data, epochs=epochs, batch_size=batch_size, seed=seed,
         devices=devices, precision=precision, resume_interrupted=resume_interrupted,
-        checkpoint=checkpoint, model_args=model_args,
+        init=init, model_args=model_args,
         groups={
             "optim_args": optim_args,
             "transform_args": transform_args,

@@ -37,7 +37,7 @@ import pytest
 from PIL import Image
 
 import train.api.recipes as recipes
-from train.api import cli, data_args, registry
+from train.api import cli, data_args, init_from, registry
 from train.api.cli import coerce_mapping, parse_dotlist
 from train.api.config import AUTO, StrictConfig, validate
 from train.api.errors import ConfigValidationError
@@ -80,7 +80,7 @@ ROWS: Tuple[Row, ...] = (
     Row("devices", "1", 1),
     Row("precision", "mixed_float16", "mixed_float16"),
     Row("resume_interrupted", "true", True),
-    Row("checkpoint", "weights.keras", "weights.keras"),
+    Row("init", "earlier_run", "earlier_run"),
     Row("model_args", '{"dropout_rate": 0.3}', {"dropout_rate": 0.3}),
     Row("data.dataset", "cifar100", "cifar100"),
     Row("data.validation_split", "0.2", 0.2),
@@ -200,6 +200,8 @@ def world():
         # file is about the key reaching its field, and the existence check has its own file
         # (test_the_builtin_sources_are_refused_before_the_claim).
         patch.setattr(data_args, "check_builtin_sources", lambda data: None)
+        # The row `init` names no run directory; the source reader has its own file (test_init_from_runs).
+        patch.setattr(init_from, "read_source", lambda init, trainer, config, context: None)
         recipes.register_builtin_models()
         registry.register_task(
             registry.TaskSpec(

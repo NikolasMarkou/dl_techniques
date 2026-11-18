@@ -26,7 +26,7 @@ import pytest
 
 import train.api.recipes as recipes
 from train.api import cli, registry
-from train.api.errors import ConfigError, ConfigValidationError
+from train.api.errors import ConfigValidationError
 from train.api.tasks import BUILTIN_TASKS, register_builtin_tasks
 from train.api.tasks.image_classification import (
     ImageClassificationTrainer,
@@ -323,44 +323,6 @@ def test_a_mixed_float16_epoch_wraps_the_optimizer_scores_top_k_and_restores_the
     assert np.isfinite(history["top5_accuracy"]).all()
     assert read_json(run_dir, "config.json")["precision"] == "mixed_float16"
     assert result.test_metrics_final["top5_accuracy"] >= 0.0
-
-
-def test_checkpoint_loads_its_weights_into_the_new_model(main, world, tmp_path):
-    _, main_dir = main
-    source = main_dir / "final_model.keras"
-    trained = saved_weights(source)
-
-    class Probe(Scripted):
-        script = (0.5,)
-        at_start = None
-
-        def extra_callbacks(self, config, data):
-            outer = type(self)
-
-            class AtStart(keras.callbacks.Callback):
-                def on_train_begin(self, logs=None):
-                    outer.at_start = [np.array(w) for w in self.model.get_weights()]
-
-            return [AtStart()]
-
-    Probe(make_config(tmp_path / "with", epochs=1, checkpoint=str(source))).run()
-    loaded = Probe.at_start
-    Probe(make_config(tmp_path / "without", epochs=1)).run()
-    fresh = Probe.at_start
-    assert weights_equal(loaded, trained)
-    assert not weights_equal(fresh, trained)
-
-
-def test_a_checkpoint_of_another_architecture_is_a_config_error_naming_the_key(
-    main, world, tmp_path
-):
-    _, main_dir = main
-    with pytest.raises(ConfigError, match="'checkpoint'"):
-        run_function(
-            tmp_path / "run",
-            model="resnet/resnet18",
-            checkpoint=str(main_dir / "final_model.keras"),
-        )
 
 
 # ---------------------------------------------------------------------

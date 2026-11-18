@@ -52,7 +52,7 @@ Interface contract
     :param model: ``"depth_anything/<variant>"``, e.g. ``"depth_anything/vit_s"``.
     :param data: a mapping (``{"root": "/data/megadepth"}``), a :class:`~train.api.depth_args.DepthData`, or the path of a
         YAML file holding one.
-    :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` / ``checkpoint`` /
+    :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` / ``init`` /
         ``model_args`` and the groups: as in :func:`~train.api.tasks.image_classification.train_image_classification`.
     :return: the :class:`~train.api.trainer.TrainResult`.
     :raises ConfigValidationError: for every bad key, listed together.
@@ -90,6 +90,7 @@ from ..config import (
 from ..data_args import DataFacts
 from ..depth_args import (
     BUILTIN,
+    PRETRAINED,
     TASK,
     WATCH_METRIC,
     DepthData,
@@ -101,8 +102,9 @@ from ..depth_args import (
     pretrained_start,
     read_depth_data_file,
 )
-from ..depth_models import JIT_COMPILE
-from ..predictor import build_depth_record, overrides_of_variant
+from ..depth_models import JIT_COMPILE, check_warm_optimizer
+from ..errors import ConfigError
+from ..predictor import DEPTH_CHANNELS, DEPTH_NORMALIZE, build_depth_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
 
@@ -157,7 +159,7 @@ class DepthEstimationConfig(StrictConfig):
                    "epoch of this task's train stream",
         )},
     )
-    checkpoint: Optional[str] = dataclasses.field(default=None, metadata={"help": RUN_HELP["checkpoint"]})
+    init: Optional[str] = dataclasses.field(default=None, metadata={"help": RUN_HELP["init"]})
     model_args: Dict[str, Any] = dataclasses.field(
         default_factory=dict,
         metadata={"help": RUN_HELP["model_args"] + "; model_args.pretrained (default true) starts the encoder from the "
@@ -252,8 +254,30 @@ class DepthEstimationTrainer(TaskTrainer):
 
     @staticmethod
     def _model_kwargs(config: DepthEstimationConfig, context: AutoContext) -> Dict[str, Any]:
-        """Return the family adapter's keywords: the recipe's, then the caller's (the resolver refuses the rest)."""
-        return registry.MODELS[context.family].load_resolver()(context, config.optim_args, config.model_args)
+        """Return the family adapter's keywords: the recipe's, then the caller's (the resolver refuses the rest).
+
+        Under ``init`` the adapter gets ``pretrained=False`` (every weight is replaced, so no official file is read or
+        checked) and the optimizer must still be adamw: the run is a warm start (:meth:`optimizer_options`).
+        """
+        model_args = config.model_args
+        if config.init is not None:
+            # DECISION plan-2026-11-18T072904-0fd54b91/D-004: under init the FACTORY gets pretrained=False and the
+            # weights check is skipped, while the rate and the head's 10x follow the warm start. Do NOT inject
+            # pretrained=False into the request instead (the auto lr would drop to the from-scratch 2e-4) and do NOT
+            # leave pretrained true (the official weights would be read, then overwritten). An explicit pretrained is
+            # refused, so the request's auto lr (which reads it) stays the warm-start rate.
+            if PRETRAINED in model_args:
+                why = ("the official weights would be read and overwritten" if model_args[PRETRAINED] is not False
+                       else "no official weights are read and the run keeps the warm-start rate with the head at 10x; "
+                            f"remove model_args.{PRETRAINED}")
+                raise ConfigError(f"Invalid value for 'model_args.{PRETRAINED}': init replaces every weight, so {why}")
+            model_args = {**model_args, PRETRAINED: False}
+            check_warm_optimizer(config.optim_args)
+        return registry.MODELS[context.family].load_resolver()(context, config.optim_args, model_args)
+
+    def init_identity(self, config: DepthEstimationConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the channels and the scaling this run's record will hold, for an ``init`` source."""
+        return {"channels": DEPTH_CHANNELS, "normalize": DEPTH_NORMALIZE}
 
     def task_record(self, config: DepthEstimationConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
         """Return the depth ``task.json`` record: the size the model is built at (``data.input_shape``, which
@@ -296,7 +320,7 @@ class DepthEstimationTrainer(TaskTrainer):
         return {"jit_compile": JIT_COMPILE}
 
     def optimizer_options(self, config: DepthEstimationConfig, model: Any) -> Dict[str, Any]:
-        """Return the head's 10x table from a pretrained start, nothing from random weights."""
+        """Return the head's 10x table from a warm start (the official weights or ``init``), nothing from random weights."""
         from train.depth_anything.train_depth_anything import decoder_lr_multipliers
 
         if self._built_kwargs is None:
@@ -305,7 +329,7 @@ class DepthEstimationTrainer(TaskTrainer):
         # The legacy table (every trainable variable of the DPT head at 10x, from a pretrained start only) reaches the ONE
         # optimizer the sequence builds, through this seam. Do NOT build an optimizer in the task, and do NOT give a random
         # start the 10x (the paper's 10x is for a random head on a pretrained encoder). An empty table is no option.
-        table = decoder_lr_multipliers(model, pretrained_start(self._built_kwargs))
+        table = decoder_lr_multipliers(model, config.init is not None or pretrained_start(self._built_kwargs))
         return {"lr_multipliers": table} if table else {}
 
     def initial_loss_check(
@@ -569,7 +593,7 @@ def train_depth_estimation(
     devices: Union[int, str, None] = AUTO,
     precision: str = "float32",
     resume_interrupted: bool = False,
-    checkpoint: Union[str, Path, None] = None,
+    init: Union[str, Path, None] = None,
     model_args: Optional[Mapping[str, Any]] = None,
     optim_args: Union[DepthOptimArgs, Mapping[str, Any], None] = None,
     transform_args: Union[DepthTransformArgs, Mapping[str, Any], None] = None,
@@ -586,7 +610,7 @@ def train_depth_estimation(
     given = run_request(
         out=out, model=model, data=data, epochs=epochs, batch_size=batch_size, seed=seed,
         devices=devices, precision=precision, resume_interrupted=resume_interrupted,
-        checkpoint=checkpoint, model_args=model_args,
+        init=init, model_args=model_args,
         groups={
             "optim_args": optim_args,
             "transform_args": transform_args,

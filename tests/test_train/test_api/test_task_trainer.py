@@ -585,38 +585,24 @@ def test_the_task_config_has_exactly_the_fields_the_trainer_reads():
 
 
 # ---------------------------------------------------------------------
-# checkpoint=
+# init= (before the claim; the weight transfer itself is test_init_from_runs's)
 # ---------------------------------------------------------------------
 
 
-def saved_dense(path, name="probe", fill=None):
-    model = keras.Sequential([keras.layers.Input((4,)), keras.layers.Dense(3, name=name)])
-    if fill is not None:
-        model.set_weights([w * 0 + fill for w in model.get_weights()])
-    model.save(path)
-    return model
-
-
-def test_a_checkpoint_that_is_no_file_is_refused_with_the_key(world, tmp_path):
+def test_an_init_that_is_no_directory_is_refused_with_the_key_before_the_claim(world, tmp_path):
     out = tmp_path / "run"
-    with pytest.raises(ConfigError, match="'checkpoint'.*not a file"):
-        ImageClassificationTrainer(make_config(out, checkpoint=str(tmp_path / "nope.keras"))).run()
+    with pytest.raises(ConfigError, match="'init'.*nope does not exist"):
+        ImageClassificationTrainer(make_config(out, init=str(tmp_path / "nope"))).run()
+    assert not out.exists()
 
 
-def test_a_checkpoint_that_shares_no_layer_is_a_config_error(world, tmp_path):
-    other = tmp_path / "other.keras"
-    saved_dense(other, name="unrelated")
-    with pytest.raises(ConfigError, match="'checkpoint'"):
-        ImageClassificationTrainer(make_config(tmp_path / "run", checkpoint=str(other))).run()
-
-
-def test_a_checkpoint_with_a_matching_layer_loads_its_weights(world, tmp_path):
-    source = tmp_path / "source.keras"
-    saved_dense(source, fill=0.5)
-    target = keras.Sequential([keras.layers.Input((4,)), keras.layers.Dense(3, name="probe")])
-    assert not (target.get_weights()[0] == 0.5).all()
-    ImageClassificationTrainer(make_config(tmp_path / "unused"))._load_checkpoint(target, str(source))
-    assert (target.get_weights()[0] == 0.5).all()
+def test_an_init_naming_a_model_file_is_refused_with_the_key_before_the_claim(world, tmp_path):
+    model_file = tmp_path / "source.keras"
+    model_file.write_bytes(b"a file, not a run directory")
+    out = tmp_path / "run"
+    with pytest.raises(ConfigError, match="'init'.*source.keras is a file; give the run directory that holds it"):
+        ImageClassificationTrainer(make_config(out, init=str(model_file))).run()
+    assert not out.exists()
 
 
 # ---------------------------------------------------------------------

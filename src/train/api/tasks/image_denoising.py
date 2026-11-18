@@ -108,7 +108,7 @@ Interface contract
     :param data: a mapping (``{"train_dirs": [...], "val_dirs": [...]}``), a
         :class:`~train.api.denoising_args.DenoisingData`, or the path of a YAML file holding one.
     :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` /
-        ``checkpoint`` / ``model_args`` and the groups: as in
+        ``init`` / ``model_args`` and the groups: as in
         :func:`~train.api.tasks.image_classification.train_image_classification`.
     :return: the :class:`~train.api.trainer.TrainResult`.
     :raises ConfigValidationError: for every bad key, listed together.
@@ -206,8 +206,8 @@ class ImageDenoisingConfig(StrictConfig):
         default=False,
         metadata={"help": resume_help("an epoch of a large set of files can take a long time")},
     )
-    checkpoint: Optional[str] = dataclasses.field(
-        default=None, metadata={"help": RUN_HELP["checkpoint"]}
+    init: Optional[str] = dataclasses.field(
+        default=None, metadata={"help": RUN_HELP["init"]}
     )
     model_args: Dict[str, Any] = dataclasses.field(
         default_factory=dict, metadata={"help": RUN_HELP["model_args"]}
@@ -424,6 +424,11 @@ class ImageDenoisingTrainer(TaskTrainer):
             if "convnext_version" in model_args:  # the bias-free ConvUNext (bfcnn and bfunet hold no such key)
                 stamps["convnext_version"] = model_args["convnext_version"]
         return stamps
+
+    def init_identity(self, config: ImageDenoisingConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the channels and the pixel domain this run's record will hold, for an ``init`` source."""
+        transform_cfg: DenoiseTransformArgs = config.transform_args
+        return {"channels": transform_cfg.channels, "data_range": unit_domain_stamp()}
 
     def check_model_args(self, config: ImageDenoisingConfig, context: AutoContext) -> None:
         # Before the claim: the adapter's own refusals (a key a bias-free family may not take, a layer that would put
@@ -939,7 +944,7 @@ def train_image_denoising(
     devices: Union[int, str, None] = AUTO,
     precision: str = "float32",
     resume_interrupted: bool = False,
-    checkpoint: Union[str, Path, None] = None,
+    init: Union[str, Path, None] = None,
     model_args: Optional[Mapping[str, Any]] = None,
     optim_args: Union[DenoiseOptimArgs, Mapping[str, Any], None] = None,
     transform_args: Union[DenoiseTransformArgs, Mapping[str, Any], None] = None,
@@ -957,7 +962,7 @@ def train_image_denoising(
     given = run_request(
         out=out, model=model, data=data, epochs=epochs, batch_size=batch_size, seed=seed,
         devices=devices, precision=precision, resume_interrupted=resume_interrupted,
-        checkpoint=checkpoint, model_args=model_args,
+        init=init, model_args=model_args,
         groups={
             "optim_args": optim_args,
             "transform_args": transform_args,

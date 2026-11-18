@@ -430,12 +430,16 @@ def test_a_group_without_the_path_form_still_refuses_a_bare_word(seen, capsys):
     assert not seen
 
 
-def test_out_and_checkpoint_accept_a_path_in_python(tmp_path):
+def test_out_and_init_accept_a_path_in_python(tmp_path):
+    from train.api.config import run_request
+
     out = tmp_path / "run"
-    missing = tmp_path / "nope.keras"
-    with pytest.raises(ConfigError, match="'checkpoint'.*not a file") as caught:
-        train_image_classification(out=out, checkpoint=missing, **request_with())
-    # A Path was turned into the text the config holds, in the message and in the files.
+    missing = tmp_path / "no_such_run"
+    with pytest.raises(ConfigError, match="'init'.*does not exist") as caught:
+        train_image_classification(out=out, init=missing, **request_with())
+    # A Path is read as the text it names, and the source is read before the claim: nothing was written.
     assert str(missing) in str(caught.value)
-    assert (out / "config.json").read_text().count(str(out)) == 1
-    assert str(missing) in (out / "config.json").read_text()
+    assert not out.exists()
+    given = run_request(out=out, model="vit/vit_pico", data={}, epochs=1, batch_size=1, seed=1, devices=None,
+                        precision="float32", resume_interrupted=False, init=missing, model_args=None, groups={})
+    assert (given["out"], given["init"]) == (str(out), str(missing))

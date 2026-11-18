@@ -46,7 +46,7 @@ Interface contract
     :param data: a mapping (``{"lookback": 168, "horizon": 24}``), a :class:`~train.api.forecast_args.TimeSeriesData`, or the
         path of a YAML file holding one.
     :param jit_compile: compile with XLA (false by default: one graph on every device); refused for ``ets``.
-    :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` / ``checkpoint`` /
+    :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` / ``init`` /
         ``model_args`` and the groups: as in :func:`~train.api.tasks.image_classification.train_image_classification`.
     :return: the :class:`~train.api.trainer.TrainResult`.
     :raises ConfigValidationError: for every bad key, listed together.
@@ -180,7 +180,7 @@ class TimeSeriesForecastingConfig(StrictConfig):
         default=False,
         metadata={"help": resume_help("an epoch of the synthetic bank takes seconds to minutes", order=_RESUME_ORDER)},
     )
-    checkpoint: Optional[str] = dataclasses.field(default=None, metadata={"help": RUN_HELP["checkpoint"]})
+    init: Optional[str] = dataclasses.field(default=None, metadata={"help": RUN_HELP["init"]})
     model_args: Dict[str, Any] = dataclasses.field(
         default_factory=dict,
         metadata={"help": RUN_HELP["model_args"] + "; model_args.quantile_levels gives prism and xlstm a quantile head"},
@@ -364,11 +364,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         if problem:
             raise ConfigError(problem)
         data_cfg: TimeSeriesData = config.data
-        channels = 1
-        values = None
-        if data_cfg.format == "csv":
-            values, names, _ = read_csv_series(data_cfg.path, data_cfg.value_cols, data_cfg.time_col)
-            channels = int(values.shape[1])
+        values, names, channels = self._series(data_cfg)
         lines = geometry_problems(context.family, channels, data_cfg.horizon, kwargs) + window_problems(
             context.family, context.variant, data_cfg.lookback, data_cfg.horizon, kwargs)
         if lines:
@@ -389,6 +385,19 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             check_csv_level(
                 values, names, lookback=data_cfg.lookback, horizon=data_cfg.horizon, select_fraction=data_cfg.select_fraction,
                 test_fraction=data_cfg.test_fraction, scale_floor=config.transform_args.scale_floor)
+
+    @staticmethod
+    def _series(data_cfg: TimeSeriesData) -> Tuple[Any, Any, int]:
+        """Return ``(values, names, channels)`` of a csv (read once per call), ``(None, None, 1)`` for the builtin bank."""
+        if data_cfg.format != "csv":
+            return None, None, 1
+        values, names, _ = read_csv_series(data_cfg.path, data_cfg.value_cols, data_cfg.time_col)
+        return values, names, int(values.shape[1])
+
+    def init_identity(self, config: TimeSeriesForecastingConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the window and the channels this run's record will hold, for an ``init`` source."""
+        data_cfg: TimeSeriesData = config.data
+        return {"lookback": data_cfg.lookback, "horizon": data_cfg.horizon, "channels": self._series(data_cfg)[2]}
 
     # -- compile --------------------------------------------------------
 
@@ -703,7 +712,7 @@ def train_time_series_forecasting(
     devices: Union[int, str, None] = AUTO,
     precision: str = "float32",
     resume_interrupted: bool = False,
-    checkpoint: Union[str, Path, None] = None,
+    init: Union[str, Path, None] = None,
     model_args: Optional[Mapping[str, Any]] = None,
     jit_compile: bool = False,
     optim_args: Union[OptimArgs, Mapping[str, Any], None] = None,
@@ -722,7 +731,7 @@ def train_time_series_forecasting(
     given = run_request(
         out=out, model=model, data=data, epochs=epochs, batch_size=batch_size, seed=seed,
         devices=devices, precision=precision, resume_interrupted=resume_interrupted,
-        checkpoint=checkpoint, model_args=model_args,
+        init=init, model_args=model_args,
         groups={
             "optim_args": optim_args,
             "transform_args": transform_args,

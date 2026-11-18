@@ -226,10 +226,10 @@ _BACKBONE_FIXED = ("include_top", "head_config_overrides", "name")
 _RESNET_FIXED = _BACKBONE_FIXED + ("enable_deep_supervision",)
 
 #: Keys of the backbone factories the adapters do NOT set but do not offer either: ``pretrained`` (a
-#: classifier's weights loaded into the backbone, which the classes do support) is not offered by these
-#: families yet, because ``checkpoint=`` loads no layer of a classification run into them (measured,
-#: ``scratch_step2/checkpoint_transfer.json``). The adapter never passes it, so the refusal must not
-#: say the adapter sets it (review-iter-1 concern 5).
+#: classifier's weights loaded into the backbone by the factory's own name-matching loader). A
+#: classification run's weights reach ``resnet_seg`` and ``convnext_seg`` through ``init=`` instead,
+#: which maps them under ``backbone/`` weight by weight. The adapter never passes it, so the refusal
+#: must not say the adapter sets it (review-iter-1 concern 5).
 _BACKBONE_NOT_OFFERED = ("pretrained",)
 
 #: The keys of ``model_args`` each family's adapter sets itself.

@@ -50,7 +50,7 @@ Interface contract
         mapping's ``format`` says which; ``builtin`` when absent), or the path of a YAML file
         holding one.
     :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` /
-        ``checkpoint`` / ``model_args`` and the groups: as in
+        ``init`` / ``model_args`` and the groups: as in
         :func:`~train.api.tasks.image_classification.train_image_classification`.
     :return: the :class:`~train.api.trainer.TrainResult`.
     :raises ConfigValidationError: for every bad key, listed together.
@@ -120,6 +120,9 @@ GRID_SAMPLES = 4
 GRID_EVERY = 1
 FINAL_GRID_ROWS = 6
 
+#: What a segmentation record says of its input scaling: the inputs lie in [0, 1] and are never standardized (D-073).
+NORMALIZE = "unit"
+
 # ---------------------------------------------------------------------
 
 
@@ -156,8 +159,8 @@ class ImageSegmentationConfig(StrictConfig):
         default=False,
         metadata={"help": resume_help("an epoch of a large set of files can take a long time")},
     )
-    checkpoint: Optional[str] = dataclasses.field(
-        default=None, metadata={"help": RUN_HELP["checkpoint"]}
+    init: Optional[str] = dataclasses.field(
+        default=None, metadata={"help": RUN_HELP["init"]}
     )
     model_args: Dict[str, Any] = dataclasses.field(
         default_factory=dict, metadata={"help": RUN_HELP["model_args"]}
@@ -257,6 +260,11 @@ class ImageSegmentationTrainer(TaskTrainer):
         """Return what the run was built with, for ``config.json`` (D-050): the model keywords."""
         return {"model_args": recipes.serialize_model_args(self._model_kwargs(config, context))}
 
+    def init_identity(self, config: ImageSegmentationConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the channels and the scaling this run's record will hold, for an ``init`` source: the loader
+        decodes every image to RGB (``SegmentationData.input_shape`` is ``(H, W, 3)``) and never standardizes."""
+        return {"channels": 3, "normalize": NORMALIZE}
+
     def check_model_args(self, config: ImageSegmentationConfig, context: AutoContext) -> None:
         # Before the claim: the adapter's own keys are refused by the resolver, and each side of
         # the image size must be a multiple of the family's stride (D-072), which depends on the
@@ -283,7 +291,7 @@ class ImageSegmentationTrainer(TaskTrainer):
             class_names=data.class_names,
             input_size=data.input_size,
             channels=data.input_shape[-1],
-            normalize="unit",
+            normalize=NORMALIZE,
             mean=data.mean,
             std=data.std,
             ignore_index=data.ignore_index,
@@ -733,7 +741,7 @@ def train_image_segmentation(
     devices: Union[int, str, None] = AUTO,
     precision: str = "float32",
     resume_interrupted: bool = False,
-    checkpoint: Union[str, Path, None] = None,
+    init: Union[str, Path, None] = None,
     model_args: Optional[Mapping[str, Any]] = None,
     optim_args: Union[OptimArgs, Mapping[str, Any], None] = None,
     transform_args: Union[SegTransformArgs, Mapping[str, Any], None] = None,
@@ -751,7 +759,7 @@ def train_image_segmentation(
     given = run_request(
         out=out, model=model, data=data, epochs=epochs, batch_size=batch_size, seed=seed,
         devices=devices, precision=precision, resume_interrupted=resume_interrupted,
-        checkpoint=checkpoint, model_args=model_args,
+        init=init, model_args=model_args,
         groups={
             "optim_args": optim_args,
             "transform_args": transform_args,

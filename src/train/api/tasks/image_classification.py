@@ -66,8 +66,9 @@ Interface contract
         whose data (class names, statistics, split sizes) is no longer the data it started
         with, one a live process holds (``run.lock``) and one whose backup has no sound copy
         are refused (exit 2).
-    :param checkpoint: a ``.keras`` model (a ``str`` or a ``Path``) whose layers
-        of the same names give their weights to the new model.
+    :param init: the directory of an earlier ``python -m train`` run (a ``str`` or a ``Path``; a
+        relative path starts at the repo root) whose weights start the new model; its ``task.json``,
+        ``config.json`` and ``best_model.keras`` are checked before the run directory is claimed.
     :param model_args: keywords of the family factory; they win over the recipe's.
     :param optim_args: / ``transform_args`` / ``metric_args`` /
         ``checkpoint_args`` / ``logger_args`` / ``analysis_args`` /
@@ -173,8 +174,8 @@ class ImageClassificationConfig(StrictConfig):
         default=False,
         metadata={"help": resume_help("an ImageNet epoch is hours")},
     )
-    checkpoint: Optional[str] = dataclasses.field(
-        default=None, metadata={"help": RUN_HELP["checkpoint"]}
+    init: Optional[str] = dataclasses.field(
+        default=None, metadata={"help": RUN_HELP["init"]}
     )
     model_args: Dict[str, Any] = dataclasses.field(
         default_factory=dict, metadata={"help": RUN_HELP["model_args"]}
@@ -321,6 +322,19 @@ class ImageClassificationTrainer(TaskTrainer):
         # supplies, a double weight decay and a fixed variant key (a ViT's ``scale``), which
         # used to surface only after the run directory was claimed.
         self._model_kwargs(config, context)
+
+    def init_identity(self, config: ImageClassificationConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the channels and the scaling this run's record will hold, for an ``init`` source.
+
+        A built-in dataset's channels are the dataset table's, or the recipe loader's repeat (convnext reads
+        MNIST as 3 channels); file data is decoded to RGB. ``builtin_facts`` has imported the table already.
+        """
+        channels = 3
+        if config.data.format == "builtin":
+            from dl_techniques.datasets.vision.classification import get_spec
+
+            channels = context.defaults.get("loader", {}).get("channels") or get_spec(context.dataset).input_shape[-1]
+        return {"channels": channels, "normalize": config.transform_args.normalize}
 
     def metric_names(self, config: ImageClassificationConfig, facts: DataFacts) -> List[str]:
         # DECISION plan-2026-10-30T132432-a865fa08/D-055: names only. Do NOT build the
@@ -596,7 +610,7 @@ def train_image_classification(
     devices: Union[int, str, None] = AUTO,
     precision: str = "float32",
     resume_interrupted: bool = False,
-    checkpoint: Union[str, Path, None] = None,
+    init: Union[str, Path, None] = None,
     model_args: Optional[Mapping[str, Any]] = None,
     optim_args: Union[OptimArgs, Mapping[str, Any], None] = None,
     transform_args: Union[TransformArgs, Mapping[str, Any], None] = None,
@@ -613,7 +627,7 @@ def train_image_classification(
     given = run_request(
         out=out, model=model, data=data, epochs=epochs, batch_size=batch_size, seed=seed,
         devices=devices, precision=precision, resume_interrupted=resume_interrupted,
-        checkpoint=checkpoint, model_args=model_args,
+        init=init, model_args=model_args,
         groups={
             "optim_args": optim_args,
             "transform_args": transform_args,

@@ -36,8 +36,8 @@ Interface contract
         missing, or was started with another request; ``smoke`` with an
         explicit ``epochs``, a field out of range, an optimizer configuration
         that cannot be built, a ``watch_metric`` the task does not report, a
-        ``devices`` index outside the visible GPUs) or after (an unusable
-        ``checkpoint``, a value the data loader or the model factory refuses,
+        ``devices`` index outside the visible GPUs, an ``init`` source that is not a
+        run this one can start from) or after (a value the data loader or the model factory refuses,
         a monitor the compiled model does not report); a refusal after the
         claim says that ``out`` is now used and to choose a new one.
     :raises RuntimeError: for a non-finite initial loss, a diverged fit (the
@@ -60,7 +60,7 @@ Interface contract
        ``Resolved args:`` is logged and ``write_resolved`` writes ``config.json``;
     4. (the data is described in step 1 and loaded in step 5)
     5. ``build_data`` (a resume then checks the data against ``task.json`` and settles the
-       backup, D-069), ``build_model``, the optional ``checkpoint`` weights,
+       backup, D-069), ``build_model``, the optional ``init`` weights,
        ``compile`` through ``optim.py``;
     6. ``initial_loss_check``;
     7. callbacks: ``LearningRateLogger(at_epoch_start=True)`` first, then
@@ -256,7 +256,7 @@ Hooks (override in a task)
     Default: ``{}``, and the call is exactly the three-argument call of every earlier task (D-012).
 ``optimizer_options(config, model)``
     Options for the optimizer the run builds, called once with the BUILT model (after the optional
-    ``checkpoint`` load) and passed to :func:`train.api.optim.build_optimizer_and_schedule` as
+    ``init`` weights) and passed to :func:`train.api.optim.build_optimizer_and_schedule` as
     ``options``. A mapping whose keys are in :data:`train.api.optim.OPTION_KEYS`: ``lr_multipliers``,
     a variable path (or ``/``-bounded prefix) -> learning-rate multiplier table, which makes the
     optimizer an ``LRMultiplierAdamW`` and is adamw-only. Any other key, or a non-empty table with
@@ -301,6 +301,12 @@ Hooks (override in a task)
 ``check_model_args(config, context)``
     Optional. Raises ``ConfigError`` for a model argument the run cannot honour, called with the
     resolved config before the run directory is claimed. Default: nothing is checked.
+``init_identity(config, context)``
+    What this run's ``task.json`` will say about its input, before the claim and without TensorFlow: a
+    mapping of record keys (``channels``, ``lookback``, ``horizon``, ``normalize``, ``data_range``; only those
+    the task's record has). An ``init`` source's record is compared with it (the family's ``fixed`` keys and
+    the input scaling, :func:`train.api.init_from.read_source`). Called only when ``init`` is set and the run
+    is not a resume. Default: refuses ``init``, naming the task (pretrain keeps it).
 ``used_arguments(config, context)``
     A JSON-plain mapping written to ``config.json`` under the key ``used``: what
     the run is built with beyond the config's fields (D-050). Default: empty, which
@@ -349,7 +355,7 @@ CONFIG_FIELDS = (
     "devices",
     "precision",
     "resume_interrupted",
-    "checkpoint",
+    "init",
     "model_args",
     "optim_args",
     "transform_args",
@@ -739,6 +745,13 @@ class TaskTrainer:
         model is built is refused with no trace. Default: nothing is checked.
         """
 
+    def init_identity(self, config: StrictConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return this run's record-keyed input geometry and scaling for an ``init`` source; default: refuse ``init``.
+
+        :raises ConfigError: always, naming the task: a task that does not override this takes no earlier weights.
+        """
+        raise ConfigError(f"Invalid value for 'init': the task {self.task!r} does not start from earlier weights")
+
     def used_arguments(self, config: StrictConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run is built with beyond the config, for ``config.json``.
 
@@ -972,6 +985,15 @@ class TaskTrainer:
                 changes["data"] = dataclasses.replace(data_cfg, max_samples=SMOKE_MAX_SAMPLES)
         resolved = dataclasses.replace(config, **changes)
         assert_resolved(resolved)
+        # DECISION plan-2026-11-18T072904-0fd54b91/D-011: the init source is read HERE, before the claim and before
+        # every other pre-claim check (its refusals are the cheapest and name the key the user typed). Do NOT move it
+        # after ``open_run``: a source that cannot seed this run would leave a claimed directory behind. A resume
+        # never reads the source (D-016).
+        self._init_source = None
+        if config.init is not None and not config.resume_interrupted:
+            from . import init_from
+
+            self._init_source = init_from.read_source(config.init, self, resolved, context)
         self._notices = self._recipe_notices(config, resolved, facts, family, recipe)
         self._refuse_before_the_claim(resolved, facts)
         self.check_model_args(resolved, context)
@@ -1104,27 +1126,6 @@ class TaskTrainer:
     # Pieces
     # -----------------------------------------------------------------
 
-
-    def _load_checkpoint(self, model: Any, checkpoint: str) -> None:
-        """Copy weights from ``checkpoint`` into the built ``model``, or refuse."""
-        from dl_techniques.utils.logger import logger
-        from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-
-        if not Path(checkpoint).is_file():
-            raise ConfigError(
-                f"Invalid value for 'checkpoint': {checkpoint!r} is not a file; give "
-                "the path of a .keras model"
-            )
-        try:
-            report = load_weights_from_checkpoint(model, checkpoint)
-        except ValueError as exc:
-            raise ConfigError(f"Invalid value for 'checkpoint': {exc}") from exc
-        if report.num_loaded == 0:
-            raise ConfigError(
-                f"Invalid value for 'checkpoint': {checkpoint!r} loaded no layer into "
-                "the model, so it is not a checkpoint of this architecture"
-            )
-        logger.info(report.summary_string())
 
     def _callbacks(
         self,

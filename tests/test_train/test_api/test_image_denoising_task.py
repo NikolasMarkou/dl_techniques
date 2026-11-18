@@ -756,22 +756,19 @@ def test_a_model_that_learned_nothing_is_below_its_input_and_the_run_exits_1_wit
 
 
 # ---------------------------------------------------------------------
-# checkpoint= warm start
+# init= warm start: what is refused before the claim (the transfer itself is test_init_from_runs's)
 # ---------------------------------------------------------------------
 
 
-def test_a_checkpoint_warm_starts_the_model_and_the_validation_set_is_the_same(world, folders, tmp_path):
-    first = train_image_denoising(**mapping(tmp_path / "first", folders, "bfcnn"))
-    first_summary = read_json(first.summary_path)
-    final_model = Path(first.run_dir) / "final_model.keras"
-    warm = train_image_denoising(**mapping(tmp_path / "warm", folders, "bfcnn", epochs=1, checkpoint=str(final_model)))
-    cold = train_image_denoising(**mapping(tmp_path / "cold", folders, "bfcnn", epochs=1))
-    warm_summary, cold_summary = read_json(warm.summary_path), read_json(cold.summary_path)
-    # The first run's last epoch scored these weights on this very validation set: the warm start's epoch 0 is that score.
-    last = read_json(Path(first.run_dir) / "training_history.json")["val_loss"][-1]
-    assert warm_summary["initial_loss_sanity_eval"]["loss"] == pytest.approx(last, rel=1e-5)
-    assert cold_summary["initial_loss_sanity_eval"]["loss"] != pytest.approx(last, rel=1e-3)
-    assert warm_summary["input_psnr"] == first_summary["input_psnr"] == cold_summary["input_psnr"]
+def test_init_warm_starts_from_a_run_directory_and_a_model_file_is_refused_before_the_claim(world, folders, tmp_path):
+    model_file = tmp_path / "first" / "final_model.keras"
+    model_file.parent.mkdir()
+    model_file.write_bytes(b"a model file, not a run directory")
+    out = tmp_path / "warm"
+    with pytest.raises(ConfigError, match=r"'init': .*final_model\.keras is a file; give the run directory that "
+                                          r"holds it"):
+        train_image_denoising(**mapping(out, folders, "bfcnn", epochs=1, init=str(model_file)))
+    assert not out.exists()
 
 
 # ---------------------------------------------------------------------

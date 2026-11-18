@@ -32,7 +32,12 @@ Interface contract
     The family's ``resolve_model_args``. :return: the factory keywords, the recipe's then the caller's.
     :raises ConfigValidationError: naming every refused key at once. :raises ConfigError: for an sgd weight decay (no
         model regularizer is built), an optimizer other than adamw on a pretrained start (the head's 10x table is
-        ``LRMultiplierAdamW``'s), and a missing weights file (:func:`check_weights`). The task calls it before the claim.
+        ``LRMultiplierAdamW``'s, :func:`check_warm_optimizer`), and a missing weights file (:func:`check_weights`). The
+        task calls it before the claim.
+
+``check_warm_optimizer(optim_args)``
+    :raises ConfigError: for an optimizer other than adamw on a warm start: the official weights (the resolver) or
+        ``init`` (the task, which hands the resolver ``pretrained=False`` under ``init``).
 
 ``factory_signatures()`` / ``signature_census(signatures=None)``
     The denoising pattern: ``{"unclassified": [...], "stale": [...]}``, the parameters of the callables in
@@ -224,13 +229,20 @@ def resolve_depth_args(context: AutoContext, optim_args: OptimArgs, model_args: 
     lines = problems_of(merged)
     if lines:
         raise ConfigValidationError(lines)
-    optimizer = str(optim_args.optimizer).strip().lower()
-    if pretrained_start(merged) and optimizer != "adamw":
-        raise ConfigError(
-            f"Invalid value for 'optim_args.optimizer': a pretrained start trains the DPT head at 10x the encoder's rate, "
-            f"a table only adamw takes, got {optimizer!r}; use adamw, or set model_args.{PRETRAINED}=false")
+    if pretrained_start(merged):
+        check_warm_optimizer(optim_args)
     check_weights(context.variant, merged)
     return merged
+
+
+def check_warm_optimizer(optim_args: OptimArgs) -> None:
+    """Refuse an optimizer other than adamw for a warm start (the official weights, or ``init``); see the module contract."""
+    optimizer = str(optim_args.optimizer).strip().lower()
+    if optimizer != "adamw":
+        raise ConfigError(
+            f"Invalid value for 'optim_args.optimizer': a warm start (the official DINOv2 weights or init) trains the DPT "
+            f"head at 10x the encoder's rate, a table only adamw takes, got {optimizer!r}; use adamw, or train from "
+            f"random weights (model_args.{PRETRAINED}=false, no init)")
 
 
 # ---------------------------------------------------------------------
