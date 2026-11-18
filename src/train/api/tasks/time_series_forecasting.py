@@ -731,7 +731,6 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
                 "binds": bool(self._epoch_zero < min(baselines["naive_last"], baselines["seasonal_naive"])),
             },
             "canonical_metrics": canonical,
-            **({"epoch_zero_of": "init"} if config.init is not None else {}),
         }
         return Evaluation(
             test_metrics_best=test_best,

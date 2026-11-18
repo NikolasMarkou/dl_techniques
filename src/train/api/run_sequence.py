@@ -663,7 +663,7 @@ def epoch_zero(run: Run) -> None:
     )
     run.summary_head = trainer._summary_head(
         config, run.family, run.variant, run_dir, data, run.params, baseline,
-        run.initial_ratio, run.init_warning, run.devices,
+        run.initial_ratio, run.init_warning, run.devices, run.init_block,
     )
 
 
@@ -865,8 +865,8 @@ def report(run: Run) -> TrainResult:
         )
         if blocked:
             summary["success_blocked_by"] = list(blocked)
-        if run.init_block is not None:
-            summary.update(init_from.bias_of(run.init_block))
+        if trainer._loaded is not None:  # the loaded weights' epoch-zero success value, which the bar had to beat
+            summary["loaded_success_value"] = trainer._loaded
         # DECISION plan-2026-11-10T095307-d483ffab/D-004
         # The task's post-fit keys come through the VALUE ``evaluate_and_report`` returns, merged last
         # and never over a key the summary holds. Do NOT stash them on the trainer during

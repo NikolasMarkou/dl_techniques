@@ -1193,8 +1193,10 @@ class TaskTrainer:
         initial_ratio: Optional[float],
         init_warning: Optional[bool],
         devices: Dict[str, Any],
+        init_block: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Keys every summary carries, whether the run finished or diverged."""
+        """Keys every summary carries, whether the run finished or diverged; under ``init`` also the run's
+        ``task.json`` ``init`` block, ``epoch_zero_of: "init"`` and the split flags (:func:`init_from.bias_of`)."""
         metric_cfg: MetricArgs = config.metric_args
         optim_cfg: OptimArgs = config.optim_args
         return {
@@ -1235,6 +1237,8 @@ class TaskTrainer:
             },
             "initial_loss_ratio": initial_ratio,
             "init_scale_warning": init_warning,
+            **({} if init_block is None else
+               {"init": init_block, "epoch_zero_of": "init", **init_from.bias_of(init_block)}),
             "gpu_name": devices["gpu_name"],
             "tf_visible_devices": devices["tf_visible_devices"],
             "cuda_visible_devices": devices["cuda_visible_devices"],

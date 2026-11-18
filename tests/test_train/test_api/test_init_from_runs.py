@@ -26,6 +26,9 @@ and two real tiny runs check the record, the summary flags, the success line and
 The ``bar`` tests (D-013): under ``init`` a classification, segmentation or denoising run must also beat the loaded
 weights' epoch-zero success value, read from the fit sidecar (also on a resume); a stub sidecar drives the real bars,
 and runs at a 1e-30 learning rate (no float32 weight moves) miss the bar their absolute threshold alone would pass.
+
+The ``record`` tests (D-014): the summary of a fine-tuned run holds its ``task.json`` block, the flags and the loaded
+weights' value its bar compared; it predicts and exports with its source gone; each record kind takes the block.
 """
 
 import builtins
@@ -817,6 +820,8 @@ def test_wire_tirex_at_a_longer_lookback_copies_every_weight(world, tmp_path):
     source = archive_weights(tmp_path / "source")
     block = record_of(tmp_path / "run")["init"]
     assert block["geometry"]["lookback"] == 32 and record_of(tmp_path / "run")["lookback"] == 64
+    summary = summary_of(tmp_path / "run")  # epoch_zero_of once, from the head, not again from the task's extras
+    assert (summary["epoch_zero_of"], summary["init"]) == ("init", block) and "loaded_success_value" not in summary
     assert block["transfer"]["copied"] == len(source) == len(start)
     assert all(not block["transfer"][key] for key in ("reset", "grown", "dropped", "resampled"))
     check_copied(block, start, source)
@@ -842,6 +847,7 @@ def test_wire_depth_at_a_larger_side_copies_every_weight_and_reads_no_official_f
     source = archive_weights(source_dir)
     block = record_of(out)["init"]
     assert block["geometry"]["input_size"] == [28, 28] and record_of(out)["input_size"] == [42, 42]
+    assert (summary_of(out)["epoch_zero_of"], summary_of(out)["init"]) == ("init", block)
     assert block["transfer"]["copied"] == len(source) == len(start)
     assert all(not block["transfer"][key] for key in ("reset", "grown", "dropped", "resampled"))
     check_copied(block, start, source)
@@ -1214,3 +1220,74 @@ def test_bar_a_segmenter_that_does_not_improve_on_its_loaded_weights_misses(worl
     summary = summary_of(out)
     assert result.success is False and summary["success"] is False
     assert summary["success_value"] == pytest.approx(loaded, abs=1e-6) and loaded >= summary["success_threshold"]
+
+
+# ---------------------------------------------------------------------
+# record: the summary of a fine-tuned run, and its predict and export with the source gone
+# ---------------------------------------------------------------------
+
+#: The summary keys an ``init`` run adds; a run without ``init`` has none of them.
+INIT_SUMMARY_KEYS = {"init", "epoch_zero_of", "selection_biased", "test_biased", "overlap_unknown",
+                     "loaded_success_value"}
+
+
+def test_record_the_summary_holds_the_init_block_and_what_the_bar_compared(vit_source, vit_64):
+    summary, block = summary_of(vit_64.out), record_of(vit_64.out)["init"]
+    assert summary["init"] == block and block["transfer"]["copied"] > 0  # the counts are the task.json block's
+    assert summary["epoch_zero_of"] == "init"
+    assert {key: summary[key] for key in init_from.bias_of(block)} == init_from.bias_of(block)
+    sidecar = json.loads((vit_64.out / "checkpoints" / "fit_state.json").read_text())
+    assert summary["loaded_success_value"] == sidecar["initial"]["metrics"]["accuracy"]
+    assert summary["initial_loss_ratio"] is None and init_from.NOT_JUDGED_UNDER_INIT in summary["notes"]
+    assert not INIT_SUMMARY_KEYS & set(summary_of(vit_source))
+
+
+def test_record_a_fine_tuned_run_loads_predicts_and_exports_at_its_size_with_its_source_renamed_away(vit_64, tmp_path):
+    from train.api.exporting import export
+
+    image = tmp_path / "image.png"
+    Image.fromarray(np.random.default_rng(3).integers(0, 255, (64, 64, 3)).astype(np.uint8)).save(image)
+    moved = vit_64.source.with_name("moved_for_predict")
+    vit_64.source.rename(moved)
+    try:
+        loaded = predictor.load_model(vit_64.out)
+        answer = loaded.predict(str(image))
+        target = export(model=loaded.model, out=tmp_path / "exported.keras", format="keras",
+                        input_shape=loaded.record["input_shape"], record=loaded.record)
+        beside = json.loads(Path(f"{target}.task.json").read_text())
+        again = predictor.load_model(target).predict(str(image))
+    finally:
+        moved.rename(vit_64.source)
+    assert loaded.record["input_shape"] == [64, 64, 3] and beside["init"] == record_of(vit_64.out)["init"]
+    assert sorted(answer["labels"]) == HUNDRED and again["labels"] == answer["labels"]
+    np.testing.assert_allclose(again["scores"], answer["scores"], atol=1e-5)
+
+
+#: One record of each of the five kinds, built by the predictor's own builders.
+RECORD_KINDS = {
+    "image_classification": classification_record,
+    "image_segmentation": segmentation_record,
+    "image_denoising": lambda: predictor.build_denoising_record(
+        model="bfunet/tiny", family="bfunet", variant="tiny", channels=3, size_multiple=8),
+    "time_series_forecasting": forecast_record,
+    "depth_estimation": depth_record,
+}
+
+
+@pytest.mark.parametrize("kind", sorted(RECORD_KINDS))
+def test_record_every_kind_takes_a_well_formed_init_block_and_refuses_an_unknown_key_in_it(kind):
+    block = {"source": "/runs/a", "file": "best_model.keras", "sha256": "0" * 64, "task": kind, "family": "f",
+             "variant": "v", "geometry": {"input_shape": [32, 32, 3]}, "relation": "same_task", "pinned": {},
+             "transfer": {"copied": 3, "resampled": [{"path": "t", "rule": "vit_pos_bicubic", "from": [1, 5],
+                                                     "to": [1, 17]}], "reset": ["h/kernel"], "grown": [],
+                          "dropped": []},
+             "split": init_from.split_block("unknown", init_from.NOT_REBUILT)}
+    record = {**RECORD_KINDS[kind](), "init": block}
+    assert record["task"] == kind and predictor.record_problems(record) == []
+    for where in ("init", "init.transfer", "init.split"):
+        broken = json.loads(json.dumps(record))
+        part = broken
+        for name in where.split("."):
+            part = part[name]
+        part["extra"] = 1
+        assert any(f"{where!r} has unknown key(s) 'extra'" in line for line in predictor.record_problems(broken)), where

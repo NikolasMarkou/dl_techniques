@@ -585,7 +585,6 @@ class DepthEstimationTrainer(TaskTrainer):
         extras: Dict[str, Any] = {
             "baselines": dict(baselines),
             "epoch_zero": {"val_loss": epoch_zero, "binds": bool(math.isfinite(epoch_zero) and epoch_zero < terms)},
-            **({"epoch_zero_of": "init"} if config.init is not None else {}),
             "held_out": held_out,
         }
         return Evaluation(
