@@ -487,9 +487,11 @@ def merge_model_args(
     computed: Mapping[str, Any],
     fixed: Tuple[str, ...] = (),
 ) -> Dict[str, Any]:
-    """Lay the recipe's data, the computed values and the caller's keys, in that order.
+    """Lay the recipe's data, the computed values, an ``init`` source's pins and the caller's keys, in that order.
 
     :param computed: the keys the family derives from the data and the optimizer.
+    :param context: its ``pinned`` arguments (an ``init`` source's) replace the computed ones; a caller's value
+        that differs from a pin is refused by name (the source's own value is accepted).
     :param fixed: keys of the variant's table that the family's factory sets itself and cannot
         take as an override (measured: a ViT's ``scale`` raises ``TypeError``, "multiple values
         for keyword argument"); naming one in ``model_args`` is refused here, which a task
@@ -523,8 +525,19 @@ def merge_model_args(
             "optimizer already decays the weights, a regularizer would apply "
             "the decay twice; set it to null or use optim_args.optimizer=sgd"
         )
+    changed = [key for key, value in context.pinned.items() if key in model_args and model_args[key] != value]
+    if changed:
+        raise ConfigError(
+            f"Invalid value for 'model_args.{changed[0]}': the source was built with "
+            f"{changed[0]}={context.pinned[changed[0]]!r} and init keeps the source's architecture"
+        )
     merged: Dict[str, Any] = dict(context.defaults.get("model_args", {}))
     merged.update(computed)
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-010
+    # The pins go OVER the computed values (a vit source at 32 px keeps patch 4 at 64 px, where the rule above gives
+    # 16) and under the caller's keys, which may only repeat them. Do NOT lay them under the computed values or let a
+    # differing caller value win: the source's weights fit only the source's architecture.
+    merged.update(context.pinned)
     merged.update(model_args)
     return merged
 

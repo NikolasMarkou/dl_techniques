@@ -990,10 +990,21 @@ class TaskTrainer:
         # after ``open_run``: a source that cannot seed this run would leave a claimed directory behind. A resume
         # never reads the source (D-016).
         self._init_source = None
-        if config.init is not None and not config.resume_interrupted:
+        if config.init is not None:
             from . import init_from
 
-            self._init_source = init_from.read_source(config.init, self, resolved, context)
+            if config.resume_interrupted:
+                # DECISION plan-2026-11-18T072904-0fd54b91/D-018
+                # A resume takes its pins from the run's OWN task.json init block, written once before its first
+                # fit, so the rebuilt model is the one the backup was saved from. Do NOT read the source here (it
+                # may be moved or rewritten, D-016) and do NOT re-derive the pins from the request: the recipe
+                # would give a 64 px vit patch 16, which the backup of a patch-4 model does not fit.
+                recorded = init_from.recorded_init(resolve_out(config.out, self.task, family, variant))
+                pins = recorded["pinned"] if recorded is not None else {}
+            else:
+                self._init_source = init_from.read_source(config.init, self, resolved, context)
+                pins = self._init_source.pins
+            context = dataclasses.replace(context, pinned=dict(pins))
         self._notices = self._recipe_notices(config, resolved, facts, family, recipe)
         self._refuse_before_the_claim(resolved, facts)
         self.check_model_args(resolved, context)

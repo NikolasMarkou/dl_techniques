@@ -14,7 +14,9 @@ The pre-claim half, :func:`read_source`, checks a source run directory before th
 claimed: its files, its record, the task and family pair, the family's ``fixed`` geometry and the
 input scaling against what this run will record, the pinned factory arguments, and the archive's
 sha256. It reads JSON and hashes bytes; it loads no model, and for an absolute path imports no
-TensorFlow, Keras or numpy.
+TensorFlow, Keras or numpy. After the claim, :func:`transfer` loads the source model, copies its
+weights into the run's freshly built model, hashes the archive again and returns the ``init`` block
+of ``task.json``. A resume never reads the source: :func:`recorded_init` reads the run's own block.
 
 Nothing here imports TensorFlow, Keras or numpy at module scope (``registry`` rows import the
 declarations, and ``python -m train help`` stays light); numpy and the DINOv2 bicubic matrix are
@@ -67,7 +69,24 @@ Interface contract
         is missing; the record fails the predictor's record check or ``config.json`` is no JSON object; the
         source's task and family are neither this run's nor a declared cross-task pair; a ``fixed`` key of
         this family or the input scaling differs; a pinned argument is not recorded in the source's
-        ``config.json`` ``used.model_args``, or the request's ``model_args`` gives it another value.
+        ``config.json`` ``used.model_args``. (A request ``model_args`` value other than a pin is refused by
+        :func:`train.api.recipes.merge_model_args` when the task checks its model arguments, also before the claim.)
+
+``transfer(source, model, task, family, variant, record)``
+    :param source: the :class:`Source` :func:`read_source` returned before the claim.
+    :param model: this run's freshly built model (its pins applied).
+    :param task: this run's task; ``record``: the ``task.json`` record this run will write, whose
+        :data:`HEAD_KEYS` say whether a same-task head means what the source's means.
+    :return: the ``init`` block (keys in :data:`train.api.predictor.INIT_KEYS`). The source model is
+        released before it returns.
+    :raises ConfigError: the source does not load (the predictor's checks), the engine refuses (nothing
+        is copied), or ``best_model.keras`` hashes to another sha256 than before the claim (both named;
+        the copied weights must not be trained).
+
+``recorded_init(run_dir)``
+    :return: the ``init`` block of ``<run_dir>/task.json``, or ``None`` when the run has no ``task.json``
+        (a resume of such a run is refused by the run directory's own checks: it has no backup).
+    :raises ConfigError: the record fails its check, or holds no ``init`` block.
 
 ``vit_pos_bicubic(value, target_shape)``
     :param value: a ``(1, 1 + m * m, d)`` table, class row first, then the row-major grid.
@@ -346,18 +365,13 @@ def _check_identity(family: str, task: str, spec: TransferSpec, source: Mapping[
                            f"{SCALING_WORDS.get(ours, f'has {ours}')} (transform_args.normalize)")
 
 
-def _pins(path: Path, spec: TransferSpec, used: Mapping[str, Any], asked: Mapping[str, Any]) -> Dict[str, Any]:
-    pins: Dict[str, Any] = {}
-    for key in spec.pinned:
-        if key not in used:
-            raise _refuse_init(f"{path / 'config.json'} records no used.model_args.{key}, which init keeps from the "
-                               "source (the family derives it from the data, so a source without it cannot say "
-                               "how it was built)")
-        if key in asked and asked[key] != used[key]:
-            raise ConfigError(f"Invalid value for 'model_args.{key}': the source was built with {key}={used[key]!r} "
-                              "and init keeps the source's architecture")
-        pins[key] = used[key]
-    return pins
+def _pins(path: Path, spec: TransferSpec, used: Mapping[str, Any]) -> Dict[str, Any]:
+    missing = [key for key in spec.pinned if key not in used]
+    if missing:
+        raise _refuse_init(f"{path / 'config.json'} records no used.model_args.{missing[0]}, which init keeps from the "
+                           "source (the family derives it from the data, so a source without it cannot say "
+                           "how it was built)")
+    return {key: used[key] for key in spec.pinned}
 
 
 def _sha256(path: Path) -> str:
@@ -397,8 +411,94 @@ def read_source(init: Any, trainer: Any, config: Any, context: Any) -> Source:
                            f"weights from {_declared_sources(task, family, spec)}")
     _check_identity(family, task, spec, record, identity)
     used = (recorded.get("used") or {}).get("model_args") or {}
-    pins = _pins(path, spec, used, config.model_args or {}) if relation is None else {}
+    pins = _pins(path, spec, used) if relation is None else {}
     return Source(path, record, recorded, _sha256(path / "best_model.keras"), relation, pins)
+
+
+# ---------------------------------------------------------------------
+# After the claim: the transfer and its record; on a resume, the run's own record
+# ---------------------------------------------------------------------
+
+#: The record keys that say what a task's head means: a same-task head is copied only when the two records agree on
+#: every one; across tasks it is always fresh. Depth has one output whose meaning never changes.
+HEAD_KEYS: Dict[str, Tuple[str, ...]] = {
+    "image_classification": ("class_names",),
+    "image_segmentation": ("class_names",),
+    "image_denoising": ("channels",),
+    "time_series_forecasting": ("horizon", "head", "quantile_levels", "channels"),
+    "depth_estimation": (),
+}
+
+#: The source record's keys the ``init`` block keeps as its geometry (those its task's record has).
+GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon")
+
+
+def head_differs(task: str, source_record: Mapping[str, Any], target_record: Mapping[str, Any]) -> bool:
+    """Whether a same-task source's head means something else than this run's (:data:`HEAD_KEYS`)."""
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-008
+    # Compare the record VALUES (class names as ordered lists), never the head's shape or the class count: 10 other
+    # classes, or the same 10 in another order, fit a 10-way head and would be copied as if they were the same, a
+    # head that silently answers with the wrong names.
+    return any(source_record.get(key) != target_record.get(key) for key in HEAD_KEYS[task])
+
+
+def block_of(source: Source, plan: TransferPlan) -> Dict[str, Any]:
+    """The ``init`` block of ``task.json``: where the weights came from and what the transfer did with them."""
+    record = source.record
+    return {
+        "source": str(source.path),
+        "file": SOURCE_FILES[2],
+        "sha256": source.sha256,
+        "task": record["task"],
+        "family": record["family"],
+        "variant": record["variant"],
+        "geometry": {key: record[key] for key in GEOMETRY_KEYS if key in record},
+        "relation": "same_task" if source.relation is None else "cross_task",
+        "pinned": dict(source.pins),
+        "transfer": {
+            "copied": len(plan.copied),
+            "resampled": [{"path": path, "rule": rule, "from": list(before), "to": list(after)}
+                          for path, rule, before, after in plan.resampled],
+            "reset": list(plan.reset),
+            "grown": list(plan.grown),
+            "dropped": list(plan.dropped),
+        },
+    }
+
+
+def transfer(source: Source, model: Any, task: str, family: str, variant: str,
+             record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Copy the source run's weights into ``model`` after the claim (contract in the module docstring)."""
+    from .predictor import load_model
+
+    loaded = load_model(source.path).model
+    reset = source.relation is None and head_differs(task, source.record, record)
+    plan = plan_transfer(loaded, model, registry.MODELS[family].transfer, source.relation, reset,
+                         name=f"{family}/{variant}")
+    apply(plan)
+    block = block_of(source, plan)
+    del loaded, plan  # the source model is released here, before the optimizer is built
+    archive = source.path / SOURCE_FILES[2]
+    again = _sha256(archive)
+    if again != source.sha256:
+        raise _refuse_init(f"{archive} changed while this run read it: its sha256 was {source.sha256} before the run "
+                           f"directory was claimed and is {again} now; the copied weights may not be the ones checked, "
+                           "so the run stops before it trains")
+    return block
+
+
+def recorded_init(run_dir: Path) -> Optional[Mapping[str, Any]]:
+    """The run's own ``task.json`` ``init`` block, read before a resume's claim (contract in the module docstring)."""
+    from .predictor import read_record
+
+    task_file = Path(run_dir) / SOURCE_FILES[0]
+    if not task_file.is_file():
+        return None
+    record = read_record(task_file)
+    if "init" not in record:
+        raise _refuse_init(f"{task_file} holds no init block, so the run did not start from an earlier run's weights; "
+                           "resume it without init")
+    return record["init"]
 
 
 #: Resample rules by the name a :class:`TransferSpec` declares.

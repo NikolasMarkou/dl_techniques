@@ -7,27 +7,42 @@ the key ``init`` replaced, is refused by name on the command line and in YAML an
 the ``model_args.pretrained`` doors (a classifier takes ``false`` only; a depth run under ``init`` reads no official
 weights and keeps the warm-start rate and the head's 10x).
 
-A source here is a FAKE run directory: a ``task.json`` written by the record builders of
+A ``preclaim`` source is a FAKE run directory: a ``task.json`` written by the record builders of
 :mod:`train.api.predictor` (so it passes the real record check), a ``config.json`` holding the resolved
 ``used.model_args``, and a placeholder ``best_model.keras``. Nothing before the claim opens the archive, so no
 training is needed.
+
+The ``wire`` and ``resume`` tests (D-010, D-014, D-016, D-018) train REAL tiny CPU sources (module-scope fixtures)
+and start targets from them: the weights ``fit`` starts from are read by a callback and compared, path by path
+relative to the model, with the source archive's; the ``task.json`` ``init`` block is compared with what was
+copied, resampled, reset, grown and dropped; a resume reads its pins from its own record and opens no file of the
+source. ``keras.backend.clear_session()`` runs before every run, as a fresh process would start.
 """
 
+import builtins
+import contextlib
 import dataclasses
 import hashlib
 import inspect
+import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
+import keras
+import numpy as np
 import pytest
+from PIL import Image
 
-from train.api import cli, predictor, registry
+from train.api import cli, predictor, recipes, registry, resume_decisions
+from train.api.args import AutoContext
 from train.api.config import validate
 from train.api.depth_args import PRETRAINED_LR
 from train.api.errors import ConfigError, ConfigValidationError
@@ -38,10 +53,10 @@ from train.api.tasks.image_classification import (
     ImageClassificationTrainer,
     train_image_classification,
 )
-from train.api.tasks.image_denoising import train_image_denoising
-from train.api.tasks.image_segmentation import train_image_segmentation
+from train.api.tasks.image_denoising import ImageDenoisingTrainer, train_image_denoising
+from train.api.tasks.image_segmentation import ImageSegmentationTrainer, train_image_segmentation
 from train.api.tasks.pretrain import train_pretrain
-from train.api.tasks.time_series_forecasting import train_time_series_forecasting
+from train.api.tasks.time_series_forecasting import TimeSeriesForecastingTrainer, train_time_series_forecasting
 from train.api.trainer import TaskTrainer
 
 from ._forecast_fixtures import world  # noqa: F401  (a module-scope fixture: the one registry world)
@@ -455,3 +470,440 @@ def test_preclaim_depth_under_init_needs_adamw_for_the_heads_10x(world, megadept
                           optim_args={"optimizer": "adam", "lr": 1e-5, "weight_decay": None})
     with pytest.raises(ConfigError, match=r"'optim_args\.optimizer'.*adamw"):
         prepared(config, DepthEstimationTrainer)
+
+
+# ---------------------------------------------------------------------
+# wire: real tiny CPU sources, and targets started from them
+# ---------------------------------------------------------------------
+
+#: What every classification run of this section asks besides its model, data and side.
+QUIET = {"epochs": 1, "batch_size": 8, "analysis_args": {"model_analysis": False, "figures": False},
+         "metric_args": {"success_threshold": 0.0}}
+TEN = [f"k{index}" for index in range(10)]
+RENAMED = [f"r{index}" for index in range(10)]
+HUNDRED = [f"h{index:02d}" for index in range(100)]
+
+
+def write_tree(root: Path, names, per_class: int = 3, side: int = 16, seed: int = 0) -> Path:
+    """``root/<class>/<i>.png``: noise images, a tint per class."""
+    rng = np.random.default_rng(seed)
+    for k, name in enumerate(names):
+        for index in range(per_class):
+            path = root / name / f"{index}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray((rng.integers(0, 120, (side, side, 3)) + (k % 8) * 16).astype(np.uint8)).save(path)
+    return root
+
+
+def relative(model: Any) -> Dict[str, np.ndarray]:
+    """``{path relative to the model: value}``: the model's own leading name dropped, as a fresh process would not have it."""
+    root = f"{model.name}/"
+    return {(v.path[len(root):] if v.path.startswith(root) else v.path): np.array(v) for v in model.weights}
+
+
+def archive_weights(run_dir: Path) -> Dict[str, np.ndarray]:
+    return relative(keras.models.load_model(str(run_dir / "best_model.keras"), compile=False))
+
+
+def record_of(run_dir: Path) -> Dict[str, Any]:
+    return json.loads((Path(run_dir) / "task.json").read_text())
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+@contextlib.contextmanager
+def started_weights(trainer_class: Any) -> Iterator[Dict[str, np.ndarray]]:
+    """Patch ``trainer_class.extra_callbacks`` so the weights ``fit`` starts from are kept (relative paths)."""
+    seen: Dict[str, np.ndarray] = {}
+    original = trainer_class.extra_callbacks
+
+    class Started(keras.callbacks.Callback):
+        def on_train_begin(self, logs=None):
+            seen.update(relative(self.model))
+
+    def extra(self, config, data):
+        return [*original(self, config, data), Started()]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(trainer_class, "extra_callbacks", extra)
+        yield seen
+
+
+def started(trainer_class: Any, function: Any, **request: Any) -> Dict[str, np.ndarray]:
+    """Run ``function(**request)`` in a fresh Keras session and return the weights its ``fit`` started from."""
+    keras.backend.clear_session()
+    with started_weights(trainer_class) as seen:
+        function(**request)
+    return dict(seen)
+
+
+def classify(out: Any, tree: Path, side: int, model: str = "vit/vit_pico", **changes: Any) -> Dict[str, Any]:
+    return {"out": out, "model": model, "data": {"format": "folder", "train_dir": str(tree)},
+            "transform_args": {"image_size": side}, **QUIET, **changes}
+
+
+def check_copied(block: Dict[str, Any], start: Dict[str, np.ndarray], source: Dict[str, np.ndarray],
+                 prefix: str = "") -> None:
+    """Every target weight the block does not name as reset, grown or resampled equals the source's at its path."""
+    transfer = block["transfer"]
+    others = set(transfer["reset"]) | set(transfer["grown"]) | {row["path"] for row in transfer["resampled"]}
+    copied = [path for path in start if path not in others]
+    assert transfer["copied"] == len(copied)
+    for path in copied:
+        assert path.startswith(prefix), path
+        np.testing.assert_array_equal(start[path], source[path[len(prefix):]], err_msg=path)
+
+
+@pytest.fixture(scope="module")
+def trees(tmp_path_factory):
+    root = tmp_path_factory.mktemp("trees")
+    return {"ten": write_tree(root / "ten", TEN), "renamed": write_tree(root / "renamed", RENAMED, seed=1),
+            "hundred": write_tree(root / "hundred", HUNDRED, per_class=2, seed=2)}
+
+
+@pytest.fixture(scope="module")
+def vit_source(world, trees, tmp_path_factory):
+    """vit_pico on 10 classes at 32 px (patch 4, a 65-row position table), 1 epoch."""
+    out = tmp_path_factory.mktemp("vit_source") / "run"
+    keras.backend.clear_session()
+    train_image_classification(**classify(str(out), trees["ten"], 32))
+    return out
+
+
+@pytest.fixture(scope="module")
+def vit_64(world, trees, vit_source, tmp_path_factory):
+    """vit_pico on 100 classes at 64 px, from a copy of ``vit_source`` (a resume test renames the copy away)."""
+    root = tmp_path_factory.mktemp("vit_64")
+    source = root / "source"
+    shutil.copytree(vit_source, source)
+    out = root / "run"
+    request = classify(str(out), trees["hundred"], 64, init=str(source), batch_size=16)
+    start = started(ImageClassificationTrainer, train_image_classification, **request)
+    return SimpleNamespace(source=source, out=out, request=request, start=start)
+
+
+def test_wire_a_vit_at_32_px_seeds_one_at_64_px_keeping_its_patch_and_resampling_its_table(vit_source, vit_64):
+    from tests.test_models.test_dino.dinov2_numpy_reference import torch_bicubic_2d
+
+    used = json.loads((vit_64.out / "config.json").read_text())["used"]["model_args"]
+    assert used["patch_size"] == 4  # the recipe derives 16 at 64 px; the source's 4 is kept
+    source, start = archive_weights(vit_source), vit_64.start
+    block = record_of(vit_64.out)["init"]
+    assert (block["source"], block["file"], block["sha256"]) == (
+        str(vit_64.source), "best_model.keras", sha(vit_64.source / "best_model.keras"))
+    assert (block["task"], block["family"], block["variant"], block["relation"]) == (
+        "image_classification", "vit", "vit_pico", "same_task")
+    assert block["pinned"] == {"patch_size": 4}
+    assert block["geometry"] == {key: record_of(vit_source)[key] for key in ("input_shape", "channels")}
+    table, grid = "pos_embed/pos_embedding", (32 // 4, 64 // 4)
+    assert block["transfer"]["resampled"] == [{"path": table, "rule": "vit_pos_bicubic",
+                                               "from": [1, 1 + grid[0] ** 2, 192], "to": [1, 1 + grid[1] ** 2, 192]}]
+    heads = sorted(path for path in start if path.startswith("classification_head/"))
+    assert heads and sorted(block["transfer"]["reset"]) == heads  # 10 classes to 100: the head is fresh
+    assert sorted(block["transfer"]["dropped"]) == sorted(p for p in source if p.startswith("classification_head/"))
+    assert block["transfer"]["grown"] == []
+    check_copied(block, start, source)
+    assert start[table].shape == (1, 1 + grid[1] ** 2, 192)
+    np.testing.assert_array_equal(start[table][:, :1], source[table][:, :1])  # the class row is kept
+    image = source[table][0, 1:].astype(np.float64).reshape(grid[0], grid[0], 192).transpose(2, 0, 1)
+    expected = torch_bicubic_2d(image, grid[1], grid[1]).transpose(1, 2, 0).reshape(grid[1] ** 2, 192)
+    np.testing.assert_allclose(start[table][0, 1:], expected, atol=1e-5)
+
+
+def test_wire_the_block_passes_the_record_check_and_a_block_without_a_key_is_refused(vit_64):
+    record = record_of(vit_64.out)
+    assert predictor.record_problems(record) == []
+    assert list(record)[-1] == "init" and list(record)[:-1] == list(predictor.RECORD_KEYS["image_classification"])
+    for key in record["init"]:
+        broken = {**record, "init": {name: value for name, value in record["init"].items() if name != key}}
+        assert any(repr(key) in line for line in predictor.record_problems(broken)), key
+    unknown = {**record, "init": {**record["init"], "extra": 1}}
+    assert any("'extra'" in line for line in predictor.record_problems(unknown))
+
+
+@pytest.fixture(scope="module")
+def vit_tiny(world, trees, vit_source, tmp_path_factory):
+    """vit_tiny (deeper, same width) from ``vit_source`` on the same classes; ``out`` and ``init`` given as ``Path``."""
+    out = tmp_path_factory.mktemp("vit_tiny") / "run"
+    start = started(ImageClassificationTrainer, train_image_classification,
+                    **classify(out, trees["ten"], 32, model="vit/vit_tiny", init=vit_source))
+    return out, start
+
+
+def test_wire_a_deeper_vit_grows_its_new_blocks_and_copies_every_other_weight_with_the_head(vit_source, vit_tiny):
+    out, start = vit_tiny
+    source = archive_weights(vit_source)
+    block = record_of(out)["init"]
+    depth = 1 + max(int(re.match(r"transformer_layer_(\d+)/", p).group(1)) for p in source if p.startswith("transformer_layer_"))
+    grown = sorted(p for p in start if re.match(r"transformer_layer_(\d+)/", p)
+                   and int(re.match(r"transformer_layer_(\d+)/", p).group(1)) >= depth)
+    assert grown and sorted(block["transfer"]["grown"]) == grown
+    assert block["transfer"]["reset"] == [] and block["transfer"]["dropped"] == []  # the same 10 class names
+    assert block["transfer"]["resampled"] == []
+    check_copied(block, start, source)
+    assert block["transfer"]["copied"] == len(source)
+
+
+def test_wire_a_path_init_and_out_are_recorded_as_text_once(vit_source, vit_tiny):
+    out, _ = vit_tiny
+    text = (out / "config.json").read_text()
+    config = json.loads(text)
+    assert (config["out"], config["init"]) == (str(out), str(vit_source))
+    assert text.count(f'"init": "{vit_source}"') == 1 and text.count(str(out)) == 1
+
+
+def test_wire_the_head_is_reset_when_the_class_names_differ_at_an_equal_count(world, trees, vit_source, tmp_path):
+    out = tmp_path / "run"
+    start = started(ImageClassificationTrainer, train_image_classification,
+                    **classify(str(out), trees["renamed"], 32, init=str(vit_source)))
+    source = archive_weights(vit_source)
+    block = record_of(out)["init"]
+    heads = sorted(p for p in start if p.startswith("classification_head/"))
+    assert sorted(block["transfer"]["reset"]) == heads and sorted(block["transfer"]["dropped"]) == heads
+    assert all(start[p].shape == source[p].shape for p in heads)  # same shapes: only the names say it is not the same head
+    assert not all(np.array_equal(start[p], source[p]) for p in heads)
+    check_copied(block, start, source)
+
+
+def test_wire_another_architecture_is_refused_after_the_claim_and_nothing_is_trained(world, trees, vit_source, tmp_path):
+    out = tmp_path / "run"
+    keras.backend.clear_session()
+    with pytest.raises(ConfigError) as caught:
+        train_image_classification(**classify(str(out), trees["ten"], 32, init=str(vit_source),
+                                              model_args={"use_layer_scale": True}))
+    text = str(caught.value)
+    assert re.search(r"'init': \d+ of \d+ weights of vit/vit_pico have no source weight of their shape and no "
+                     r"declared rule: .*nothing was copied", text), text
+    assert f"The run directory {out} was claimed" in text
+    assert (out / "config.json").exists() and not (out / "training_log.csv").exists()
+    assert not (out / "best_model.keras").exists() and not (out / "task.json").exists()
+
+
+def test_wire_an_archive_that_changes_after_the_claim_stops_the_run_naming_both_hashes(
+        world, trees, vit_source, tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    shutil.copytree(vit_source, source)
+    before = sha(source / "best_model.keras")
+    real = predictor.load_model
+
+    def load_then_rewrite(path):
+        loaded = real(path)
+        with open(Path(path) / "best_model.keras", "ab") as handle:
+            handle.write(b"rewritten while the run read it")
+        return loaded
+
+    monkeypatch.setattr(predictor, "load_model", load_then_rewrite)
+    out = tmp_path / "run"
+    keras.backend.clear_session()
+    with pytest.raises(ConfigError) as caught:
+        train_image_classification(**classify(str(out), trees["ten"], 32, init=str(source)))
+    text, after = str(caught.value), sha(source / "best_model.keras")
+    assert before != after and before in text and after in text and f"The run directory {out} was claimed" in text
+    assert not (out / "training_log.csv").exists() and not (out / "best_model.keras").exists()
+
+
+def test_wire_a_pin_is_laid_over_the_computed_value_and_another_user_value_is_refused():
+    context = AutoContext(family="vit", variant="vit_pico", dataset="folder", num_classes=3, image_size=64,
+                                  defaults={}, pinned={"patch_size": 4})
+    optim = SimpleNamespace(optimizer="adamw")
+    assert recipes.merge_model_args(context, optim, {}, {"patch_size": 16})["patch_size"] == 4
+    assert recipes.merge_model_args(context, optim, {"patch_size": 4}, {"patch_size": 16})["patch_size"] == 4
+    with pytest.raises(ConfigError, match=r"Invalid value for 'model_args\.patch_size': the source was built with "
+                                          r"patch_size=4 and init keeps the source's architecture"):
+        recipes.merge_model_args(context, optim, {"patch_size": 8}, {"patch_size": 16})
+    unpinned = dataclasses.replace(context, pinned={})
+    assert AutoContext(family="vit", variant="vit_pico", dataset="folder", num_classes=3, image_size=64,
+                               defaults={}).pinned == {}
+    assert recipes.merge_model_args(unpinned, optim, {}, {"patch_size": 16})["patch_size"] == 16
+
+
+@pytest.fixture(scope="module")
+def segmentation_data(tmp_path_factory):
+    from ._segmentation_fixtures import make_folder
+
+    images, masks = make_folder(tmp_path_factory.mktemp("segmentation"), count=12, size=(64, 64), classes=3)
+    return {"format": "folder", "train_images": str(images), "train_masks": str(masks), "num_classes": 3}
+
+
+def test_wire_a_convnext_classifier_seeds_convnext_seg_under_backbone(world, segmentation_data, tmp_path, monkeypatch):
+    """The gate's pair (D-035): a cifar10 classifier with its recipe's strides 2, trained on [0, 1] inputs."""
+    from tests.classification_fakes import use_tiny_raw
+
+    use_tiny_raw(monkeypatch, n_train=40, n_test=8)
+    source_dir, out = tmp_path / "source", tmp_path / "run"
+    keras.backend.clear_session()
+    train_image_classification(out=str(source_dir), model="convnext_v1/cifar10", data={"dataset": "cifar10"},
+                               transform_args={"normalize": "unit"}, **QUIET)
+    start = started(ImageSegmentationTrainer, train_image_segmentation,
+                    out=str(out), model="convnext_seg/cifar10", data=segmentation_data, init=str(source_dir),
+                    epochs=1, batch_size=4, transform_args={"image_size": [32, 32]},
+                    analysis_args={"model_analysis": False, "figures": False})
+    source = archive_weights(source_dir)
+    block = record_of(out)["init"]
+    assert block["relation"] == "cross_task" and block["pinned"] == {}
+    kept = [p for p in source if not p.startswith("classification_head/")]
+    assert sorted(block["transfer"]["dropped"]) == sorted(set(source) - set(kept))
+    assert block["transfer"]["copied"] == len(kept)
+    assert set(block["transfer"]["reset"]) == {p for p in start if not p.startswith("backbone/")}
+    check_copied(block, start, source, prefix="backbone/")
+
+
+def test_wire_a_convunext_segmenter_seeds_the_biased_denoiser_with_a_fresh_output(world, segmentation_data, tmp_path):
+    from .test_image_denoising_task import mapping, write_images
+
+    source_dir, out = tmp_path / "source", tmp_path / "run"
+    keras.backend.clear_session()
+    train_image_segmentation(out=str(source_dir), model="convunext/tiny", data=segmentation_data, epochs=1,
+                             batch_size=4, transform_args={"image_size": [32, 32]},
+                             analysis_args={"model_analysis": False, "figures": False})
+    folders = write_images(tmp_path / "train", 6, 0), write_images(tmp_path / "val", 3, 1)
+    start = started(ImageDenoisingTrainer, train_image_denoising,
+                    **mapping(out, folders, "convunext_biased", epochs=1, init=str(source_dir),
+                              transform_args={"patch_size": 32, "patches_per_image": 2}))
+    source = archive_weights(source_dir)
+    block = record_of(out)["init"]
+    assert block["relation"] == "cross_task"
+    assert sorted(block["transfer"]["reset"]) == sorted(p for p in start if p.startswith("final_output/"))
+    assert sorted(block["transfer"]["dropped"]) == sorted(p for p in source if p.startswith("final_output/"))
+    assert block["transfer"]["copied"] == len(start) - len(block["transfer"]["reset"])
+    check_copied(block, start, source)
+
+
+def test_wire_a_denoiser_warm_start_scores_the_sources_last_validation_loss_at_epoch_zero(world, tmp_path):
+    from .test_image_denoising_task import mapping, write_images
+
+    folders = write_images(tmp_path / "train", 6, 0), write_images(tmp_path / "val", 3, 1)
+    keras.backend.clear_session()
+    first = train_image_denoising(**mapping(tmp_path / "first", folders, "bfcnn", epochs=1))
+    start = started(ImageDenoisingTrainer, train_image_denoising,
+                    **mapping(tmp_path / "warm", folders, "bfcnn", epochs=1, init=str(first.run_dir)))
+    keras.backend.clear_session()
+    cold = train_image_denoising(**mapping(tmp_path / "cold", folders, "bfcnn", epochs=1))
+    summaries = [json.loads((tmp_path / name / "results_summary.json").read_text()) for name in ("first", "warm", "cold")]
+    # The source's one epoch scored these weights on this very validation set: the warm start's epoch 0 is that score.
+    last = json.loads((Path(first.run_dir) / "training_history.json").read_text())["val_loss"][-1]
+    assert summaries[1]["initial_loss_sanity_eval"]["loss"] == pytest.approx(last, rel=1e-5)
+    assert summaries[2]["initial_loss_sanity_eval"]["loss"] != pytest.approx(last, rel=1e-3)
+    assert summaries[0]["input_psnr"] == summaries[1]["input_psnr"] == summaries[2]["input_psnr"]
+    block = record_of(tmp_path / "warm")["init"]
+    assert block["transfer"]["reset"] == [] and block["transfer"]["copied"] == len(start)
+    check_copied(block, start, archive_weights(Path(first.run_dir)))
+
+
+def test_wire_tirex_at_a_longer_lookback_copies_every_weight(world, tmp_path):
+    data = {"lookback": 32, "horizon": 8, "realizations": 1, "series_length": 600, "patterns": ["ar_process"],
+            "n_select": 16, "n_test": 16, "steps_per_epoch": 2}
+    request = {"model": "tirex/tiny", "epochs": 1, "batch_size": 8,
+               "analysis_args": {"model_analysis": False, "figures": False}}
+    keras.backend.clear_session()
+    train_time_series_forecasting(out=str(tmp_path / "source"), data=data, **request)
+    start = started(TimeSeriesForecastingTrainer, train_time_series_forecasting, out=str(tmp_path / "run"),
+                    data={**data, "lookback": 64}, init=str(tmp_path / "source"), **request)
+    source = archive_weights(tmp_path / "source")
+    block = record_of(tmp_path / "run")["init"]
+    assert block["geometry"]["lookback"] == 32 and record_of(tmp_path / "run")["lookback"] == 64
+    assert block["transfer"]["copied"] == len(source) == len(start)
+    assert all(not block["transfer"][key] for key in ("reset", "grown", "dropped", "resampled"))
+    check_copied(block, start, source)
+
+
+@pytest.fixture(scope="module")
+def wide_megadepth_tree(tmp_path_factory):
+    """The depth tests' MegaDepth-shaped tree with 48 px images, so a 42 px crop fits."""
+    import tests.test_train.test_common_depth_data as depth_data
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(depth_data, "SIDE", 48)
+        return depth_data.write_megadepth_tree(tmp_path_factory.mktemp("wide_megadepth"))
+
+
+def test_wire_depth_at_a_larger_side_copies_every_weight_and_reads_no_official_file(
+        world, wide_megadepth_tree, tmp_path, monkeypatch):
+    monkeypatch.setenv(WEIGHTS_ENV, str(tmp_path / "no_weights"))
+    source_dir, out = tmp_path / "source", tmp_path / "run"
+    keras.backend.clear_session()
+    train_depth_estimation(**depth_request(source_dir, wide_megadepth_tree, 28, model_args={"pretrained": False}))
+    start = started(DepthEstimationTrainer, train_depth_estimation, **depth_request(out, wide_megadepth_tree, 42, init=str(source_dir)))
+    source = archive_weights(source_dir)
+    block = record_of(out)["init"]
+    assert block["geometry"]["input_size"] == [28, 28] and record_of(out)["input_size"] == [42, 42]
+    assert block["transfer"]["copied"] == len(source) == len(start)
+    assert all(not block["transfer"][key] for key in ("reset", "grown", "dropped", "resampled"))
+    check_copied(block, start, source)
+
+
+def depth_request(out: Path, root: Path, side: int, **changes: Any) -> Dict[str, Any]:
+    return {"out": str(out), "model": "depth_anything/vit_s", "batch_size": 4, "epochs": 1,
+            "data": {"root": str(root), "train_split": 0.6, "n_select": 4, "n_test": 4, "layout_samples": 4,
+                     "steps_per_epoch": 1, "workers": 0},
+            "transform_args": {"image_size": side}, "analysis_args": {"model_analysis": False, "figures": False},
+            **changes}
+
+
+# ---------------------------------------------------------------------
+# resume: the pins come from the run's own record; the source is never opened
+# ---------------------------------------------------------------------
+
+
+def test_resume_an_init_run_with_its_source_renamed_away_rebuilds_its_architecture_and_opens_no_source_file(
+        vit_64, tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    shutil.copytree(vit_64.out, run_dir)
+    (run_dir / "results_summary.json").unlink()  # a run whose reporting died: resumed to report
+    moved = vit_64.source.with_name("moved_away")
+    vit_64.source.rename(moved)
+    opened, rebuilt = [], {}
+    gone = str(vit_64.source)
+
+    def spied(real):
+        def spy(file, *arguments, **keywords):
+            if isinstance(file, (str, os.PathLike)) and os.fspath(file).startswith(gone):
+                opened.append(os.fspath(file))
+            return real(file, *arguments, **keywords)
+        return spy
+
+    real_restore = resume_decisions.restore_finished_fit
+
+    def restore(model, *arguments):
+        rebuilt.update({path: value.shape for path, value in relative(model).items()})
+        return real_restore(model, *arguments)
+
+    try:
+        monkeypatch.setattr(builtins, "open", spied(builtins.open))
+        monkeypatch.setattr(io, "open", spied(io.open))
+        monkeypatch.setattr(os, "open", spied(os.open))
+        monkeypatch.setattr(resume_decisions, "restore_finished_fit", restore)
+        keras.backend.clear_session()
+        train_image_classification(**{**vit_64.request, "out": str(run_dir), "resume_interrupted": True})
+    finally:
+        monkeypatch.undo()
+        moved.rename(vit_64.source)
+    summary = json.loads((run_dir / "results_summary.json").read_text())
+    assert summary["reporting_resumed"] is True
+    assert opened == []
+    first = {path: value.shape for path, value in archive_weights(vit_64.out).items()}
+    kernel = next(p for p in rebuilt if p.startswith("patch_embed/") and p.endswith("kernel"))
+    assert rebuilt == first and rebuilt[kernel][:2] == (4, 4)  # patch 4 at 64 px: the record's pin
+
+
+def test_resume_a_record_without_an_init_block_is_refused_before_anything_is_written(vit_64, tmp_path):
+    run_dir = tmp_path / "run"
+    shutil.copytree(vit_64.out, run_dir)
+    record = record_of(run_dir)
+    del record["init"]
+    (run_dir / "task.json").write_text(json.dumps(record))
+    before = sorted(p.name for p in run_dir.iterdir())
+    with pytest.raises(ConfigError, match=r"'init': .*task\.json holds no init block"):
+        train_image_classification(**{**vit_64.request, "out": str(run_dir), "resume_interrupted": True})
+    assert sorted(p.name for p in run_dir.iterdir()) == before
+
+
+def test_resume_a_user_value_against_the_records_pin_is_refused_before_the_claim(vit_64, tmp_path):
+    run_dir = tmp_path / "run"
+    shutil.copytree(vit_64.out, run_dir)
+    (run_dir / "results_summary.json").unlink()
+    with pytest.raises(ConfigError, match=r"'model_args\.patch_size': the source was built with patch_size=4"):
+        train_image_classification(**{**vit_64.request, "out": str(run_dir), "resume_interrupted": True,
+                                      "model_args": {"patch_size": 16}})

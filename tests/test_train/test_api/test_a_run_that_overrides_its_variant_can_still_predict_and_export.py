@@ -211,7 +211,7 @@ def a_record(**changes):
 def test_the_optional_key_is_in_the_schema_and_written_only_when_there_is_something_to_write():
     from train.api.predictor import build_task_record
 
-    assert OPTIONAL_RECORD_KEYS == ("variant_overrides",)
+    assert OPTIONAL_RECORD_KEYS == ("variant_overrides", "init")
     assert "variant_overrides" not in a_record()
     for empty in (None, {}):
         assert "variant_overrides" not in build_task_record(

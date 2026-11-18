@@ -226,6 +226,8 @@ class Run:
     #: The task's ``fit_kwargs``, checked by :func:`_checked_fit_options`; spread into the one ``fit`` call.
     fit_options: Dict[str, Any] = dataclasses.field(default_factory=dict)
     model: Any = None
+    #: The ``task.json`` ``init`` block of a fresh run with ``init`` (``init_from.transfer``), else ``None``.
+    init_block: Optional[Dict[str, Any]] = None
     params: int = 0
     baseline: Dict[str, float] = dataclasses.field(default_factory=dict)
     initial_ratio: float = 0.0
@@ -529,14 +531,23 @@ def build_model(run: Run) -> None:
     from dl_techniques.utils.logger import logger
 
     trainer, config, data = run.trainer, run.config, run.data
-    if config.init is not None:
-        raise NotImplementedError("init passed its checks before the claim, but its weight transfer is not wired "
-                                  "into build_model yet; the run stops rather than train from fresh weights")
     optim_cfg: OptimArgs = config.optim_args
     with _bad_value_is_a_config_error(run.run_dir, "the model factory"):
         run.model = trainer.build_model(config, run.context, data)
         if not run.model.built:
             run.model.build((None, *data.input_shape))
+    if config.init is not None and run.resume is None:
+        # DECISION plan-2026-11-18T072904-0fd54b91/D-016
+        # The source is read on a FRESH run only, after the build and before the optimizer. Do NOT transfer on a
+        # resume, full or reporting-only: the backup restores every weight after this stage, the pins came from the
+        # run's own task.json (D-018), and the source may have been moved or rewritten since.
+        from . import init_from
+
+        with _bad_value_is_a_config_error(run.run_dir, "the init transfer"):
+            run.init_block = init_from.transfer(
+                trainer._init_source, run.model, trainer.task, run.family, run.variant,
+                trainer.task_record(config, run.context, data),
+            )
     # DECISION plan-2026-11-17T110935-9c7b9096/D-003: the task's optimizer options are asked
     # for ONCE, here, with the built model, and go to the one builder call below. Do NOT build a
     # second optimizer in the task or spread the options into ``compile``: the schedule and clip
@@ -701,6 +712,9 @@ def train_or_restore(run: Run) -> None:
         # the statistics it holds, and a rewrite would state others.
         record = trainer.task_record(config, run.context, data)
         if record is not None:
+            if run.init_block is not None:
+                # The init block is added HERE, the one task.json write site, not in the five record builders (D-014).
+                record = {**record, "init": run.init_block}
             if not write_task(run_dir, record):
                 logger.info("task.json is already in the run directory: left as it is")
 

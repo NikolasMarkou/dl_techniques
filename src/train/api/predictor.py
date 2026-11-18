@@ -15,7 +15,8 @@ Interface contract
 carries the task word, so a reader dispatches on it and needs no second source). A classification
 record has EXACTLY the keys and order of a version 1 record; only ``schema_version`` moved.
 :data:`RECORD_KEYS` lists them per task. Every key of the task must be there, and no other, apart
-from the OPTIONAL ``variant_overrides``.
+from the OPTIONAL ``variant_overrides`` and ``init`` (:data:`OPTIONAL_RECORD_KEYS`; the ``init`` block, where a run's
+starting weights came from, is checked key by key: :data:`INIT_KEYS`).
 
 ``schema_version``
     ``2``. Any other value is refused: a reader never guesses at a newer layout, and there is no
@@ -250,10 +251,12 @@ Module scope imports only the standard library and ``train.api`` (D-012); every
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import registry
+from .args import is_count
 from .depth_args import TASK as DEPTH
 from .errors import ConfigError
 from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
@@ -379,7 +382,15 @@ FORECAST_HEADS = ("point", "quantile")
 FORECAST_FORMATS = ("builtin", "csv")
 
 #: Keys a record MAY carry (written only when they hold something); every other key is required.
-OPTIONAL_RECORD_KEYS = ("variant_overrides",)
+OPTIONAL_RECORD_KEYS = ("variant_overrides", "init")
+
+#: The keys of the optional ``init`` block (where a run's starting weights came from: ``train.api.init_from``), in the
+#: order they are written; ``transfer`` holds :data:`INIT_TRANSFER_KEYS`, each ``resampled`` entry
+#: :data:`INIT_RESAMPLED_KEYS`; ``relation`` is one of :data:`INIT_RELATIONS`.
+INIT_KEYS = ("source", "file", "sha256", "task", "family", "variant", "geometry", "relation", "pinned", "transfer")
+INIT_TRANSFER_KEYS = ("copied", "resampled", "reset", "grown", "dropped")
+INIT_RESAMPLED_KEYS = ("path", "rule", "from", "to")
+INIT_RELATIONS = ("same_task", "cross_task")
 
 #: The evaluation transforms this predictor reproduces, by the loader code each one is:
 #: ``resize`` is ``train.common.classification_data.resizer`` (the in-memory datasets,
@@ -857,6 +868,58 @@ def _overrides_problems(record: Mapping[str, Any]) -> List[str]:
     ]
 
 
+def _block_keys(name: str, block: Any, keys: Tuple[str, ...]) -> List[str]:
+    """The line naming what ``block`` (an object at ``name``) misses of ``keys`` or holds beyond them."""
+    if not isinstance(block, dict):
+        return [f"{name!r} must be an object, got {_shown(block)}"]
+    missing = [key for key in keys if key not in block]
+    unknown = sorted(set(block) - set(keys))
+    parts = ([f"missing key(s) {', '.join(map(repr, missing))}"] if missing else []) + (
+        [f"unknown key(s) {', '.join(map(repr, unknown))}"] if unknown else [])
+    return [f"{name!r} has {'; '.join(parts)}"] if parts else []
+
+
+def _texts(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) and item for item in value)
+
+
+def _init_problems(record: Mapping[str, Any]) -> List[str]:
+    """The problems of the optional ``init`` block (keys in :data:`INIT_KEYS`); empty when the record has none."""
+    if "init" not in record:
+        return []
+    block = record["init"]
+    lines = _block_keys("init", block, INIT_KEYS)
+    if lines:
+        return lines
+    for key in ("source", "file", "task", "family", "variant"):
+        if not isinstance(block[key], str) or not block[key]:
+            lines.append(f"'init.{key}' must be a non-empty text, got {_shown(block[key])}")
+    if not (isinstance(block["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", block["sha256"])):
+        lines.append(f"'init.sha256' must be 64 lowercase hex digits, got {_shown(block['sha256'])}")
+    if block["relation"] not in INIT_RELATIONS:
+        lines.append(f"'init.relation' must be one of {', '.join(INIT_RELATIONS)}, got {_shown(block['relation'])}")
+    for key in ("geometry", "pinned"):
+        if not (isinstance(block[key], dict) and _is_json_plain(block[key])):
+            lines.append(f"'init.{key}' must be an object of text keys and JSON values, got {_shown(block[key])}")
+    transfer = block["transfer"]
+    keys = _block_keys("init.transfer", transfer, INIT_TRANSFER_KEYS)
+    if keys:
+        return lines + keys
+    copied = transfer["copied"]
+    if not isinstance(copied, int) or isinstance(copied, bool) or copied < 0:
+        lines.append(f"'init.transfer.copied' must be a count, got {_shown(copied)}")
+    lines += [f"'init.transfer.{key}' must be a list of weight paths, got {_shown(transfer[key])}"
+              for key in ("reset", "grown", "dropped") if not _texts(transfer[key]) and transfer[key] != []]
+    resampled = transfer["resampled"]
+    if not isinstance(resampled, list) or not all(
+            isinstance(row, dict) and set(row) == set(INIT_RESAMPLED_KEYS) and _texts([row["path"], row["rule"]])
+            and all(isinstance(row[side], list) and all(is_count(n) for n in row[side]) for side in ("from", "to"))
+            for row in resampled):
+        lines.append(f"'init.transfer.resampled' must be a list of {{{', '.join(INIT_RESAMPLED_KEYS)}}} objects, "
+                     f"got {_shown(resampled)}")
+    return lines
+
+
 def _eval_transform_problems(record: Mapping[str, Any]) -> List[str]:
     lines: List[str] = []
     transform = record["eval_transform"]
@@ -1050,6 +1113,7 @@ def record_problems(record: Mapping[str, Any]) -> List[str]:
     if all(key in keys for key in _STATISTICS_KEYS):
         lines += _statistics_problems(record, width)
     lines += _overrides_problems(record)
+    lines += _init_problems(record)
     lines += TAIL_CHECKS[task](record)
     return lines
 

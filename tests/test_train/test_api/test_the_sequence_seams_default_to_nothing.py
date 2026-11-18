@@ -310,6 +310,20 @@ def test_a_run_holds_no_fit_option_until_the_task_names_one():
     assert field.default_factory() is not field.default_factory()
 
 
+def test_without_init_nothing_is_pinned_and_no_init_block_is_held():
+    """plan-2026-11-18T072904-0fd54b91 D-010, D-014: ``AutoContext.pinned`` defaults to empty, so ``merge_model_args``
+    lays the defaults, the computed values and the caller's keys as it did; a run holds no ``init`` block."""
+    from train.api.args import AutoContext
+
+    field = {f.name: f for f in dataclasses.fields(AutoContext)}["pinned"]
+    assert field.default_factory() == {} and field.default_factory() is not field.default_factory()
+    assert {f.name: f for f in dataclasses.fields(Run)}["init_block"].default is None
+    context = AutoContext(family="vit", variant="vit_pico", dataset="cifar10", num_classes=10, image_size=32,
+                          defaults={"model_args": {"depth": 1, "patch_size": 2}})
+    merged = recipes.merge_model_args(context, OptimArgs(optimizer="adamw"), {"depth": 3}, {"patch_size": 4, "x": 5})
+    assert merged == {"depth": 3, "patch_size": 4, "x": 5}
+
+
 def test_an_evaluation_carries_no_extras_and_no_failed_check_by_default():
     evaluation = Evaluation(None, None, None, None, {}, {}, {}, None)
     assert evaluation.extras == {} and evaluation.failed_checks == ()

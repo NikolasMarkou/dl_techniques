@@ -23,6 +23,9 @@ Interface contract
     :param epochs: the epochs the run will train, ``None`` when nothing says.
     :param model_args: the request's ``model_args`` (the recipe's are not laid under them), for a group whose
         ``"auto"`` follows a model argument; empty when nothing says.
+    :param pinned: the factory arguments an ``init`` source fixes (its ``config.json`` ``used.model_args`` on a fresh
+        run, the run's own ``task.json`` ``init.pinned`` on a resume); read only by
+        :func:`train.api.recipes.merge_model_args`; empty without ``init``.
 
 ``<Group>.resolve_auto(context)``
     :param context: an :class:`AutoContext`.
@@ -109,6 +112,12 @@ class AutoContext:
     # by no earlier task's group, so their resolution is unchanged. Do NOT lay the recipe's model_args in here (the
     # group reads context.defaults for those) and do NOT read it in a shared group's resolve_auto.
     model_args: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-010
+    # The factory arguments an init source fixes (vit patch_size, resnet stem_type, convnext strides), read ONLY by
+    # recipes.merge_model_args, which lays them over the computed values. Default EMPTY, so a run without init
+    # resolves as before. Do NOT put them in model_args above (the request's: config_requested.json holds it and a
+    # resume compares it as text), and do NOT read them in a group's resolve_auto.
+    pinned: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
 
 def _is_auto(value: Any) -> bool:

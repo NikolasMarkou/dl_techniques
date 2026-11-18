@@ -113,7 +113,7 @@ def test_the_version_is_two_and_the_tables_are_the_five_tasks():
     assert SCHEMA_VERSION == 2
     assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH])
     assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
-    assert OPTIONAL_RECORD_KEYS == ("variant_overrides",)
+    assert OPTIONAL_RECORD_KEYS == ("variant_overrides", "init")
 
 
 def test_a_classification_record_is_the_version_1_record_with_the_number_changed():
