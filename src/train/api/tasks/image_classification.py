@@ -336,6 +336,21 @@ class ImageClassificationTrainer(TaskTrainer):
             channels = context.defaults.get("loader", {}).get("channels") or get_spec(context.dataset).input_shape[-1]
         return {"channels": channels, "normalize": config.transform_args.normalize}
 
+    def init_overlap(self, source: Any, config: ImageClassificationConfig, data: Any) -> Dict[str, Any]:
+        """The seeded train cut of the source against this run's (:func:`train.api.init_from.seeded_rows_split`); a
+        built-in dataset's train size backs a capped run. ImageNet holds out per class, which is not rebuilt."""
+        from dl_techniques.datasets.vision.classification import get_spec
+
+        from .. import init_from
+
+        theirs = (source.config.get("data") or {}).get("dataset")
+        if config.data.format != "builtin":
+            return init_from.seeded_rows_split(source, config, data)
+        if config.data.dataset == theirs == "imagenet":
+            return init_from.split_block("unknown", "ImageNet's selection images are held out per class "
+                                                    "(data.holdout_per_class), which init does not rebuild")
+        return init_from.seeded_rows_split(source, config, data, get_spec(config.data.dataset).train_size)
+
     def metric_names(self, config: ImageClassificationConfig, facts: DataFacts) -> List[str]:
         # DECISION plan-2026-10-30T132432-a865fa08/D-055: names only. Do NOT build the
         # metrics to read ``.name``: a Keras metric allocates variables, the first eager

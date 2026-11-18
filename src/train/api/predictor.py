@@ -386,11 +386,15 @@ OPTIONAL_RECORD_KEYS = ("variant_overrides", "init")
 
 #: The keys of the optional ``init`` block (where a run's starting weights came from: ``train.api.init_from``), in the
 #: order they are written; ``transfer`` holds :data:`INIT_TRANSFER_KEYS`, each ``resampled`` entry
-#: :data:`INIT_RESAMPLED_KEYS`; ``relation`` is one of :data:`INIT_RELATIONS`.
-INIT_KEYS = ("source", "file", "sha256", "task", "family", "variant", "geometry", "relation", "pinned", "transfer")
+#: :data:`INIT_RESAMPLED_KEYS`; ``relation`` is one of :data:`INIT_RELATIONS`; ``split`` holds :data:`INIT_SPLIT_KEYS`.
+INIT_KEYS = ("source", "file", "sha256", "task", "family", "variant", "geometry", "relation", "pinned", "transfer",
+             "split")
 INIT_TRANSFER_KEYS = ("copied", "resampled", "reset", "grown", "dropped")
 INIT_RESAMPLED_KEYS = ("path", "rule", "from", "to")
 INIT_RELATIONS = ("same_task", "cross_task")
+#: The ``init.split`` block (``init_from.split_block``): how the source's training data meets this run's held-out data.
+INIT_SPLIT_KEYS = ("relation", "unit", "n_select_overlap", "n_test_overlap", "reason", "keys")
+INIT_SPLIT_RELATIONS = ("same_split", "different_data", "overlap", "unknown")
 
 #: The evaluation transforms this predictor reproduces, by the loader code each one is:
 #: ``resize`` is ``train.common.classification_data.resizer`` (the in-memory datasets,
@@ -883,6 +887,27 @@ def _texts(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) and item for item in value)
 
 
+def _split_problems(split: Any) -> List[str]:
+    """The problems of ``init.split``: counts for every relation but ``unknown``, which has none."""
+    lines = _block_keys("init.split", split, INIT_SPLIT_KEYS)
+    if lines:
+        return lines
+    if split["relation"] not in INIT_SPLIT_RELATIONS:
+        lines.append(f"'init.split.relation' must be one of {', '.join(INIT_SPLIT_RELATIONS)}, "
+                     f"got {_shown(split['relation'])}")
+    counts = (split["n_select_overlap"], split["n_test_overlap"])
+    if not all(n is None if split["relation"] == "unknown" else (type(n) is int and n >= 0)
+               for n in counts):
+        lines.append(f"'init.split' counts must be null for relation 'unknown' and counts otherwise, "
+                     f"got {_shown(counts)}")
+    if not (_texts([split["reason"]]) and (split["unit"] is None or _texts([split["unit"]]))):
+        lines.append(f"'init.split.reason' must be a non-empty text and 'unit' a text or null, "
+                     f"got {_shown(split['reason'])} and {_shown(split['unit'])}")
+    if not (isinstance(split["keys"], dict) and _is_json_plain(split["keys"])):
+        lines.append(f"'init.split.keys' must be an object of text keys and JSON values, got {_shown(split['keys'])}")
+    return lines
+
+
 def _init_problems(record: Mapping[str, Any]) -> List[str]:
     """The problems of the optional ``init`` block (keys in :data:`INIT_KEYS`); empty when the record has none."""
     if "init" not in record:
@@ -901,6 +926,7 @@ def _init_problems(record: Mapping[str, Any]) -> List[str]:
     for key in ("geometry", "pinned"):
         if not (isinstance(block[key], dict) and _is_json_plain(block[key])):
             lines.append(f"'init.{key}' must be an object of text keys and JSON values, got {_shown(block[key])}")
+    lines += _split_problems(block["split"])
     transfer = block["transfer"]
     keys = _block_keys("init.transfer", transfer, INIT_TRANSFER_KEYS)
     if keys:

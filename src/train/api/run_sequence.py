@@ -25,7 +25,7 @@ The stages, in order, each a function of one :class:`Run` (the state they share,
 2. :func:`load_data`: ``build_data``, ``input_check``, the refusals that need the data's length, the
    resume's checks of that data (``resume_decisions``) and, for a resume that trains, the task's
    ``resume_stream`` once the backup pair is settled.
-3. :func:`build_model`: the model, its optional ``init`` weights, the optimizer, ``compile``.
+3. :func:`build_model`: the model, its optional ``init`` weights and split count, the optimizer, ``compile``.
 4. :func:`epoch_zero`: the untrained model's evaluation (or the sidecar's copy of it on a resume),
    the checks of the monitor against the names ``compile`` produced, the summary head.
 5. :func:`train_or_restore`: ``fit`` (or the files, for a run with no epoch left), then
@@ -226,7 +226,8 @@ class Run:
     #: The task's ``fit_kwargs``, checked by :func:`_checked_fit_options`; spread into the one ``fit`` call.
     fit_options: Dict[str, Any] = dataclasses.field(default_factory=dict)
     model: Any = None
-    #: The ``task.json`` ``init`` block of a fresh run with ``init`` (``init_from.transfer``), else ``None``.
+    #: The ``task.json`` ``init`` block of a run with ``init``: the transfer's and the ``init_overlap`` hook's on a
+    #: fresh run, the run's own record's on a resume; ``None`` without ``init``.
     init_block: Optional[Dict[str, Any]] = None
     params: int = 0
     baseline: Dict[str, float] = dataclasses.field(default_factory=dict)
@@ -548,6 +549,15 @@ def build_model(run: Run) -> None:
                 trainer._init_source, run.model, trainer.task, run.family, run.variant,
                 trainer.task_record(config, run.context, data),
             )
+        # Counted and marked, never refused (D-012): the hook answers `unknown` for what it cannot rebuild.
+        split = trainer.init_overlap(trainer._init_source, config, data)
+        run.init_block["split"] = split
+        biased = any(init_from.bias_of(run.init_block).values())
+        (logger.warning if biased else logger.info)(f"init split: {split['relation']}: {split['reason']}")
+    elif config.init is not None:
+        from . import init_from
+
+        run.init_block = init_from.recorded_init(run.run_dir)  # a resume: the block its first attempt recorded
     # DECISION plan-2026-11-17T110935-9c7b9096/D-003: the task's optimizer options are asked
     # for ONCE, here, with the built model, and go to the one builder call below. Do NOT build a
     # second optimizer in the task or spread the options into ``compile``: the schedule and clip
@@ -783,6 +793,8 @@ def report(run: Run) -> TrainResult:
     from train.common.gpu import log_gpu_peak_memory
     from train.common.run_artifacts import write_summary_json
 
+    from . import init_from
+
     trainer, config, data, resume, run_dir = run.trainer, run.config, run.data, run.resume, run.run_dir
     metric_cfg: MetricArgs = config.metric_args
     monitor = metric_cfg.watch_metric
@@ -850,6 +862,8 @@ def report(run: Run) -> TrainResult:
         )
         if blocked:
             summary["success_blocked_by"] = list(blocked)
+        if run.init_block is not None:
+            summary.update(init_from.bias_of(run.init_block))
         # DECISION plan-2026-11-10T095307-d483ffab/D-004
         # The task's post-fit keys come through the VALUE ``evaluate_and_report`` returns, merged last
         # and never over a key the summary holds. Do NOT stash them on the trainer during
@@ -869,12 +883,12 @@ def report(run: Run) -> TrainResult:
     if smoke:
         logger.info(
             f"success_threshold not applicable under debug_args.smoke: best "
-            f"{trainer.success_metric} {reached:.4f}"
+            f"{trainer.success_metric} {reached:.4f}{init_from.bias_words(run.init_block)}"
         )
     else:
         logger.info(
             f"{'Reached' if met else 'Missed'} success_threshold {threshold:g} "
-            f"on {trainer.success_metric}: best {reached:.4f}"
+            f"on {trainer.success_metric}: best {reached:.4f}{init_from.bias_words(run.init_block)}"
         )
     if blocked:
         logger.warning(f"The run is not a success: failed checks {list(blocked)}")

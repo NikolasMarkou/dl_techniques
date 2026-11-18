@@ -430,6 +430,33 @@ class ImageDenoisingTrainer(TaskTrainer):
         transform_cfg: DenoiseTransformArgs = config.transform_args
         return {"channels": transform_cfg.channels, "data_range": unit_domain_stamp()}
 
+    def init_overlap(self, source: Any, config: ImageDenoisingConfig, data: Any) -> Dict[str, Any]:
+        """Every file of the source's train directories (a cap draws per epoch, so any of them may have trained),
+        listed and resolved as ``denoising_data.list_sources`` does, against this run's validation and held-out
+        files."""
+        from train.common.classification_data import _resolver
+        from train.common.denoising_data import list_images
+
+        from .. import init_from
+
+        theirs, ours = source.config.get("data") or {}, config.data
+        names = ("train_dirs", "val_dirs", "test_dirs", "max_val_files", "val_seed")
+        keys = {f"data.{name}": theirs.get(name) for name in names}
+        if keys == {f"data.{name}": getattr(ours, name) for name in names}:
+            return init_from.same_split("files", keys)
+        if not isinstance(theirs.get("train_dirs"), list):
+            return init_from.split_block("unknown", f"the source trained on {source.record['task']} data, whose "
+                                                    "files this task does not list")
+        try:
+            resolve = _resolver()
+            trained = {resolve(path) for folder in theirs["train_dirs"] for path in list_images(folder, "train_dirs")}
+        except (OSError, ValueError) as exc:
+            return init_from.split_block("unknown", f"the source's train directories cannot be listed: {exc}")
+        held = [path for files in self._held_out_sets.values() for path in files]
+        return init_from.counted_split(
+            "files", keys, sum(resolve(path) in trained for path in data.val_files), len(data.val_files),
+            sum(resolve(path) in trained for path in held), len(held))
+
     def check_model_args(self, config: ImageDenoisingConfig, context: AutoContext) -> None:
         # Before the claim: the adapter's own refusals (a key a bias-free family may not take, a layer that would put
         # a constant into the model), the patch size against the family's stride, and a loss a bias-free family may

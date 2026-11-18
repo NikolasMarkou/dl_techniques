@@ -88,6 +88,14 @@ Interface contract
         (a resume of such a run is refused by the run directory's own checks: it has no backup).
     :raises ConfigError: the record fails its check, or holds no ``init`` block.
 
+``split_block(relation, reason, keys=None, unit=None, counts=(None, None))``
+    The ``split`` of the ``init`` block, which each task's ``init_overlap`` hook returns after the claim: how the
+    source's training data meets this run's selection and test data (``same_split``, ``different_data``,
+    ``overlap`` with both counts, or ``unknown`` with the reason). :func:`same_split`, :func:`counted_split` and
+    :func:`seeded_rows_split` (classification and segmentation) build it; :func:`bias_of` gives the summary's
+    ``selection_biased``, ``test_biased`` and ``overlap_unknown`` and :func:`bias_words` the success line's words.
+    Nothing here refuses: an overlap is counted and marked.
+
 ``vit_pos_bicubic(value, target_shape)``
     :param value: a ``(1, 1 + m * m, d)`` table, class row first, then the row-major grid.
     :param target_shape: ``(1, 1 + n * n, d)`` with ``n > m``.
@@ -503,3 +511,122 @@ def recorded_init(run_dir: Path) -> Optional[Mapping[str, Any]]:
 
 #: Resample rules by the name a :class:`TransferSpec` declares.
 RULES: Dict[str, Callable[[Any, Tuple[int, ...]], Any]] = {"vit_pos_bicubic": vit_pos_bicubic}
+
+
+# ---------------------------------------------------------------------
+# The split identity: the source's training data against this run's selection and test data
+# ---------------------------------------------------------------------
+
+#: The reason of the default ``init_overlap`` hook.
+NOT_REBUILT = "this task does not rebuild a source's rows"
+
+#: Built-in datasets of other names that share images: Imagenette's are ImageNet's.
+SHARED_DATASETS = (frozenset(("imagenette", "imagenet")),)
+
+#: The ``data`` keys that say WHERE file data comes from (classification and segmentation, folder and csv).
+LOCATION_KEYS = ("train_dir", "test_dir", "train_images", "train_masks", "test_images", "test_masks", "train_csv",
+                 "test_csv")
+
+
+def split_block(relation: str, reason: str, keys: Optional[Mapping[str, Any]] = None, unit: Optional[str] = None,
+                counts: Tuple[Optional[int], Optional[int]] = (None, None)) -> Dict[str, Any]:
+    """The ``split`` of the ``init`` block (keys in :data:`train.api.predictor.INIT_SPLIT_KEYS`).
+
+    :param relation: ``same_split``, ``different_data``, ``overlap`` (counted) or ``unknown``.
+    :param reason: one sentence; for ``overlap`` it names the keys that would give 0.
+    :param keys: the source's values of the split keys (this run's equal to them is ``same_split``).
+    :param unit: what is counted (``rows``, ``files``, ``windows``, ``scenes``).
+    :param counts: the source's training data found in this run's selection and test data; ``None`` when ``unknown``.
+    """
+    return {"relation": relation, "unit": unit, "n_select_overlap": counts[0], "n_test_overlap": counts[1],
+            "reason": reason, "keys": dict(keys or {})}
+
+
+def listed(keys: Mapping[str, Any]) -> str:
+    return ", ".join(f"{name}={json.dumps(value)}" for name, value in keys.items())
+
+
+def same_split(unit: str, keys: Mapping[str, Any]) -> Dict[str, Any]:
+    """This run's split keys are the source's: the source trained on none of this run's held-out data."""
+    return split_block("same_split", f"{listed(keys)} equal the source's", keys, unit, (0, 0))
+
+
+def counted_split(unit: str, keys: Mapping[str, Any], in_select: int, n_select: int, in_test: int,
+                  n_test: int) -> Dict[str, Any]:
+    """The source's training data found in this run's selection and test data, counted."""
+    return split_block("overlap", f"the source trained on {in_select} of this run's {n_select} selection {unit} and "
+                                  f"{in_test} of its {n_test} test {unit}; {listed(keys)} as the source's give 0",
+                       keys, unit, (int(in_select), int(in_test)))
+
+
+def bias_of(block: Mapping[str, Any]) -> Dict[str, bool]:
+    """The summary's flags of an ``init`` block's ``split``: an overlap is counted and marked, never refused."""
+    split = block["split"]
+    return {"selection_biased": bool(split["n_select_overlap"]), "test_biased": bool(split["n_test_overlap"]),
+            "overlap_unknown": split["relation"] == "unknown"}
+
+
+def bias_words(block: Optional[Mapping[str, Any]]) -> str:
+    """What the success line adds for an ``init`` run: ``" (selection-biased, test-biased)"``, or nothing."""
+    if block is None:
+        return ""
+    flags = bias_of(block)
+    words = [word for key, word in (("selection_biased", "selection-biased"), ("test_biased", "test-biased"),
+                                    ("overlap_unknown", "split overlap unknown")) if flags[key]]
+    return f" ({', '.join(words)})" if words else ""
+
+
+def _fingerprint(path: Path) -> Optional[str]:
+    """The ``data_fingerprint`` of a source's fit sidecar, ``None`` when it has none (the sidecar is optional)."""
+    try:
+        return json.loads((path / "checkpoints" / "fit_state.json").read_text()).get("data_fingerprint")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def seeded_rows_split(source: Source, config: Any, data: Any, table: Optional[int] = None) -> Dict[str, Any]:
+    """The ``split`` of a classification or segmentation run: the seeded train cut of both runs, rebuilt and compared.
+
+    Both tasks cut ``seeded_split_indices(n, ..., seed, validation_split, max_samples)`` over one dataset or one
+    listing, and their test rows are another split the source never trained on (``n_test_overlap`` 0). ``n`` is this
+    run's pool when it is not capped below it, else ``table`` (a built-in dataset's train size), else unknown.
+    """
+    import numpy as np
+
+    from dl_techniques.datasets.vision.splits import seeded_split_indices
+    from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
+
+    theirs, ours = source.config.get("data") or {}, config.data
+    if theirs.get("format") == ours.format == "builtin" and theirs.get("dataset") != ours.dataset:
+        if frozenset((theirs.get("dataset"), ours.dataset)) in SHARED_DATASETS:
+            return split_block("unknown", f"the source trained on {theirs.get('dataset')} and this run reads "
+                                          f"{ours.dataset}, which share images")
+        return split_block("different_data", f"the source trained on {theirs.get('dataset')}, this run reads "
+                                             f"{ours.dataset}", {"data.dataset": theirs.get("dataset")}, None, (0, 0))
+    moved = [key for key in LOCATION_KEYS if theirs.get(key) != getattr(ours, key, None)]
+    if theirs.get("format") != ours.format or moved:
+        return split_block("unknown", f"the source read {theirs.get('format')} data "
+                                      f"{({key: theirs.get(key) for key in moved})}; rows are matched within one "
+                                      "dataset or one listing only")
+    if ours.format != "builtin" and _fingerprint(source.path) != data.fingerprint:
+        return split_block("unknown", "the source's fit sidecar records another data_fingerprint (or none) for this "
+                                      "listing, so its files may have changed")
+    def split_keys(seed: Any, split: Optional[float], cap: Optional[int]) -> Dict[str, Any]:
+        return {"seed": seed, "data.validation_split": DEFAULT_VALIDATION_SPLIT if split is None else split,
+                "data.max_samples": cap}
+
+    keys = split_keys(source.config.get("seed"), theirs.get("validation_split"), theirs.get("max_samples"))
+    mine = split_keys(config.seed, ours.validation_split, ours.max_samples)
+    if keys == mine:
+        return same_split("rows", keys)
+    pool = data.n_train + data.n_select
+    n = pool if ours.max_samples is None or pool < ours.max_samples else table
+    if n is None:
+        return split_block("unknown", f"this run caps data.max_samples at {ours.max_samples}, so the size of the "
+                                      "listing both cuts permute is not known")
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-012: the source's rows are rebuilt with the SOURCE's seed, split and
+    # cap (its config.json), this run's with its own. Do NOT take the source's rows from this run's keys or data: the
+    # two cuts would then coincide, the count read 0 and a selection-biased verdict pass as unbiased.
+    trained = seeded_split_indices(n, 0, keys["seed"], keys["data.validation_split"], keys["data.max_samples"])[0]
+    selected = seeded_split_indices(n, 0, config.seed, mine["data.validation_split"], ours.max_samples)[1]
+    return counted_split("rows", keys, np.intersect1d(trained, selected).size, len(selected), 0, data.n_test)

@@ -399,6 +399,50 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         data_cfg: TimeSeriesData = config.data
         return {"lookback": data_cfg.lookback, "horizon": data_cfg.horizon, "channels": self._series(data_cfg)[2]}
 
+    def init_overlap(self, source: Any, config: TimeSeriesForecastingConfig, data: Any) -> Dict[str, Any]:
+        """The source's train segment (``split_bounds`` of its fractions) against this run's select and test windows.
+
+        A window counts when one of its rows lies in the source's train segment of the same series; the whole segment
+        counts as trained (the train windows are drawn anywhere in it).
+        """
+        from .. import init_from
+        from ..forecast_series import split_bounds
+
+        theirs, ours = source.config.get("data") or {}, config.data
+        if theirs.get("format") != ours.format:
+            return init_from.split_block("different_data", f"the source read {theirs.get('format')} data, this run "
+                                                           f"{ours.format}", {"data.format": theirs.get("format")},
+                                         None, (0, 0))
+        # DECISION plan-2026-11-18T072904-0fd54b91/D-037
+        # A builtin bank is keyed on (seed, pattern, realization) at its series_length and noise_level; a csv by its
+        # bytes and columns. Do NOT call other patterns or realizations at the same seed different data: the series
+        # both banks hold are the same series, so that is unknown, not a count of 0.
+        if ours.format == "csv":
+            same = (source.record.get("data_sha256"), source.record.get("value_cols")) == (
+                data.csv_sha256, None if data.value_cols is None else list(data.value_cols))
+            if not same:
+                return init_from.split_block("unknown", "the source read another csv file or other value columns; "
+                                                        "windows are matched within one file's columns only")
+        else:
+            bank = {"seed": source.config.get("seed"), **{f"data.{key}": theirs.get(key)
+                                                          for key in ("series_length", "noise_level")}}
+            if bank != {"seed": config.seed, "data.series_length": ours.series_length,
+                        "data.noise_level": ours.noise_level}:
+                return init_from.split_block("different_data", f"the source's bank is {init_from.listed(bank)}; every "
+                                                               "series of this run's bank is another draw", bank, None,
+                                             (0, 0))
+            if (theirs.get("patterns"), theirs.get("realizations")) != (ours.patterns, ours.realizations):
+                return init_from.split_block("unknown", "the source's bank holds other patterns or realizations of "
+                                                        "the same seed, so some series are in both banks; windows are "
+                                                        "matched within one bank only")
+        keys = {f"data.{key}": theirs.get(key) for key in ("select_fraction", "test_fraction")}
+        if keys == {"data.select_fraction": ours.select_fraction, "data.test_fraction": ours.test_fraction}:
+            return init_from.same_split("windows", keys)
+        trained_to = split_bounds(data.bank.shape[1], keys["data.select_fraction"], keys["data.test_fraction"])[0][1]
+        select, test = (windows[:, 1] for windows in (data.select_windows, data.test_windows))
+        return init_from.counted_split("windows", keys, (select < trained_to).sum(), len(select),
+                                       (test < trained_to).sum(), len(test))
+
     # -- compile --------------------------------------------------------
 
     def metric_names(self, config: TimeSeriesForecastingConfig, facts: DataFacts) -> List[str]:

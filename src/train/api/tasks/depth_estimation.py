@@ -279,6 +279,25 @@ class DepthEstimationTrainer(TaskTrainer):
         """Return the channels and the scaling this run's record will hold, for an ``init`` source."""
         return {"channels": DEPTH_CHANNELS, "normalize": DEPTH_NORMALIZE}
 
+    def init_overlap(self, source: Any, config: DepthEstimationConfig, data: Any) -> Dict[str, Any]:
+        """The source's train scenes (``split_megadepth_scenes`` of its root and ``train_split``) against this run's
+        selection and test scenes, by scene name (a MegaDepth scene's id)."""
+        from train.common.megadepth import split_megadepth_scenes
+
+        from .. import init_from
+
+        theirs = source.config.get("data") or {}
+        keys = {"data.root": theirs.get("root"), "data.train_split": theirs.get("train_split")}
+        if keys == {"data.root": config.data.root, "data.train_split": config.data.train_split}:
+            return init_from.same_split("scenes", keys)
+        try:
+            trained = {name for name, _, _ in split_megadepth_scenes(theirs["root"], theirs["train_split"])[0]}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return init_from.split_block("unknown", f"the source's scenes cannot be listed: {exc!r}")
+        return init_from.counted_split(
+            "scenes", keys, len(trained & set(data.select_scenes)), len(data.select_scenes),
+            len(trained & set(data.test_scenes)), len(data.test_scenes))
+
     def task_record(self, config: DepthEstimationConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
         """Return the depth ``task.json`` record: the size the model is built at (``data.input_shape``, which
         ``build_model`` builds it at) and its channels; nothing of the model is needed, so a resume asks for it before

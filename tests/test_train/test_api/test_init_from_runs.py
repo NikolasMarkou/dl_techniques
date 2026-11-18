@@ -17,6 +17,11 @@ and start targets from them: the weights ``fit`` starts from are read by a callb
 relative to the model, with the source archive's; the ``task.json`` ``init`` block is compared with what was
 copied, resampled, reset, grown and dropped; a resume reads its pins from its own record and opens no file of the
 source. ``keras.backend.clear_session()`` runs before every run, as a fresh process would start.
+
+The ``split`` tests (D-012, D-037): the source's training data against this run's selection and test data, counted and
+never refused. Each count is compared with an oracle written here (numpy set intersections of the seeded cuts, the
+forecasting segment arithmetic, the scene sets); the task hooks are called on fake data where a run would add nothing,
+and two real tiny runs check the record, the summary flags, the success line and that the run succeeds.
 """
 
 import builtins
@@ -41,7 +46,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from train.api import cli, predictor, recipes, registry, resume_decisions
+from train.api import cli, init_from, predictor, recipes, registry, resume_decisions
 from train.api.args import AutoContext
 from train.api.config import validate
 from train.api.depth_args import PRETRAINED_LR
@@ -53,10 +58,14 @@ from train.api.tasks.image_classification import (
     ImageClassificationTrainer,
     train_image_classification,
 )
-from train.api.tasks.image_denoising import ImageDenoisingTrainer, train_image_denoising
+from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoisingTrainer, train_image_denoising
 from train.api.tasks.image_segmentation import ImageSegmentationTrainer, train_image_segmentation
 from train.api.tasks.pretrain import train_pretrain
-from train.api.tasks.time_series_forecasting import TimeSeriesForecastingTrainer, train_time_series_forecasting
+from train.api.tasks.time_series_forecasting import (
+    TimeSeriesForecastingConfig,
+    TimeSeriesForecastingTrainer,
+    train_time_series_forecasting,
+)
 from train.api.trainer import TaskTrainer
 
 from ._forecast_fixtures import world  # noqa: F401  (a module-scope fixture: the one registry world)
@@ -907,3 +916,188 @@ def test_resume_a_user_value_against_the_records_pin_is_refused_before_the_claim
     with pytest.raises(ConfigError, match=r"'model_args\.patch_size': the source was built with patch_size=4"):
         train_image_classification(**{**vit_64.request, "out": str(run_dir), "resume_interrupted": True,
                                       "model_args": {"patch_size": 16}})
+
+
+# ---------------------------------------------------------------------
+# split: the source's training data against this run's held-out data; counted and marked, never refused
+# ---------------------------------------------------------------------
+
+
+def a_source(config: Dict[str, Any], record: Optional[Dict[str, Any]] = None, path: Path = Path("/nowhere")) -> Any:
+    """A source as ``read_source`` returns it, from its ``config.json`` (only what the hooks read)."""
+    return init_from.Source(path, record or classification_record(), config, "0" * 64, None, {})
+
+
+def cut(n: int, seed: int, fraction: float = 0.1, cap: Optional[int] = None):
+    """The ORACLE's seeded cut, written here: ``n`` rows permuted by ``seed``, capped, the first ``fraction`` held out.
+
+    :return: ``(trained rows, selection rows)`` as sets.
+    """
+    order = np.random.default_rng(seed).permutation(n)[:cap]
+    held = int(len(order) * fraction)
+    return set(order[held:].tolist()), set(order[:held].tolist())
+
+
+#: ``name: (the source's seed, data, the target's seed)``, CIFAR-10-shaped (50,000 train rows, 10,000 test rows).
+CIFAR_CASES = {
+    "seed_43": (42, {}, 43),
+    "same_keys": (42, {}, 42),
+    "capped_source": (42, {"max_samples": 20000}, 42),
+    "other_dataset": (42, {"dataset": "cifar100"}, 42),
+}
+
+
+@pytest.mark.parametrize("case", sorted(CIFAR_CASES))
+def test_split_a_cifar10_target_counts_the_sources_rows_as_the_oracle(world, tmp_path, case):
+    seed, extra, target_seed = CIFAR_CASES[case]
+    data = {"format": "builtin", "dataset": "cifar10", "validation_split": None, "max_samples": None, **extra}
+    trainer = ImageClassificationTrainer(classifier_config(tmp_path / "run", seed=target_seed))
+    fake = SimpleNamespace(n_train=45000, n_select=5000, n_test=10000, fingerprint=None)
+    split = trainer.init_overlap(a_source({"seed": seed, "data": data}), trainer.config, fake)
+    assert predictor._split_problems(split) == []
+    flags = init_from.bias_of({"split": split})
+    if case == "other_dataset":
+        assert (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == ("different_data", 0, 0)
+        assert not any(flags.values())
+        return
+    trained = cut(50000, seed, cap=extra.get("max_samples"))[0]
+    expected = len(trained & cut(50000, target_seed)[1])
+    assert split["n_select_overlap"] == expected and split["n_test_overlap"] == 0
+    if case == "same_keys":
+        assert expected == 0 and split["relation"] == "same_split" and not any(flags.values())
+    else:
+        assert expected > 0 and split["relation"] == "overlap" and split["unit"] == "rows"
+        assert flags == {"selection_biased": True, "test_biased": False, "overlap_unknown": False}
+        assert "seed=42" in split["reason"] and f"of this run's 5000 selection rows" in split["reason"]
+
+
+def cifar_request(out: Path, **changes: Any) -> Dict[str, Any]:
+    return {"out": str(out), "model": "vit/vit_pico", "data": {"dataset": "cifar10"}, **QUIET, **changes}
+
+
+@pytest.fixture(scope="module")
+def cifar_source(world, tmp_path_factory):
+    """vit_pico on tiny CIFAR-10 stand-in arrays (40 train rows), seed 42, 1 epoch."""
+    from tests.classification_fakes import use_tiny_raw
+
+    out = tmp_path_factory.mktemp("cifar_source") / "run"
+    with pytest.MonkeyPatch.context() as patch:
+        use_tiny_raw(patch, n_train=40, n_test=8)
+        keras.backend.clear_session()
+        train_image_classification(**cifar_request(out, seed=42))
+    return out
+
+
+def summary_of(run_dir: Path) -> Dict[str, Any]:
+    return json.loads((Path(run_dir) / "results_summary.json").read_text())
+
+
+def test_split_end_to_end_an_overlap_and_an_unknown_split_are_marked_and_the_runs_succeed(
+        world, cifar_source, trees, tmp_path, monkeypatch):
+    from tests.classification_fakes import use_tiny_raw
+
+    use_tiny_raw(monkeypatch, n_train=40, n_test=8)
+    out = tmp_path / "seed43"
+    keras.backend.clear_session()
+    assert train_image_classification(**cifar_request(out, seed=43, init=str(cifar_source))).success is True
+    record = record_of(out)
+    split = record["init"]["split"]
+    expected = len(cut(40, 42)[0] & cut(40, 43)[1])
+    assert expected > 0 and (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == (
+        "overlap", expected, 0)
+    flags = {key: summary_of(out)[key] for key in ("selection_biased", "test_biased", "overlap_unknown")}
+    assert flags == {"selection_biased": True, "test_biased": False, "overlap_unknown": False}
+    log = (out / "run.log").read_text()
+    assert re.search(r"Reached success_threshold \S+ on \S+: best \S+ \(selection-biased\)", log), log[-2000:]
+    assert "seed=42, data.validation_split=0.1, data.max_samples=null as the source's give 0" in log
+    assert predictor.record_problems(record) == []
+    for broken in ({**split, "n_select_overlap": None}, {**split, "relation": "leaked"}, {**split, "extra": 1}):
+        assert predictor.record_problems({**record, "init": {**record["init"], "split": broken}}) != []
+    # A folder target of a built-in source: no rule matches its files to the source's rows.
+    out = tmp_path / "folder"
+    keras.backend.clear_session()
+    assert train_image_classification(**classify(str(out), trees["ten"], 32, init=str(cifar_source))).success is True
+    split = record_of(out)["init"]["split"]
+    assert (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == ("unknown", None, None)
+    assert summary_of(out)["overlap_unknown"] is True and summary_of(out)["selection_biased"] is False
+    assert "(split overlap unknown)" in (out / "run.log").read_text()
+
+
+def test_split_the_default_hook_is_unknown_with_its_reason():
+    split = TaskTrainer.init_overlap(SimpleNamespace(), None, None, None)
+    assert split == init_from.split_block("unknown", "this task does not rebuild a source's rows")
+    assert predictor._split_problems(split) == []
+    assert init_from.bias_words({"split": split}) == " (split overlap unknown)" and init_from.bias_words(None) == ""
+
+
+FORECAST_DATA = {"format": "builtin", "dataset": "synthetic", "lookback": 32, "horizon": 8, "realizations": 1,
+                 "series_length": 600, "noise_level": 0.1, "patterns": ["ar_process"], "select_fraction": 0.15,
+                 "test_fraction": 0.15}
+
+
+def test_split_forecasting_counts_windows_in_the_sources_train_segment(world, tmp_path):
+    def trainer(seed: int = 42, **data: Any) -> Any:
+        return TimeSeriesForecastingTrainer(validate(TimeSeriesForecastingConfig, {
+            "out": str(tmp_path / "run"), "model": "tirex/tiny", "seed": seed, "data": {**FORECAST_DATA, **data}}))
+
+    source = a_source({"seed": 42, "data": dict(FORECAST_DATA)}, forecast_record("tirex/tiny", 32, 8))
+    # This run's select segment begins at 600 - 180 - 90 = 330; the source trained on rows [0, 600 - 90 - 90 = 420).
+    starts = np.arange(330, 500, 7)
+    fake = SimpleNamespace(bank=np.zeros((1, 600, 1)), select_windows=np.stack([0 * starts, starts], 1),
+                           test_windows=np.array([[0, 520], [0, 550]]), csv_sha256=None, value_cols=None)
+    longer = trainer(select_fraction=0.3)
+    split = longer.init_overlap(source, longer.config, fake)
+    assert (split["relation"], split["unit"]) == ("overlap", "windows")
+    assert 0 < (starts < 420).sum() < len(starts)
+    assert (split["n_select_overlap"], split["n_test_overlap"]) == (int((starts < 420).sum()), 0)
+    same = trainer(lookback=64)
+    assert same.init_overlap(source, same.config, fake)["relation"] == "same_split"
+    other = trainer(seed=43)
+    assert other.init_overlap(source, other.config, fake)["relation"] == "different_data"
+    shared = trainer(realizations=2)
+    assert shared.init_overlap(source, shared.config, fake)["relation"] == "unknown"
+
+
+def test_split_depth_counts_the_sources_train_scenes_among_this_runs(world, megadepth_tree, tmp_path):
+    from train.common.depth_data import deal_megadepth_scenes
+    from train.common.megadepth import split_megadepth_scenes
+
+    def trainer(split: float) -> Any:
+        return DepthEstimationTrainer(validate(DepthEstimationConfig, {
+            "out": str(tmp_path / "run"), "model": "depth_anything/vit_s",
+            "data": {"root": str(megadepth_tree), "train_split": split}}))
+
+    deal = deal_megadepth_scenes(str(megadepth_tree), 0.4)
+    fake = SimpleNamespace(select_scenes=[name for name, _, _ in deal.select],
+                           test_scenes=[name for name, _, _ in deal.test])
+    source = a_source({"data": {"root": str(megadepth_tree), "train_split": 0.6}}, depth_record())
+    trained = {name for name, _, _ in split_megadepth_scenes(str(megadepth_tree), 0.6)[0]}
+    expected = len(trained & set(fake.select_scenes)), len(trained & set(fake.test_scenes))
+    target = trainer(0.4)
+    split = target.init_overlap(source, target.config, fake)
+    assert sum(expected) > 0 and split["relation"] == "overlap"
+    assert (split["n_select_overlap"], split["n_test_overlap"]) == expected
+    same = trainer(0.6)
+    assert same.init_overlap(source, same.config, fake)["relation"] == "same_split"
+    moved = a_source({"data": {"root": str(tmp_path / "moved"), "train_split": 0.6}}, depth_record())
+    assert target.init_overlap(moved, target.config, fake)["relation"] == "unknown"
+
+
+def test_split_denoising_counts_the_sources_train_files_among_this_runs_held_out_files(world, tmp_path):
+    from .test_image_denoising_task import mapping, write_images
+
+    train, val, held = (write_images(tmp_path / name, 3, seed) for seed, name in enumerate(("train", "val", "held")))
+    target = ImageDenoisingTrainer(validate(ImageDenoisingConfig, mapping(tmp_path / "run", (train, val))))
+    target._held_out_sets = {"held": sorted(str(path) for path in held.iterdir())}
+    fake = SimpleNamespace(val_files=tuple(sorted(str(path) for path in val.iterdir())))
+    # The source trained on this run's validation and held-out directories.
+    source = a_source({"data": {"train_dirs": [str(val), str(held)], "val_dirs": [str(train)]}})
+    split = target.init_overlap(source, target.config, fake)
+    assert (split["relation"], split["unit"], split["n_select_overlap"], split["n_test_overlap"]) == (
+        "overlap", "files", 3, 3)
+    assert init_from.bias_of({"split": split}) == {"selection_biased": True, "test_biased": True,
+                                                  "overlap_unknown": False}
+    apart = a_source({"data": {"train_dirs": [str(train)], "val_dirs": [str(val)]}})
+    assert target.init_overlap(apart, target.config, fake)["n_select_overlap"] == 0
+    gone = a_source({"data": {"train_dirs": [str(tmp_path / "gone")], "val_dirs": [str(val)]}})
+    assert target.init_overlap(gone, target.config, fake)["relation"] == "unknown"

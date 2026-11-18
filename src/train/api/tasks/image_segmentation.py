@@ -265,6 +265,12 @@ class ImageSegmentationTrainer(TaskTrainer):
         decodes every image to RGB (``SegmentationData.input_shape`` is ``(H, W, 3)``) and never standardizes."""
         return {"channels": 3, "normalize": NORMALIZE}
 
+    def init_overlap(self, source: Any, config: ImageSegmentationConfig, data: Any) -> Dict[str, Any]:
+        """The seeded train cut of the source against this run's (:func:`train.api.init_from.seeded_rows_split`)."""
+        from .. import init_from
+
+        return init_from.seeded_rows_split(source, config, data)
+
     def check_model_args(self, config: ImageSegmentationConfig, context: AutoContext) -> None:
         # Before the claim: the adapter's own keys are refused by the resolver, and each side of
         # the image size must be a multiple of the family's stride (D-072), which depends on the

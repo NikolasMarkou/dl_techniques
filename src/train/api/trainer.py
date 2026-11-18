@@ -307,6 +307,12 @@ Hooks (override in a task)
     the task's record has). An ``init`` source's record is compared with it (the family's ``fixed`` keys and
     the input scaling, :func:`train.api.init_from.read_source`). Called only when ``init`` is set and the run
     is not a resume. Default: refuses ``init``, naming the task (pretrain keeps it).
+``init_overlap(source, config, data)``
+    The ``split`` of the ``init`` block (:func:`train.api.init_from.split_block`): the source's training data
+    (``source`` is the :class:`~train.api.init_from.Source` read before the claim) against this run's selection and
+    test data, after ``build_data``, on a fresh run only. Never refuses: an overlap is counted and marked, and what
+    cannot be rebuilt is ``unknown`` with the reason. Default: ``unknown``, "this task does not rebuild a source's
+    rows".
 ``used_arguments(config, context)``
     A JSON-plain mapping written to ``config.json`` under the key ``used``: what
     the run is built with beyond the config's fields (D-050). Default: empty, which
@@ -751,6 +757,12 @@ class TaskTrainer:
         :raises ConfigError: always, naming the task: a task that does not override this takes no earlier weights.
         """
         raise ConfigError(f"Invalid value for 'init': the task {self.task!r} does not start from earlier weights")
+
+    def init_overlap(self, source: Any, config: StrictConfig, data: Any) -> Dict[str, Any]:
+        """Return the ``init`` block's ``split`` (the module contract); default: ``unknown``."""
+        from . import init_from
+
+        return init_from.split_block("unknown", init_from.NOT_REBUILT)
 
     def used_arguments(self, config: StrictConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run is built with beyond the config, for ``config.json``.
