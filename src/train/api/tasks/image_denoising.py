@@ -39,7 +39,8 @@ Interface contract
 
     The verdict. ``success_value`` is the best ``val_psnr`` of the window MINUS ``input_psnr`` (a gain in dB) and
     ``success_threshold`` is ``metric_args.success_gain_db`` (auto 1.0 dB): a denoiser that does not beat its own input
-    by the gain has learned nothing, and the run exits 1 with both numbers in the summary.
+    by the gain has learned nothing, and the run exits 1 with both numbers in the summary. Under ``init`` ``bar_is_met``
+    also needs the raw ``val_psnr`` strictly above the loaded weights' by the tie band, in float32 steps of that value.
 
     The epoch-0 check is the ratio of the untrained model's loss to the loss of the identity on the same set
     (``initial_loss_ratio``); no verdict on the initialization is given (``init_scale_warning`` is null, and
@@ -580,6 +581,14 @@ class ImageDenoisingTrainer(TaskTrainer):
             )
         window = hist[self.success_metric][self._window_start:]
         return float(max(window)) - float(self._identity["psnr"])
+
+    def bar_is_met(self, config: ImageDenoisingConfig, reached: float, threshold: float) -> bool:
+        """The base bar, with the loaded-weights term on the raw ``val_psnr`` (the gain plus the input's PSNR)."""
+        # DECISION plan-2026-11-18T072904-0fd54b91/D-045
+        # The tie band is float32 steps of the value the metric rounds, the raw val_psnr. Do NOT band the gain: at a gain
+        # of 0.5 dB over a 20 dB input, 16 steps of 0.5 are half a step of 20.5, so a re-evaluation one step higher passes.
+        offset = (self._identity or {}).get("psnr", 0.0)
+        return bool(reached >= threshold) and init_from.beats_loaded(reached, self._loaded, self.success_metric, offset)
 
     def success_threshold(self, config: ImageDenoisingConfig) -> float:
         # DECISION plan-2026-11-10T095307-d483ffab/D-013

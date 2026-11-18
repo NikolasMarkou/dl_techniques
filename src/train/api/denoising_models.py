@@ -784,6 +784,6 @@ def builtin_denoising_models() -> Tuple[ModelSpec, ...]:
             defaults=SCUNET,
             resolve_model_args=f"{_HERE}:resolve_denoising_args",
             observe=f"{_HERE}:observe_scunet",
-            transfer=_denoiser_transfer("scu_net/enhancement_head/output_conv"),
+            transfer=_denoiser_transfer("enhancement_head/output_conv"),
         ),
     )

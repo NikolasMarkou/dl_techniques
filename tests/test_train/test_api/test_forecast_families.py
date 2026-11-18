@@ -705,7 +705,7 @@ def test_the_documented_defaults():
     d = fa.TimeSeriesData()
     assert (d.format, d.dataset, d.path, d.value_cols, d.time_col) == ("builtin", "synthetic", None, None, None)
     assert (d.lookback, d.horizon) == ("auto", "auto"), "the two numbers live in the family recipe, not here"
-    assert (d.realizations, d.series_length, d.noise_level, d.patterns) == (4, 10_000, 0.1, None)
+    assert (d.realizations, d.series_length, d.patterns) == (4, 10_000, None)
     assert (d.select_fraction, d.test_fraction) == (0.15, 0.15)
     assert (d.n_select, d.n_test, d.steps_per_epoch, d.max_samples) == (None,) * 4
     assert fa.ForecastTransformArgs().scale_floor == 1e-6, "D-040: about eight float32 steps of relative resolution"
@@ -725,6 +725,16 @@ def test_an_unknown_key_is_refused_with_a_suggestion(group):
             fa.load_forecast_data_config({"horizon": 4, near: 1})
 
 
+@pytest.mark.parametrize("value", [0.1, 0.2])
+def test_noise_level_is_no_key_since_the_bank_never_read_it(value):
+    # D-044 (review R5): every generator pattern draws at its own noise level (measured: 32 of 69 patterns take one,
+    # and the default bank is byte-identical at 0.1 and 0.2), so the key changed nothing; it is gone, refused by name.
+    with pytest.raises(ConfigValidationError, match="Unknown key 'noise_level'"):
+        validate(fa.TimeSeriesData, {"noise_level": value})
+    with pytest.raises(ConfigValidationError, match="Unknown key 'noise_level'"):
+        fa.load_forecast_data_config({"horizon": 4, "noise_level": value})
+
+
 @pytest.mark.parametrize(
     "group, given",
     [
@@ -732,7 +742,6 @@ def test_an_unknown_key_is_refused_with_a_suggestion(group):
         (fa.TimeSeriesData, {"lookback": 2.5}),
         (fa.TimeSeriesData, {"horizon": True}),
         (fa.TimeSeriesData, {"realizations": 2.5}),
-        (fa.TimeSeriesData, {"noise_level": "high"}),
         (fa.TimeSeriesData, {"patterns": "sine"}),
         (fa.TimeSeriesData, {"patterns": [1]}),
         (fa.TimeSeriesData, {"value_cols": "a"}),
@@ -759,7 +768,6 @@ def test_a_wrong_type_or_choice_is_refused_naming_its_key(group, given):
         ({"horizon": -3}, "horizon"),
         ({"realizations": 0}, "realizations"),
         ({"series_length": 0}, "series_length"),
-        ({"noise_level": -0.1}, "noise_level"),
         ({"select_fraction": 0.0}, "select_fraction"),
         ({"test_fraction": 1.0}, "test_fraction"),
         ({"select_fraction": 0.5, "test_fraction": 0.5}, "select_fraction"),
@@ -775,7 +783,6 @@ def test_a_wrong_type_or_choice_is_refused_naming_its_key(group, given):
         ({"format": "csv", "path": "x.csv", "realizations": 8}, "realizations"),
         ({"format": "csv", "path": "x.csv", "patterns": ["sine"]}, "patterns"),
         ({"format": "csv", "path": "x.csv", "series_length": 500}, "series_length"),
-        ({"format": "csv", "path": "x.csv", "noise_level": 0.2}, "noise_level"),
         ({"format": "csv", "path": "x.csv", "value_cols": []}, "value_cols"),
     ],
 )
@@ -1096,7 +1103,7 @@ def test_the_segment_refusal_is_the_loaders_wording():
     from train.common.forecast_data import load_forecast_batches
 
     kwargs = dict(format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None, lookback=64,
-                  horizon=16, realizations=1, series_length=200, noise_level=0.1, patterns=["random_walk"],
+                  horizon=16, realizations=1, series_length=200, patterns=["random_walk"],
                   select_fraction=0.15, test_fraction=0.15, n_select=None, n_test=None, steps_per_epoch=None,
                   max_samples=None, batch_size=4, seed=1, stream_seed=None, scale_floor=1e-3)
     with pytest.raises(ConfigError) as in_loader:

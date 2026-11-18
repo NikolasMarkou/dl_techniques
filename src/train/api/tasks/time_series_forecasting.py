@@ -270,7 +270,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         data = forecast_data.load_forecast_batches(
             format=data_cfg.format, dataset=data_cfg.dataset, path=data_cfg.path, value_cols=data_cfg.value_cols,
             time_col=data_cfg.time_col, lookback=data_cfg.lookback, horizon=data_cfg.horizon,
-            realizations=data_cfg.realizations, series_length=data_cfg.series_length, noise_level=data_cfg.noise_level,
+            realizations=data_cfg.realizations, series_length=data_cfg.series_length,
             patterns=data_cfg.patterns, select_fraction=data_cfg.select_fraction, test_fraction=data_cfg.test_fraction,
             n_select=data_cfg.n_select, n_test=data_cfg.n_test, steps_per_epoch=data_cfg.steps_per_epoch,
             max_samples=data_cfg.max_samples, batch_size=config.batch_size, seed=config.seed, stream_seed=None,
@@ -413,10 +413,12 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             return init_from.split_block("different_data", f"the source read {theirs.get('format')} data, this run "
                                                            f"{ours.format}", {"data.format": theirs.get("format")},
                                          None, (0, 0))
-        # DECISION plan-2026-11-18T072904-0fd54b91/D-037
-        # A builtin bank is keyed on (seed, pattern, realization) at its series_length and noise_level; a csv by its
-        # bytes and columns. Do NOT call other patterns or realizations at the same seed different data: the series
-        # both banks hold are the same series, so that is unknown, not a count of 0.
+        # DECISION plan-2026-11-18T072904-0fd54b91/D-037 (amended by D-045)
+        # A builtin bank is keyed on (seed, pattern, realization) at its series_length; a csv by its bytes and columns.
+        # Do NOT call another seed, series_length, patterns or realizations different data: the deterministic patterns
+        # barely move with the seed, a shorter series is the start of a longer one at one seed (measured), and banks of
+        # other patterns share the series both hold; each is unknown, not a count of 0. A source's recorded
+        # data.noise_level is not compared: the generator never read it (D-044).
         if ours.format == "csv":
             same = (source.record.get("data_sha256"), source.record.get("value_cols")) == (
                 data.csv_sha256, None if data.value_cols is None else list(data.value_cols))
@@ -424,13 +426,18 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
                 return init_from.split_block("unknown", "the source read another csv file or other value columns; "
                                                         "windows are matched within one file's columns only")
         else:
-            bank = {"seed": source.config.get("seed"), **{f"data.{key}": theirs.get(key)
-                                                          for key in ("series_length", "noise_level")}}
-            if bank != {"seed": config.seed, "data.series_length": ours.series_length,
-                        "data.noise_level": ours.noise_level}:
-                return init_from.split_block("different_data", f"the source's bank is {init_from.listed(bank)}; every "
-                                                               "series of this run's bank is another draw", bank, None,
-                                             (0, 0))
+            if source.config.get("seed") != config.seed:
+                return init_from.split_block("unknown", f"the source's bank is of seed {source.config.get('seed')}; the "
+                                                        "generator's deterministic patterns (trends, chaotic maps, fixed "
+                                                        "seasonalities) barely move with the seed, so some of its series "
+                                                        "are near-copies of this run's; windows are matched within one "
+                                                        "bank only")
+            if theirs.get("series_length") != ours.series_length:
+                return init_from.split_block("unknown", "the source's bank is of data.series_length "
+                                                        f"{theirs.get('series_length')}; at one seed the shorter series "
+                                                        "begins with the rows of the longer one, so this run's windows "
+                                                        "may lie in rows the source trained on; windows are matched "
+                                                        "within one bank only")
             if (theirs.get("patterns"), theirs.get("realizations")) != (ours.patterns, ours.realizations):
                 return init_from.split_block("unknown", "the source's bank holds other patterns or realizations of "
                                                         "the same seed, so some series are in both banks; windows are "

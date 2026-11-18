@@ -16,11 +16,11 @@ pieces live on the ``train.api`` side so that a check before the claim can reach
 Interface contract
 ------------------
 ``load_forecast_batches(*, format, dataset, path, value_cols, time_col, lookback, horizon, realizations,
-series_length, noise_level, patterns, select_fraction, test_fraction, n_select, n_test, steps_per_epoch,
+series_length, patterns, select_fraction, test_fraction, n_select, n_test, steps_per_epoch,
 max_samples, batch_size, seed, stream_seed, scale_floor)``
     Keyword only; the config owns the defaults. ``format`` is ``builtin`` (the synthetic bank; ``dataset`` must
-    be ``synthetic``; ``realizations``, ``series_length``, ``noise_level`` and ``patterns`` apply) or ``csv``
-    (``path``, ``value_cols``, ``time_col`` apply; the four synthetic arguments are ignored).
+    be ``synthetic``; ``realizations``, ``series_length`` and ``patterns`` apply; every pattern draws at its own
+    noise level) or ``csv`` (``path``, ``value_cols``, ``time_col`` apply; the three synthetic arguments are ignored).
     :param seed: the split seed: keys the bank and the select and test windows. Never changes on a resume.
     :param stream_seed: keys the train windows only; ``None`` means ``seed``.
     :param scale_floor: a context is flat when its std is not above ``max(FLOAT32_TINY, scale_floor * mean|x|)``, see :func:`context_stats_np`.
@@ -190,13 +190,17 @@ def _bank_seed(seed: int, pattern: str, realization: int) -> int:
 
 
 def build_bank(
-        *, patterns: Sequence[str], seed: int, realizations: int, series_length: int, noise_level: float,
+        *, patterns: Sequence[str], seed: int, realizations: int, series_length: int,
 ) -> Tuple[np.ndarray, List[Tuple[str, int]], List[Tuple[str, int]]]:
     """``(series, owners, dropped)``: finite series ``(n, series_length)`` float64 and who made them.
 
     One fresh generator per ``(pattern, realization)``, seeded from a sha256 of ``(seed, pattern, realization)``:
     the bank is a pure function of its arguments, in any pattern order and in any interpreter.
     """
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-044
+    # Each pattern draws at its own noise level. Do NOT add a bank-wide noise key back: the generator's default level
+    # reached no pattern (the bank was byte-identical at 0.1 and 0.2), and forcing one level on every pattern that
+    # takes one would change the default bank (measured: 92 of its 276 series).
     # DECISION plan-2026-11-13T105600-3a8319ef/D-004
     # A fresh generator per (pattern, realization) with a derived seed (about 10 ms each). Do NOT share one
     # generator: its RandomState is stateful, so a series would depend on how many draws came before it and
@@ -208,8 +212,7 @@ def build_bank(
     for pattern in patterns:
         for realization in range(realizations):
             generator = TimeSeriesGenerator(TimeSeriesGeneratorConfig(
-                n_samples=series_length, random_seed=_bank_seed(seed, pattern, realization),
-                default_noise_level=noise_level))
+                n_samples=series_length, random_seed=_bank_seed(seed, pattern, realization)))
             series = np.asarray(generator.generate_task_data(pattern), np.float64).reshape(-1)
             if series.shape[0] != series_length:
                 refuse(f"pattern {pattern!r} gave {series.shape[0]} points, not data.series_length = {series_length}")
@@ -366,7 +369,7 @@ def _strided_positions(name: str, segment: Tuple[int, int], requested: Optional[
 def load_forecast_batches(
         *, format: str, dataset: Optional[str], path: Optional[str], value_cols: Optional[Sequence[str]],
         time_col: Optional[str], lookback: int, horizon: int, realizations: Optional[int],
-        series_length: Optional[int], noise_level: Optional[float], patterns: Optional[Sequence[str]],
+        series_length: Optional[int], patterns: Optional[Sequence[str]],
         select_fraction: float, test_fraction: float, n_select: Optional[int], n_test: Optional[int],
         steps_per_epoch: Optional[int], max_samples: Optional[int], batch_size: int, seed: int,
         stream_seed: Optional[int], scale_floor: float,
@@ -386,13 +389,13 @@ def load_forecast_batches(
         segments = split_bounds(series_length, select_fraction, test_fraction)
         check_segments(segments, series_length, width, "a synthetic series")
         series, owners, dropped = build_bank(
-            patterns=chosen, seed=seed, realizations=realizations, series_length=series_length, noise_level=noise_level)
+            patterns=chosen, seed=seed, realizations=realizations, series_length=series_length)
         if not owners:
             refuse(f"every series of the bank was non-finite ({len(dropped)} dropped); change data.patterns or the seed")
         if dropped:
             logger.warning(f"forecast bank: {len(dropped)} non-finite series dropped: {dropped[:5]}")
         bank = series[:, :, None]
-        source = dict(patterns=chosen, realizations=realizations, series_length=series_length, noise_level=noise_level)
+        source = dict(patterns=chosen, realizations=realizations, series_length=series_length)
         default = len(bank) * SELECT_WINDOWS_PER_SERIES
         windows = [
             _fixed_positions(seed, salt, window_count(name, requested, default, batch_size), len(bank), lo, hi, width)

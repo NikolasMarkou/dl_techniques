@@ -749,7 +749,7 @@ CONVUNEXT_TRANSFER = TransferSpec(
     head=("final_output",), fixed=("channels",),
     sources={("image_denoising", "convunext_biased"): CrossTask(drop=("final_output",))},
 )
-ACCUNET_TRANSFER = TransferSpec(head=("acc_u_net/output_conv",), fixed=("channels",))
+ACCUNET_TRANSFER = TransferSpec(head=("output_conv",), fixed=("channels",))
 RESNET_SEG_TRANSFER = TransferSpec(
     head=SEG_HEAD, grow=r"backbone/stage\d+_block\d+", fixed=("channels",),
     sources={("image_classification", "resnet"): _FROM_CLASSIFIER},

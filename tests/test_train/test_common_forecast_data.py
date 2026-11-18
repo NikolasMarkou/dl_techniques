@@ -66,7 +66,7 @@ SELECT_FRACTION = TEST_FRACTION = 0.2
 
 KW = dict(
     format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None,
-    lookback=LOOKBACK, horizon=HORIZON, realizations=REALIZATIONS, series_length=ROWS, noise_level=0.1,
+    lookback=LOOKBACK, horizon=HORIZON, realizations=REALIZATIONS, series_length=ROWS,
     patterns=PATTERNS, select_fraction=SELECT_FRACTION, test_fraction=TEST_FRACTION, n_select=None, n_test=None,
     steps_per_epoch=4, max_samples=None, batch_size=BATCH, seed=SEED, stream_seed=None, scale_floor=1e-6,
 )
@@ -83,8 +83,8 @@ def write_csv(tmp_path, rows=CSV_ROWS, name="series.csv", **edits):
 
 
 def csv_kwargs(path, **over):
-    return dict(format="csv", dataset=None, path=path, realizations=None, series_length=None, noise_level=None,
-                patterns=None, **{"time_col": "ts", **over})
+    return dict(format="csv", dataset=None, path=path, realizations=None, series_length=None, patterns=None,
+                **{"time_col": "ts", **over})
 
 
 def digest(ds):
@@ -142,7 +142,7 @@ def digest(kwargs_json):
 
 class TestTheBankIsAPureFunction:
     def test_two_builds_and_another_pattern_order_give_the_same_series(self):
-        args = dict(seed=SEED, realizations=2, series_length=300, noise_level=0.1)
+        args = dict(seed=SEED, realizations=2, series_length=300)
         first, owners, dropped = build_bank(patterns=PATTERNS, **args)
         second, _, _ = build_bank(patterns=PATTERNS, **args)
         reverse, reverse_owners, _ = build_bank(patterns=PATTERNS[::-1], **args)
@@ -153,8 +153,8 @@ class TestTheBankIsAPureFunction:
             np.testing.assert_array_equal(row, first[owners.index(owner)])
 
     def test_the_seed_the_pattern_and_the_realization_each_move_the_series(self):
-        a, _, _ = build_bank(patterns=["random_walk"], seed=1, realizations=2, series_length=300, noise_level=0.1)
-        b, _, _ = build_bank(patterns=["random_walk"], seed=2, realizations=2, series_length=300, noise_level=0.1)
+        a, _, _ = build_bank(patterns=["random_walk"], seed=1, realizations=2, series_length=300)
+        b, _, _ = build_bank(patterns=["random_walk"], seed=2, realizations=2, series_length=300)
         assert not np.array_equal(a[0], a[1]) and not np.array_equal(a[0], b[0])
 
     def test_a_fresh_interpreter_builds_the_same_bank_and_the_same_windows(self, tmp_path):
@@ -180,7 +180,7 @@ class TestTheBankIsAPureFunction:
 
         monkeypatch.setattr(fd.TimeSeriesGenerator, "generate_task_data", poisoned)
         series, owners, dropped = build_bank(
-            patterns=PATTERNS, seed=SEED, realizations=2, series_length=300, noise_level=0.1)
+            patterns=PATTERNS, seed=SEED, realizations=2, series_length=300)
         assert np.isfinite(series).all() and series.shape == (4, 300)
         assert dropped == [("random_walk", 0), ("random_walk", 1)]
         assert all(pattern != "random_walk" for pattern, _ in owners)
@@ -566,7 +566,7 @@ class TestAFlatContextHasNoScaleToDivideBy:
         names = sorted(fd.TimeSeriesGenerator(fd.TimeSeriesGeneratorConfig(n_samples=1)).get_task_names())
         series_length, realizations = 10_000, 8
         bank, owners, _ = build_bank(
-            patterns=names, seed=42, realizations=realizations, series_length=series_length, noise_level=0.1)
+            patterns=names, seed=42, realizations=realizations, series_length=series_length)
         assert bank.shape == (len(owners), series_length) and ("sparse_events", 4) in owners
         worst, where = 0.0, None
         for lo, hi in split_bounds(series_length, 0.15, 0.15):
@@ -700,7 +700,7 @@ class TestCsv:
         base = load().fingerprint
         assert load(stream_seed=9, steps_per_epoch=7).fingerprint == base
         for change in (dict(lookback=LOOKBACK + 1), dict(horizon=HORIZON + 1), dict(seed=SEED + 1),
-                       dict(realizations=3), dict(series_length=ROWS + 50), dict(noise_level=0.2),
+                       dict(realizations=3), dict(series_length=ROWS + 50),
                        dict(patterns=PATTERNS[:2]), dict(scale_floor=1e-2), dict(test_fraction=0.25),
                        dict(n_select=32)):
             assert load(**change).fingerprint != base, change

@@ -18,7 +18,7 @@ Interface contract
 ``TimeSeriesData``
     Frozen :class:`~train.api.config.StrictConfig`. Every field maps to the keyword of the same name of
     ``train.common.forecast_data.load_forecast_batches`` (a test holds the two equal); ``format`` ``builtin`` takes
-    ``dataset`` (only ``synthetic``), ``realizations``, ``series_length``, ``noise_level`` and ``patterns``; ``csv``
+    ``dataset`` (only ``synthetic``), ``realizations``, ``series_length`` and ``patterns``; ``csv``
     takes ``path``, ``value_cols`` and ``time_col``; a key of the OTHER source that is not at its default is refused.
     ``lookback`` and ``horizon`` are ``"auto"`` until the family's recipe fills them (``resolve_auto``): the recipe
     is the one place that holds those two numbers. ``problems(prefix)`` names every option out of range.
@@ -91,7 +91,7 @@ DATA_FORMATS: Tuple[str, ...] = (BUILTIN, CSV)
 CSV_KEYS: Tuple[str, ...] = ("path", "value_cols", "time_col")
 
 #: The keys of the synthetic bank; held at their defaults for a csv.
-SYNTHETIC_KEYS: Tuple[str, ...] = ("realizations", "series_length", "noise_level", "patterns")
+SYNTHETIC_KEYS: Tuple[str, ...] = ("realizations", "series_length", "patterns")
 
 #: The smallest lookback of ANY family: one context value has no spread to standardize by (D-040). A family may need more
 #: (``forecast_models.FamilyRow.min_lookback``).
@@ -157,9 +157,6 @@ class TimeSeriesData(StrictConfig):
     series_length: int = dataclasses.field(
         default=10_000, metadata={"help": "builtin only: points per synthetic series (the split cuts it by time)"}
     )
-    noise_level: float = dataclasses.field(
-        default=0.1, metadata={"help": "builtin only: the generator's noise level, at least 0"}
-    )
     patterns: Optional[List[str]] = dataclasses.field(
         default=None,
         metadata={"help": "builtin only: the generator pattern names to use; null is every pattern; an unknown name is refused"},
@@ -211,8 +208,6 @@ class TimeSeriesData(StrictConfig):
         for name in ("realizations", "series_length", "n_select", "n_test", "steps_per_epoch", "max_samples"):
             if getattr(self, name) is not None and getattr(self, name) < 1:
                 bad(name, "expected an int of at least 1 (or null where null is allowed)")
-        if self.noise_level < 0:
-            bad("noise_level", "expected a number of at least 0")
         for name in ("select_fraction", "test_fraction"):
             if not 0.0 < getattr(self, name) < 1.0:
                 bad(name, "expected a fraction strictly between 0 and 1")

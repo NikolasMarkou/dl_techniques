@@ -903,8 +903,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 | `data.horizon` | `"auto"` | the same path as `data.lookback` (the recipe's 24); a `timestral` run is refused above its patch size and an `nbeats` run below 2 (`window_problems`) |
 | `data.realizations` | `4` | `forecast_data.build_bank`; builtin only |
 | `data.series_length` | `10000` | `forecast_data.build_bank`, `check_forecast_data` (a synthetic series is split like a csv of that many rows); builtin only |
-| `data.noise_level` | `0.1` | `forecast_data.build_bank`; builtin only |
-| `data.patterns` | `null` | `forecast_data.load_forecast_batches` (an unknown name is refused); builtin only; null is every pattern |
+| `data.patterns` | `null` | `forecast_data.load_forecast_batches` (an unknown name is refused); builtin only; null is every pattern (each draws at its own noise level; there is no noise key) |
 | `data.select_fraction` | `0.15` | `forecast_series.split_bounds`, `check_forecast_data`; with `data.test_fraction` it must leave a train slice |
 | `data.test_fraction` | `0.15` | `forecast_series.split_bounds`, `check_forecast_data` |
 | `data.n_select` | `null` | `forecast_series.check_split_sizes` (before the claim) and `forecast_data.load_forecast_batches`, rounded DOWN to whole batches; fewer than one batch is refused; null is 8 windows per series (builtin) or every window of the segment whose targets do not overlap (csv) |
@@ -1388,7 +1387,7 @@ weights start this one, for `image_classification`, `image_segmentation`, `image
 takes a str or a `Path`. It replaced `checkpoint`, which is gone with no alias: `checkpoint=` on the command line, in a
 `config=` file or in a YAML mapping is refused by name, and a Python call with `checkpoint=` is a `TypeError`. The run builds its
 own model from its own config, then, before `compile`, copies the source's `best_model.keras` into it one weight at a time,
-keyed by its Keras variable path with the model's own name dropped. Every weight of the new model is copied, resampled by a
+keyed by its Keras variable path without the model's root (its name, or the component every weight shares). Every weight of the new model is copied, resampled by a
 rule its family declares (one rule, `vit_pos_bicubic`: the ViT position table, torch's bicubic without antialiasing, to a
 larger grid only), or left fresh as a declared head or as a block a deeper variant adds; every source weight is used or
 dropped as a declared head. Anything else is refused before the first weight is copied. The optimizer is always fresh, at the
@@ -1444,7 +1443,7 @@ refused.
 
 After the claim, before any weight is copied (exit 2, the claimed directory is kept, as for any error after the claim): `Invalid value for
 'init': <n> of <m> weights of <family/variant> have no source weight of their shape and no declared rule: <the first 5 paths,
-both shapes> (+<k> more); nothing was copied (paths without the model's own name)`, and the same for the other direction (`...
+both shapes> (+<k> more); nothing was copied (paths without the model's root)`, and the same for the other direction (`...
 of the source run are neither used nor dropped by a declared rule`); a smaller ViT grid, `vit pos_embed would shrink its grid
 from 16x16 to 8x8; only a larger grid is resampled (bicubic, no antialiasing)`. The archive is hashed before the claim and again
 after the copy, and a run whose `best_model.keras` changed in between stops before it trains, naming both sha256.
@@ -1472,9 +1471,9 @@ each run's own `seed`, `data.validation_split` and `data.max_samples`; the test 
 dataset is `different_data`; Imagenette against ImageNet, ImageNet itself, and file data under other paths or of another
 fingerprint are `unknown`),
 files for denoising (every file of the source's `data.train_dirs` among this run's validation and held-out files), windows for
-forecasting (other `seed`, `data.series_length` or `data.noise_level` is `different_data`, other `data.patterns` or
-`data.realizations` of the same seed and another csv file `unknown`, other fractions count the windows that start inside the
-source's train segment)
+forecasting (another `seed`, `data.series_length`, `data.patterns` or `data.realizations`, or another csv file, is `unknown`: the
+deterministic patterns barely move with the seed and a shorter series is the start of a longer one; other fractions count the
+windows that start inside the source's train segment)
 and scenes for depth (the source's train scenes among this run's selection and test scenes). A CIFAR-10 source trained at
 seed 42 seeds a run at seed 43: 4,531 of its 5,000 selection rows were trained on. `results_summary.json` then sets
 `selection_biased`, `test_biased` (a count above 0) and `overlap_unknown`, the log line `init split: <relation>: <reason>` is a

@@ -698,8 +698,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   `read_source` before the claim (files, record, task and family pair, `fixed` geometry, input scaling, pins, sha256), `transfer`
   after it, in `run_sequence.build_model` on a fresh run only (`plan_transfer`, `check`, `apply`: complete-or-raise in both
   directions, nothing assigned before every check passed), and `recorded_init` on a resume, which reads the run's own `task.json`
-  and never the source. Weights are keyed by their path relative to the model: only a leading `<model.name>/` is dropped (D-030);
-  never normalize another component. `AutoContext.pinned` carries the pins and only `recipes.merge_model_args` reads it.
+  and never the source. Weights are keyed by their path relative to the model: one leading component is dropped when it is the
+  model's root, `<model.name>/` wherever a path has it or the component every weight shares (D-030, D-045); never normalize
+  another one. `AutoContext.pinned` carries the pins and only `recipes.merge_model_args` reads it.
   - **`TransferSpec` per family.** `registry.TransferSpec` and `registry.CrossTask` (frozen dataclasses, standard library only, so
     the help path stays light, D-032) are declared on each `ModelSpec` as `transfer=`: `head` (path prefixes of the final layer),
     `resample` (path to a rule of `init_from.RULES`, today only `vit_pos_bicubic`), `grow` (a regex of the depth-indexed blocks a
@@ -710,7 +711,9 @@ classification task calls the same `train.common.classification_run` helpers as 
     `transfer_reason` (the pretrain rows do), which `init` then quotes in its refusal. `ModelSpec` does not enforce this
     (D-033): `tests/test_train/test_api/test_init_from_families.py` does, and builds each row's smallest variant (its `VARIANT`
     table) at the source geometry and at every change the spec names, requiring the engine's verdict to be the declared one, so a
-    new row adds its variant there. Today 23 rows declare a spec and the 2 pretrain rows give a reason.
+    new row adds its variant there. It checks every row twice at the source geometry: after `clear_session`, and in the production
+    order (the target built first, then the source's saved archive loaded beside it, its head naming a weight), the latter also
+    for one change of each kind and every cross-task pair. Today 23 rows declare a spec and the 2 pretrain rows give a reason.
   - **Two hooks.** `TaskTrainer.init_identity(config, context)`, before the claim and without TensorFlow, returns the record keys
     this run will write about its input (`channels`, `lookback`, `horizon`, `normalize`, `data_range`; those its record has),
     which `read_source` compares with the source's record; the base class refuses `init` naming the task (`pretrain` keeps it,

@@ -1,7 +1,8 @@
 """Start a run from an earlier run's weights (``init``): the transfer engine.
 
 The unit of a transfer is the individual weight, keyed by its Keras variable path relative to its
-model (a leading ``<model.name>/`` dropped, on both sides; nothing else renamed). Every weight of
+model (one leading component dropped, on both sides, when it is the model's root: ``<model.name>/``
+wherever a path has it, or the component every weight shares; nothing else renamed). Every weight of
 the target is either copied from the source weight at the same path (after a declared cross-task
 prefix), resampled by a rule its family declares, reset as a declared head, or grown as a new
 block of a deeper variant; every source weight is either used or dropped as a declared head.
@@ -18,9 +19,9 @@ TensorFlow, Keras or numpy. After the claim, :func:`transfer` loads the source m
 weights into the run's freshly built model, hashes the archive again and returns the ``init`` block
 of ``task.json``. A resume never reads the source: :func:`recorded_init` reads the run's own block.
 
-Nothing here imports TensorFlow, Keras or numpy at module scope (``registry`` rows import the
-declarations, and ``python -m train help`` stays light); numpy and the DINOv2 bicubic matrix are
-imported inside the functions that use them.
+Nothing here imports TensorFlow, Keras, numpy or ``dl_techniques`` at module scope (a ``registry`` row
+that resamples imports this module, and ``python -m train help`` and a forecasting family refusal stay
+light); numpy, the logger and the DINOv2 bicubic matrix are imported inside the functions that use them.
 
 Interface contract
 ------------------
@@ -111,8 +112,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
-from dl_techniques.utils.logger import logger
-
 from . import registry
 from .errors import ConfigError
 from .registry import CrossTask, TransferSpec
@@ -140,14 +139,18 @@ class TransferPlan:
 
 def _by_path(model: Any, side: str) -> Dict[str, Any]:
     """``{path relative to the model: variable}``, in ``model.weights`` order."""
-    # DECISION plan-2026-11-18T072904-0fd54b91/D-030: drop ONLY a leading "<model.name>/". A subclassed
-    # model roots every path at its instance name (vision_transformer_pico vs vision_transformer_tiny,
-    # res_net vs the segmenter's backbone/), which is not its architecture. Do not strip any other
-    # component or suffix: an inner "_1" or "rnn_2" is a real difference (D-031 pairs those by position).
-    root = f"{model.name}/"
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-030 (amended by D-045): drop ONE leading component, only when it is
+    # the model's root: "<model.name>/" wherever a path has it, or the component EVERY weight shares (accunet builds
+    # under acc_u_net/, not its name ACC_UNet). A loaded archive can lose the root on some weights and keep it on
+    # others (the depth backbone loses depth_anything/, its head keeps it), so do NOT drop only a shared component
+    # and do NOT strip any other component or suffix: an inner "_1" or "rnn_2" is a real difference (D-031).
+    paths = [variable.path for variable in model.weights]
+    tops = {path.split("/", 1)[0] for path in paths}
+    roots = {model.name} | (tops if len(tops) == 1 and all("/" in path for path in paths) else set())
     found: Dict[str, Any] = {}
-    for variable in model.weights:
-        path = variable.path[len(root):] if variable.path.startswith(root) else variable.path
+    for variable, path in zip(model.weights, paths):
+        top, _, rest = path.partition("/")
+        path = rest if rest and top in roots else path
         if path in found:
             raise ConfigError(f"Invalid value for 'init': the {side} holds two weights at {path}")
         found[path] = variable
@@ -233,7 +236,7 @@ def _refuse(problems: Sequence[str], total: int, whose: str, what: str) -> None:
         more = f" (+{len(problems) - SHOWN} more)" if len(problems) > SHOWN else ""
         raise ConfigError(f"Invalid value for 'init': {len(problems)} of {total} weights of {whose} {what}: "
                           f"{'; '.join(problems[:SHOWN])}{more}; nothing was copied "
-                          "(paths without the model's own name)")
+                          "(paths without the model's root)")
 
 
 def check(plan: TransferPlan) -> None:
@@ -247,6 +250,8 @@ def check(plan: TransferPlan) -> None:
 
 def apply(plan: TransferPlan) -> None:
     """Check, then assign every copy and resample; a refusal assigns nothing."""
+    from dl_techniques.utils.logger import logger
+
     check(plan)
     for variable, value in plan.copies:
         variable.assign(value)
@@ -646,6 +651,7 @@ def evaluate_loaded(model: Any, data: Any, hint: str) -> Dict[str, float]:
     """The epoch-0 evaluation of an ``init`` run (no ratio, no verdict); a non-finite value raises ``RuntimeError``."""
     import math
 
+    from dl_techniques.utils.logger import logger
     from train.common import classification_run
 
     metrics = classification_run.evaluate_dict(model, data.select_ds)
@@ -668,8 +674,9 @@ def loaded_value(config: Any, run_dir: Any, key: str, net_of: float = 0.0) -> Op
     return float(value) - net_of
 
 
-def beats_loaded(reached: float, loaded: Optional[float], name: str) -> bool:
-    """Whether ``reached`` is above ``loaded`` by more than ``tie_band(1)`` float32 steps; true when ``loaded`` is None."""
+def beats_loaded(reached: float, loaded: Optional[float], name: str, offset: float = 0.0) -> bool:
+    """Whether ``reached + offset`` is above ``loaded + offset`` by more than ``tie_band(1)`` float32 steps of that value;
+    true when ``loaded`` is None. ``offset`` turns a success value back into the metric it is net of (denoising)."""
     # DECISION plan-2026-11-18T072904-0fd54b91/D-013
     # Under init the success value must be STRICTLY above the loaded weights' epoch zero, in float32, beyond the tie band:
     # a good source clears an absolute bar at epoch 0. Do NOT drop the term or use `>=` (a fine-tune that only held the
@@ -678,10 +685,11 @@ def beats_loaded(reached: float, loaded: Optional[float], name: str) -> bool:
         return True
     import numpy as np
 
+    from dl_techniques.utils.logger import logger
     from train.common.forecast_run import tie_band
 
-    low, band = np.float32(loaded), tie_band(1)
-    met = bool(np.float32(reached) > low + np.float32(band) * abs(np.spacing(low)))
+    low, band = np.float32(loaded + offset), tie_band(1)
+    met = bool(np.float32(reached + offset) > low + np.float32(band) * abs(np.spacing(low)))
     if not met:
         logger.info(f"Under init the best {name} {reached:.6g} does not beat the loaded weights' epoch-zero "
                     f"{loaded:.6g} by more than {band} float32 steps")

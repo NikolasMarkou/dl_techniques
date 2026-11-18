@@ -320,7 +320,7 @@ FAMILIES: Dict[str, FamilyRow] = {
     TIMESTRAL: FamilyRow(f"{_TS}.timestral.model:TimestralModel.MODEL_VARIANTS", static_batch=True,
                          transfer=TransferSpec(head=("quantile_head",))),  # channel-free: every weight kept
     MDN: FamilyRow(f"{_HERE}:MDN_VARIANTS", 1, "the mixture is over the horizon of one series, (B, L, 1)",
-                   transfer=TransferSpec(head=("mdn_core/mdn_layer/mdn_mus", "mdn_core/mdn_layer/mdn_sigmas"),
+                   transfer=TransferSpec(head=("mdn_layer/mdn_mus", "mdn_layer/mdn_sigmas"),
                                          fixed=("lookback",))),  # mdn_core/dense_0 reads the flattened lookback
 }
 

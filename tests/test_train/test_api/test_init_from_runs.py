@@ -34,6 +34,7 @@ weights' value its bar compared; it predicts and exports with its source gone; e
 import builtins
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import inspect
 import io
@@ -53,6 +54,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from dl_techniques.utils.logger import logger
 from train.api import cli, init_from, predictor, recipes, registry, resume_decisions
 from train.api.args import AutoContext
 from train.api.config import validate
@@ -919,6 +921,28 @@ def test_resume_a_record_without_an_init_block_is_refused_before_anything_is_wri
     assert sorted(p.name for p in run_dir.iterdir()) == before
 
 
+def test_resume_a_run_started_before_init_whose_request_holds_checkpoint_is_refused_naming_both_keys(vit_64, tmp_path):
+    # A run interrupted before init existed: its config_requested.json holds "checkpoint": null and its record no init
+    # block. There is no alias, so the resume is refused before anything is written, naming the two keys.
+    run_dir = tmp_path / "run"
+    shutil.copytree(vit_64.out, run_dir)
+    (run_dir / "results_summary.json").unlink()
+    record = record_of(run_dir)
+    del record["init"]
+    (run_dir / "task.json").write_text(json.dumps(record))
+    requested = json.loads((run_dir / "config_requested.json").read_text())
+    requested = {("checkpoint" if key == "init" else key): (None if key == "init" else value)
+                 for key, value in requested.items()}
+    (run_dir / "config_requested.json").write_text(json.dumps(requested))
+    before = {path.name: path.stat().st_mtime_ns for path in run_dir.iterdir()}
+    with pytest.raises(ConfigError) as refused:
+        train_image_classification(**{**vit_64.request, "out": str(run_dir), "resume_interrupted": True, "init": None})
+    logger.info(f"pre-init resume refused: {refused.value}")
+    assert re.search(r"Cannot resume .*: the request differs from config_requested\.json in checkpoint: None -> "
+                     r"<absent>; init: <absent> -> None\. Resume with the request the run started with", str(refused.value))
+    assert {path.name: path.stat().st_mtime_ns for path in run_dir.iterdir()} == before
+
+
 def test_resume_a_user_value_against_the_records_pin_is_refused_before_the_claim(vit_64, tmp_path):
     run_dir = tmp_path / "run"
     shutil.copytree(vit_64.out, run_dir)
@@ -1044,20 +1068,27 @@ def test_split_the_default_hook_is_unknown_with_its_reason():
 
 
 FORECAST_DATA = {"format": "builtin", "dataset": "synthetic", "lookback": 32, "horizon": 8, "realizations": 1,
-                 "series_length": 600, "noise_level": 0.1, "patterns": ["ar_process"], "select_fraction": 0.15,
+                 "series_length": 600, "patterns": ["ar_process"], "select_fraction": 0.15,
                  "test_fraction": 0.15}
 
 
-def test_split_forecasting_counts_windows_in_the_sources_train_segment(world, tmp_path):
-    def trainer(seed: int = 42, **data: Any) -> Any:
-        return TimeSeriesForecastingTrainer(validate(TimeSeriesForecastingConfig, {
-            "out": str(tmp_path / "run"), "model": "tirex/tiny", "seed": seed, "data": {**FORECAST_DATA, **data}}))
+def forecaster(tmp_path: Path, seed: int = 42, **data: Any) -> Any:
+    return TimeSeriesForecastingTrainer(validate(TimeSeriesForecastingConfig, {
+        "out": str(tmp_path / "run"), "model": "tirex/tiny", "seed": seed, "data": {**FORECAST_DATA, **data}}))
 
+
+def windows_at(starts: np.ndarray, test: Any = ((0, 520), (0, 550)), **data: Any) -> Any:
+    """The ``data`` a forecasting hook reads: a 600-row bank, these select window starts and two test windows."""
+    return SimpleNamespace(bank=np.zeros((1, 600, 1)), select_windows=np.stack([0 * starts, starts], 1),
+                           test_windows=np.array(test), **{"csv_sha256": None, "value_cols": None, **data})
+
+
+def test_split_forecasting_counts_windows_in_the_sources_train_segment(world, tmp_path):
+    trainer = functools.partial(forecaster, tmp_path)
     source = a_source({"seed": 42, "data": dict(FORECAST_DATA)}, forecast_record("tirex/tiny", 32, 8))
     # This run's select segment begins at 600 - 180 - 90 = 330; the source trained on rows [0, 600 - 90 - 90 = 420).
     starts = np.arange(330, 500, 7)
-    fake = SimpleNamespace(bank=np.zeros((1, 600, 1)), select_windows=np.stack([0 * starts, starts], 1),
-                           test_windows=np.array([[0, 520], [0, 550]]), csv_sha256=None, value_cols=None)
+    fake = windows_at(starts)
     longer = trainer(select_fraction=0.3)
     split = longer.init_overlap(source, longer.config, fake)
     assert (split["relation"], split["unit"]) == ("overlap", "windows")
@@ -1065,10 +1096,59 @@ def test_split_forecasting_counts_windows_in_the_sources_train_segment(world, tm
     assert (split["n_select_overlap"], split["n_test_overlap"]) == (int((starts < 420).sum()), 0)
     same = trainer(lookback=64)
     assert same.init_overlap(source, same.config, fake)["relation"] == "same_split"
-    other = trainer(seed=43)
-    assert other.init_overlap(source, other.config, fake)["relation"] == "different_data"
     shared = trainer(realizations=2)
     assert shared.init_overlap(source, shared.config, fake)["relation"] == "unknown"
+
+
+def test_split_forecasting_a_bank_of_another_length_or_seed_is_unknown_with_its_reason(world, tmp_path):
+    # Review R2 and R4: at one seed a 600-row series is the first 600 rows of the 1,200-row one, so a source that
+    # trained on rows [0, 840) holds every window of this run verbatim; and the generator's deterministic patterns
+    # (trends, chaotic maps, fixed seasonalities) barely move with the seed. Neither is other data, so neither is a 0.
+    source = a_source({"seed": 42, "data": {**FORECAST_DATA, "series_length": 1200}}, forecast_record("tirex/tiny", 32, 8))
+    fake = windows_at(np.arange(420, 560, 10), test=((0, 560), (0, 570)))
+    for seed, length, why in ((42, 600, "begins with the rows"), (43, 1200, "barely move with the seed")):
+        target = forecaster(tmp_path, seed, series_length=length)
+        split = target.init_overlap(source, target.config, fake)
+        assert (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == ("unknown", None, None)
+        assert why in split["reason"], split["reason"]
+        assert init_from.bias_of({"split": split})["overlap_unknown"] is True
+
+
+def test_split_forecasting_a_recorded_noise_level_is_not_other_data(world, tmp_path):
+    # Review R2 scenario 2 and R5 (D-044): every generator pattern drew at its own noise level, so a source that
+    # recorded data.noise_level 0.2 trained on this run's very bank; its train segment is counted, not called other data.
+    source = a_source({"seed": 42, "data": {**FORECAST_DATA, "noise_level": 0.2}}, forecast_record("tirex/tiny", 32, 8))
+    starts = np.arange(330, 500, 7)
+    target = forecaster(tmp_path, select_fraction=0.3)
+    split = target.init_overlap(source, target.config, windows_at(starts))
+    assert (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == (
+        "overlap", int((starts < 420).sum()), 0)
+
+
+def test_split_forecasting_a_csv_is_counted_within_one_file_and_its_columns(world, tmp_path):
+    # The csv branch: the same file (sha256) and value columns count windows as a builtin bank does; another file or
+    # other columns are unknown, since the rows may still be the same.
+    csv = tmp_path / "x.csv"
+    csv.write_text("v\n" + "\n".join(str(i) for i in range(600)))
+
+    def target(**data: Any) -> Any:
+        return TimeSeriesForecastingTrainer(validate(TimeSeriesForecastingConfig, {
+            "out": str(tmp_path / "run"), "model": "tirex/tiny",
+            "data": {"format": "csv", "path": str(csv), "value_cols": ["v"], "lookback": 32, "horizon": 8, **data}}))
+
+    source = a_source({"seed": 42, "data": {"format": "csv", "select_fraction": 0.15, "test_fraction": 0.15}},
+                      {**forecast_record("tirex/tiny", 32, 8), "data_sha256": "a" * 64, "value_cols": ["v"]})
+    starts = np.arange(330, 500, 7)
+    fake = windows_at(starts, csv_sha256="a" * 64, value_cols=("v",))
+    longer = target(select_fraction=0.3)
+    split = longer.init_overlap(source, longer.config, fake)
+    assert (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == (
+        "overlap", int((starts < 420).sum()), 0)
+    same = target()
+    assert same.init_overlap(source, same.config, fake)["relation"] == "same_split"
+    for other in (windows_at(starts, csv_sha256="b" * 64, value_cols=("v",)),
+                  windows_at(starts, csv_sha256="a" * 64, value_cols=("w",))):
+        assert same.init_overlap(source, same.config, other)["relation"] == "unknown"
 
 
 def test_split_depth_counts_the_sources_train_scenes_among_this_runs(world, megadepth_tree, tmp_path):
@@ -1147,15 +1227,16 @@ def test_bar_under_init_a_fine_tune_must_beat_the_loaded_weights_epoch_zero_read
     write_sidecar(tmp_path, {"loss": 1.0, key: score})
     config = SimpleNamespace(init="/the/source", metric_args=SimpleNamespace(success_threshold=None))
     trainer = object.__new__(trainer_class)
+    trainer._identity = {"psnr": net_of}  # the input's PSNR, which denoising's success value is net of
     held = score - net_of  # what the fine-tune reaches when it only holds the loaded weights' score
     assert trainer.bar_is_met(config, held, threshold) is True  # the absolute bar alone: today's verdict
     trainer._loaded = init_from.loaded_value(config, tmp_path, key, net_of)
     assert trainer._loaded == held
     assert trainer.bar_is_met(config, held, threshold) is False
-    low = np.float32(held)
-    step = np.spacing(low)
-    assert trainer.bar_is_met(config, float(low + np.float32(16) * step), threshold) is False  # inside the tie band
-    assert trainer.bar_is_met(config, float(low + np.float32(17) * step), threshold) is True
+    raw = np.float32(score)  # the band is in float32 steps of the metric's own value (review R3), not of the gain
+    step = np.spacing(raw)
+    assert trainer.bar_is_met(config, float(raw + np.float32(16) * step) - net_of, threshold) is False  # in the band
+    assert trainer.bar_is_met(config, float(raw + np.float32(17) * step) - net_of, threshold) is True
     assert trainer.bar_is_met(config, held - 0.1, threshold) is False
     # Without init nothing is read (not even a missing file) and the verdict is today's.
     assert init_from.loaded_value(SimpleNamespace(init=None), tmp_path / "missing", key) is None
@@ -1165,6 +1246,19 @@ def test_bar_under_init_a_fine_tune_must_beat_the_loaded_weights_epoch_zero_read
     write_sidecar(tmp_path / "bare", {"loss": 1.0})
     with pytest.raises(ValueError, match=rf"initial\.metrics\.{key}"):
         init_from.loaded_value(config, tmp_path / "bare", key)
+
+
+def test_bar_the_denoising_band_is_on_the_raw_val_psnr_so_a_low_gain_keeps_its_band(tmp_path):
+    # Review R3: input 20.0 dB, loaded val_psnr 20.5 dB, a gain of 0.5. Sixteen float32 steps of the gain are half a step
+    # of the 20.5 the metric rounds, so on the gain's scale a re-evaluation one step higher would beat the loaded weights.
+    write_sidecar(tmp_path, {"loss": 1.0, "psnr": 20.5})
+    config = SimpleNamespace(init="/the/source")
+    trainer = object.__new__(ImageDenoisingTrainer)
+    trainer._identity = {"psnr": 20.0}
+    trainer._loaded = init_from.loaded_value(config, tmp_path, "psnr", 20.0)
+    raw = np.float32(20.5)
+    for steps, met in ((1, False), (16, False), (17, True)):
+        assert trainer.bar_is_met(config, float(raw + np.float32(steps) * np.spacing(raw)) - 20.0, 0.1) is met, steps
 
 
 def test_bar_a_classifier_that_does_not_improve_on_its_loaded_weights_misses_and_its_resume_reads_the_sidecar(

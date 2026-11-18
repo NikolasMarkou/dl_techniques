@@ -1,8 +1,8 @@
 """The transfer engine of ``init``: ``plan_transfer``, ``check``, ``apply`` and ``vit_pos_bicubic``.
 
 Tiny Keras models, no run. The engine copies weight by weight, keyed by the Keras variable path
-relative to its model (D-030: a leading ``<model.name>/`` is dropped on both sides, nothing else is
-renamed), complete-or-raise in both directions (plan-2026-11-18T072904-0fd54b91 D-005, D-006): every target
+relative to its model (D-030, D-045: one leading component is dropped on both sides when it is the
+model's root, ``<model.name>/`` or the component every weight shares; nothing else is renamed), complete-or-raise in both directions (plan-2026-11-18T072904-0fd54b91 D-005, D-006): every target
 weight is copied, resampled by a declared rule, reset as a declared head or grown as a new block,
 and every source weight is used or dropped by a declared rule; anything else is a ``ConfigError``
 raised before the first ``assign``, so a refusal leaves every target weight as it was (compared
@@ -259,7 +259,7 @@ def test_an_undeclared_shape_mismatch_is_refused_naming_paths_and_shapes():
     assert message.startswith("Invalid value for 'init': 2 of 12 weights of the target model have no source weight")
     assert "head/kernel: target (4, 7) float32, source (4, 3) float32" in message
     assert "head/bias: target (7,) float32, source (3,) float32" in message
-    assert message.endswith("; nothing was copied (paths without the model's own name)")
+    assert message.endswith("; nothing was copied (paths without the model's root)")
 
 
 def test_a_refusal_lists_five_paths_and_counts_the_rest():
@@ -273,7 +273,7 @@ def test_an_unused_source_weight_is_refused():
     message = refuse(classifier(1, blocks=3), classifier(2, blocks=2), VIT)
     assert message == ("Invalid value for 'init': 2 of 14 weights of the source run are neither used nor dropped "
                        "by a declared rule: block_2/kernel (4, 4) float32; block_2/bias (4,) float32; "
-                       "nothing was copied (paths without the model's own name)")
+                       "nothing was copied (paths without the model's root)")
 
 
 def test_a_dtype_mismatch_is_refused():
@@ -302,6 +302,24 @@ def test_the_model_name_is_not_part_of_a_path():
     want = [np.array(v.numpy()) for v in source.weights]
     for value, variable in zip(want, target.weights):
         np.testing.assert_array_equal(variable.numpy(), value, err_msg=variable.path)
+
+
+def test_the_root_every_weight_shares_or_the_models_name_is_dropped_and_nothing_else():
+    # D-045, measured: accunet (named ACC_UNet) is built under acc_u_net/ and its loaded archive has no root; a loaded
+    # depth model keeps its name on the head's weights only. Neither may change a key; a second component stays.
+    def model(name: str, *paths: str) -> types.SimpleNamespace:
+        return types.SimpleNamespace(name=name, weights=[types.SimpleNamespace(path=p, shape=(2,), dtype="float32")
+                                                         for p in paths])
+
+    built = model("ACC_UNet", "acc_u_net/encoder/kernel", "acc_u_net/head/kernel")
+    for source in (built, model("ACC_UNet", "encoder/kernel", "head/kernel"),
+                   model("depth", "encoder/kernel", "depth/head/kernel")):
+        plan = plan_transfer(source, built, TransferSpec(head=("head",)), head_reset=True)
+        check(plan)
+        assert (plan.copied, plan.reset, plan.dropped) == (("encoder/kernel",), ("head/kernel",), ("head/kernel",))
+    for kept in (model("m", "m/block/inner/kernel"), model("m", "block/kernel", "bias")):
+        assert plan_transfer(kept, kept, TransferSpec()).copied == tuple(p.split("/", 1)[1] if p.startswith("m/") else p
+                                                                         for p in (w.path for w in kept.weights))
 
 
 class Rooted(keras.Model):

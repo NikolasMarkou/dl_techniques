@@ -20,8 +20,9 @@ D-020, 4g-D17 D-021, load cost D-022. Kept as designed: 4g-D2, 4g-D5, 4g-D8, 4g-
   depth `model_args.pretrained` under `init` is refused; a classifier refuses any `pretrained` other than false.
 - **4g-D4 (D-005, D-030, D-031).** Every subclassed model roots its weight paths at its own instance name
   (`vision_transformer_pico` against `vision_transformer_tiny`, `res_net` against the segmenter's `backbone/`), so on raw paths
-  the vit grow and both classifier-to-segmenter pairs were refused. Weights are keyed by their path relative to the model: only a
-  leading `<model.name>/` is dropped, on both sides, and nothing inside is renamed. xlstm's auto-named inner `rnn` and cell
+  the vit grow and both classifier-to-segmenter pairs were refused. Weights are keyed by their path relative to the model: one
+  leading component is dropped on each side when it is the model's root (`<model.name>/` wherever a path has it, or the component
+  every weight shares: accunet builds under `acc_u_net/`, D-045), and nothing inside is renamed. xlstm's auto-named inner `rnn` and cell
   layers still differ in the production order (target built, then the source loaded beside it), so `TransferSpec.positional`
   pairs weights by order inside the named top-level blocks, only when the counts, shapes and dtypes all agree.
 - **4g-D6 (D-007, D-032, D-033).** `TransferSpec` and `CrossTask` live in `src/train/api/registry.py`, which imports no
@@ -42,9 +43,10 @@ D-020, 4g-D17 D-021, load cost D-022. Kept as designed: 4g-D2, 4g-D5, 4g-D8, 4g-
 - **4g-D11 (D-012, D-037, D-038).** Each task counts its own overlap in a second hook, `init_overlap(source, config, data)`
   (default `unknown`), never in the engine. The `split` block is `relation`, `unit`, `n_select_overlap`, `n_test_overlap`,
   `reason`, `keys`; the units are rows (classification, segmentation), files (denoising), windows (forecasting) and scenes
-  (depth). Forecasting rebuilds the source's train segment from its `config.json`: another seed, series length or noise level is
-  `different_data`; other patterns or realizations of the same seed are `unknown`, because the two banks share series (calling
-  it different data would report 0 for them); other fractions count the windows that start inside the source's train segment.
+  (depth). Forecasting rebuilds the source's train segment from its `config.json`: another seed, series length, patterns or
+  realizations is `unknown` (D-045), because the two banks can share series (the deterministic patterns barely move with the
+  seed, a shorter series is the start of a longer one), and calling it different data would report 0 for them; other fractions
+  count the windows that start inside the source's train segment. The bank has no noise key: the generator never read it (D-044).
   Imagenette against ImageNet, and ImageNet itself (held out per class), are `unknown`. The CIFAR-10 count is re-derived by the
   test's own numpy oracle: a seed 42 source trained on 4,531 of a seed 43 run's 5,000 selection rows.
 - **4g-D12 (D-013, D-039).** Under `init` the epoch-zero evaluation is one function for every task

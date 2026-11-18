@@ -1011,7 +1011,7 @@ def reference_baselines(world, tmp_path_factory):
     config = make_config(root / "run", data=dict(E2E_DATA), batch_size=E2E_BATCH)
     batches = forecast_data.load_forecast_batches(
         format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None, lookback=LOOKBACK, horizon=HORIZON,
-        realizations=1, series_length=600, noise_level=0.1, patterns=PATTERNS, select_fraction=0.15, test_fraction=0.15,
+        realizations=1, series_length=600, patterns=PATTERNS, select_fraction=0.15, test_fraction=0.15,
         n_select=32, n_test=32, steps_per_epoch=E2E_STEPS, max_samples=None, batch_size=E2E_BATCH, seed=config.seed,
         stream_seed=None, scale_floor=config.transform_args.scale_floor)
     return fr.baseline_maes(*windows(batches.select_ds))
@@ -1497,7 +1497,7 @@ def test_the_best_checkpoint_reload_check_is_fed_the_sample_the_expected_outputs
     config = make_config(tmp_path / "run")
     batches = forecast_data.load_forecast_batches(
         format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None, lookback=LOOKBACK, horizon=HORIZON,
-        realizations=1, series_length=600, noise_level=0.1, patterns=PATTERNS, select_fraction=0.15, test_fraction=0.15,
+        realizations=1, series_length=600, patterns=PATTERNS, select_fraction=0.15, test_fraction=0.15,
         n_select=16, n_test=16, steps_per_epoch=STEPS, max_samples=None, batch_size=BATCH, seed=config.seed,
         stream_seed=None, scale_floor=config.transform_args.scale_floor)
     first_batch = next(iter(batches.select_ds))[0].numpy()

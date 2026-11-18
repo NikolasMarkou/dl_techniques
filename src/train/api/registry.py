@@ -56,7 +56,7 @@ Interface contract
 ``TransferSpec`` / ``CrossTask``
     One family's declaration for ``init`` (``ModelSpec.transfer``), read by
     :mod:`train.api.init_from`, whose docstring has the fields. Paths in it are relative to the model
-    (without the model's own name). Standard library only, so a row stays on the help path.
+    (without the model's root). Standard library only, so a row stays on the help path.
 
     :raises ValueError: for a ``resample`` rule name that ``init_from.RULES`` does not hold, or a
         ``positional`` entry that is not one top-level path component.

@@ -12,9 +12,12 @@ refused at the weight level, every other change passes. The target carries the s
 arguments from the source's resolved ones, as a run under ``init`` does.
 
 Every build follows ``keras.backend.clear_session()``, so each model gets the name a first build in
-a fresh process gets. xlstm is also checked in the production order (target built, then the
-source's saved file loaded), where its auto-named inner layers drift. The counts are derived here
-and logged as ``CENSUS`` lines.
+a fresh process gets. Every row is also checked in the production order (the target built first, then
+the source's saved archive loaded beside it, as a run under ``init`` does) at the same geometry, with
+one changed-geometry case per kind of change, every cross-task pair and every xlstm variant: a loaded
+model's paths can lose the root a fresh build gives them (accunet's ``acc_u_net/``, the depth
+backbone's ``depth_anything/``), and xlstm's auto-named inner layers drift. The counts are derived
+here and logged as ``CENSUS`` lines.
 """
 
 import dataclasses
@@ -218,6 +221,12 @@ def test_a_change_gives_the_verdict_the_spec_predicts(family, key):
     spec = registry.MODELS[family].transfer
     geometry = {**SOURCE[task], key: CHANGES[task][key]}
     target, _ = build(family, VARIANT[family], geometry, {name: kwargs[name] for name in spec.pinned})
+    judge_change(family, key, source, target)
+
+
+def judge_change(family: str, key: str, source: Any, target: keras.Model) -> None:
+    """The verdict of one census change is the one the spec predicts, with its counts."""
+    task, spec = task_of(family), registry.MODELS[family].transfer
     head_reset = key in HEAD_KEYS[task]
     got, plan, message = verdict(family, f"{key} {SOURCE[task][key]} to {CHANGES[task][key]}", source, target, spec,
                                  head_reset=head_reset)
@@ -236,6 +245,11 @@ def test_a_deeper_variant_grows_the_new_blocks(family):
     source, kwargs = source_of(family, SOURCE[task])
     spec = registry.MODELS[family].transfer
     target, _ = build(family, GROWN[family], SOURCE[task], {key: kwargs[key] for key in spec.pinned})
+    judge_grow(family, source, target)
+
+
+def judge_grow(family: str, source: Any, target: keras.Model) -> None:
+    spec = registry.MODELS[family].transfer
     got, plan, message = verdict(family, f"grow {VARIANT[family]} to {GROWN[family]}", source, target, spec)
     assert got == "PASS", message
     assert len(plan.copied) == plan.n_source and len(plan.grown) == plan.n_target - plan.n_source > 0
@@ -248,10 +262,14 @@ def cross_pairs() -> List[Tuple[str, str, str]]:
 
 @pytest.mark.parametrize("family,task,source_family", cross_pairs(), ids=[f"{s}-to-{f}" for f, _, s in cross_pairs()])
 def test_a_declared_cross_task_pair_fills_the_target_and_resets_its_head(family, task, source_family):
-    spec = registry.MODELS[family].transfer
-    relation = spec.sources[(task, source_family)]
     source, _ = source_of(source_family, SOURCE[task], CROSS_SOURCE_ARGS.get(source_family))
     target, _ = build(family, VARIANT[family], SOURCE[task_of(family)])
+    judge_cross(family, task, source_family, source, target)
+
+
+def judge_cross(family: str, task: str, source_family: str, source: Any, target: keras.Model) -> None:
+    spec = registry.MODELS[family].transfer
+    relation = spec.sources[(task, source_family)]
     got, plan, message = verdict(family, f"from {source_family} ({task})", source, target, spec, relation=relation)
     assert got == "PASS", message
     assert len(plan.copied) == plan.n_source - len(plan.dropped) and len(plan.dropped) > 0
@@ -280,3 +298,70 @@ def test_xlstm_pairs_its_drifting_blocks_by_position_in_the_production_order(tmp
         plain = dataclasses.replace(spec, positional=())
         assert verdict("xlstm", f"{variant} production order, no positional", loaded, target, plain)[0] == "REFUSE"
     assert drifting == set(spec.positional)
+
+
+# --- the production order: the target built first, then the source's archive loaded beside it -----------------------
+
+
+@pytest.fixture(scope="module")
+def archives(tmp_path_factory) -> Dict[Any, Any]:
+    """Each source build saved once for the module: ``{(family, geometry, model_args): path}``."""
+    return {"dir": tmp_path_factory.mktemp("archives")}
+
+
+def loaded_beside(family: str, variant: str, geometry: Mapping[str, Any], model_args: Mapping[str, Any],
+                  archives: Dict[Any, Any], source_family: Optional[str] = None,
+                  source_geometry: Optional[Mapping[str, Any]] = None) -> Tuple[keras.Model, keras.Model]:
+    """``(loaded source, target)``: the target is built after ``clear_session``, as a run builds its model, then the
+    source's saved archive is loaded beside it, as ``init_from.transfer`` loads it (no ``clear_session`` between)."""
+    source_family = source_family or family
+    source_geometry = source_geometry or SOURCE[task_of(source_family)]
+    source_args = CROSS_SOURCE_ARGS.get(source_family) if source_family != family else None
+    key = (source_family, tuple(sorted(source_geometry.items())), tuple(sorted((source_args or {}).items())))
+    if key not in archives:
+        archives[key] = archives["dir"] / f"{len(archives)}_{source_family}.keras"
+        source_of(source_family, source_geometry, source_args)[0].save(archives[key])
+    target, _ = build(family, variant, geometry, model_args)
+    return keras.saving.load_model(archives[key], compile=False), target
+
+
+def pins_of(family: str) -> Dict[str, Any]:
+    _, kwargs = source_of(family, SOURCE[task_of(family)])
+    return {key: kwargs[key] for key in registry.MODELS[family].transfer.pinned}
+
+
+@pytest.mark.parametrize("family", init_families())
+def test_production_order_the_same_geometry_copies_every_weight_and_the_head_names_a_weight(family, archives):
+    spec, geometry = registry.MODELS[family].transfer, SOURCE[task_of(family)]
+    loaded, target = loaded_beside(family, VARIANT[family], geometry, pins_of(family), archives)
+    got, plan, message = verdict(family, "same, production order", loaded, target, spec)
+    assert got == "PASS", message
+    assert len(plan.copied) == plan.n_source == plan.n_target > 0
+    # A declared head that names no weight would reset nothing when the head changes.
+    assert not spec.head or any(path == p or path.startswith(p + "/") for p in spec.head for path in plan.copied)
+
+
+#: One changed-geometry case per kind of change the census makes, in the production order: a head (accunet and mdn,
+#: whose paths share a root other than the model's name), the image size, the channels and the lookback.
+PRODUCTION_CHANGES = [("accunet", "classes"), ("mdn", "horizon"), ("vit", "image_size"), ("timestral", "channels"),
+                      ("tirex", "lookback")]
+
+
+@pytest.mark.parametrize("family,key", PRODUCTION_CHANGES, ids=[f"{f}-{k}" for f, k in PRODUCTION_CHANGES])
+def test_production_order_a_change_gives_the_verdict_the_spec_predicts(family, key, archives):
+    task = task_of(family)
+    geometry = {**SOURCE[task], key: CHANGES[task][key]}
+    loaded, target = loaded_beside(family, VARIANT[family], geometry, pins_of(family), archives)
+    judge_change(family, key, loaded, target)
+
+
+def test_production_order_a_deeper_vit_grows_its_new_blocks(archives):
+    loaded, target = loaded_beside("vit", GROWN["vit"], SOURCE[CLASSIFICATION], pins_of("vit"), archives)
+    judge_grow("vit", loaded, target)
+
+
+@pytest.mark.parametrize("family,task,source_family", cross_pairs(), ids=[f"{s}-to-{f}" for f, _, s in cross_pairs()])
+def test_production_order_a_declared_cross_task_pair_fills_the_target(family, task, source_family, archives):
+    loaded, target = loaded_beside(family, VARIANT[family], SOURCE[task_of(family)], {}, archives, source_family,
+                                   SOURCE[task])
+    judge_cross(family, task, source_family, loaded, target)
