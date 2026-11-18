@@ -826,8 +826,8 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   The exactness claims above, now on the GPU: the best checkpoint's reload gap is exactly 0.0 in all five runs; the zero-predictor baseline is the same float in G1 and in the ET kill run (1.0040831565856934 and 1.0040831565856934); the untrained `val_loss` is not the same float across two processes with one seed in either family: ET 2.3379111289978027 in G1 and 2.3379108905792236 in the ET kill run (relative difference 1.0e-07), BEiT 6.2661356925964355 in G3 and 6.266140460968018 in the BEiT kill run (7.6e-07), so equality across processes on the GPU is measured for the baseline and not for the untrained model's `val_loss` (the earlier gate's ET pair was equal, its BEiT pair was not).
   **Legacy rescore (Step 18, report only, no parity claimed, D-012).** The legacy trainer (`train.energy_transformer.train_masked_completion`, `et_tiny`, cifar10, 12 epochs, its own defaults and stateful masks, 252,913 parameters like G1) was run once and its `best_model.keras` scored on the API's fixed selection stream under the API's loss: 0.17493 against 0.17435 for the earlier gate's G1 best checkpoint scored the same way (the control reproduces that run's logged 0.17435 to 3e-8; the final gate's G1 logged 0.17422 and was not rescored); on the test stream 0.17504 against 0.17450. The two runs differ in their train masks and streams, so the numbers are reported and not graded.
   **Kill and resume (G4).** Each run was started with `checkpoint_args.backup_every_steps=300`, its PID recorded, and sent SIGKILL (that PID only) when the backup's metadata first read epoch 2 batch 299, that is after 2 CSV rows and 300 batches of the third epoch (the process exit status was 137); the same command with `resume_interrupted=true` then finished with exit 0 in ET and exit 0 in BEiT. The copy held 3112 optimizer steps (2 x 1,406 + 300), the final copy 5624 (4 x 1,406): no step lost or run twice after the copy. The CSV has one row per epoch (0 to 3) and the two rows written before the kill are unchanged. The learning rate the CSV records at each epoch start equals the run's own schedule evaluated at 0, 1,406, 3,112 and 4,218 steps, exactly, in both families: `optimizer.iterations == epoch * steps_per_epoch` at the starts of epochs 0, 1 and 3, and the epoch the kill landed in starts from the copy, at 2 x 1,406 + 300 (the documented behaviour of `backup_every_steps`), so for that one epoch the equation reads plus 300. The first three train batches of the resumed process were not read back from the real fit (it was not traced); the stream its stream seed gives (`with_stream(3112)`), digested the way the CPU resume test does on the real CIFAR-10 unaugmented, differs from epoch 0's stream at all three batches in both families.
-* **Follow-up plans**: starting a run from an earlier run's weights is in the code, its GPU gate pending (Phase 4g,
-  `init`, "Starting from an earlier run" below; design and decisions in
+* **Follow-up plans**: starting a run from an earlier run's weights is in the code and its GPU gate has run (Phase 4g,
+  `init`, "Starting from an earlier run" below, with the gate under "Measured: the `init` gate"; design and decisions in
   `research/roadmap/20261117_train_api_init_from.md`). Named and not started: the
   pretrain record next (Phase 4h: a `task.json` record with `predict` and `export` for pretrain, and
   classifier families that a BEiT or Energy Transformer encoder can seed through `init`), then the language tasks (the
@@ -1395,9 +1395,9 @@ dropped as a declared head. Anything else is refused before the first weight is 
 recipe's learning rates (no fine-tune rate is measured in this repository), and nothing is frozen.
 
 ```bash
-# the same task at a new size and class count: patch 4 kept, the position table resampled, the head reset
+# the same task at a new size and other class names: patch 4 kept, the position table resampled, the head reset
 python -m train image_classification out=results/vit_c10_32 model=vit/vit_pico data.dataset=cifar10
-python -m train image_classification out=results/vit_c100_64 model=vit/vit_pico data.dataset=cifar100 \
+python -m train image_classification out=results/vit_inette_64 model=vit/vit_pico data.dataset=imagenette \
     transform_args.image_size=64 init=results/vit_c10_32
 # a deeper variant: the blocks vit_tiny adds start fresh
 python -m train image_classification out=results/vit_tiny_c10 model=vit/vit_tiny data.dataset=cifar10 init=results/vit_c10_32
@@ -1501,7 +1501,40 @@ their `epoch_zero` block). `predict` and `export` of a fine-tuned run are those 
 size; they read only the run's own files, and `export` carries the block into `<out>.task.json`.
 
 <!-- init-gate:begin -->
-**Measured: the `init` gate.** Not run yet: the numbers of the GPU gate on the final code go here.
+**Measured: the `init` gate.** Run on the code HEAD `473d3082a` of the branch `train-api/phase-4g` (the commits after it change
+no file under `src/` or `tests/` but this README), one job at a time, at the recipes' learning rates: the GPU runs on an NVIDIA
+GeForce RTX 4090 (`CUDA_VISIBLE_DEVICES=0`, no `--gpu`), the G4 runs on the CPU. Each log names the HEAD and the worktree `src`
+as the origin of `dl_techniques` and `train`; each source's `best_model.keras` kept its sha256. With `init` unset nothing
+changed: three CPU reference runs (API classification, the legacy convnext trainer, API segmentation) reproduce the runs
+recorded before this work exactly (`GOLDEN: EXACT for api, convnext, seg`), the `checkpoint` key renamed `init` aside. Every
+number is read by script from the runs' own files and the gate's logs. Step is the median epoch after the first over its steps,
+peak memory TensorFlow's GPU allocator peak (G4 overlap: its one epoch, and the process's resident peak); no run grew a block.
+
+| Arm | Run | Copied, resampled, reset, dropped | Relation, split | Bar | Loaded weights at epoch zero | Best (epoch of) | Verdict | Step | Peak memory | Wall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| G1 | `depth_anything/vit_s`, megadepth, 252 to 364 px, batch 8, 15 epochs, seed 42, from the depth gate's G1 run above | 235, 0, 0, 0 | `same_task`, `same_split` | `val_loss` below min(constant 1.0, layout 0.9786, loaded) | 0.5637, binds | 0.5344 (14 of 15) | met, exit 0 | 360.8 ms | 7,026.4 MiB | 998 s |
+| G2a | `convnext_v1/cifar10`, cifar10, `transform_args.normalize=unit`, 15 epochs | - | - | `val_accuracy` above 0.2 | - | 0.7604 (15 of 15) | met, exit 0 | 23.5 ms | 1,361.8 MiB | 393 s |
+| G2b | `convnext_seg/cifar10`, oxford_pet at 128 px, 20 epochs, from G2a | 98, 0, 18, 4 | `cross_task`, `different_data` | `val_miou` above 0.1993 and above the loaded weights | 0.1831 | 0.7103 (16 of 20) | met, exit 0 | 51.9 ms | 3,001.7 MiB | 443 s |
+| G3a | `vit/vit_pico`, cifar10 at 32 px, 30 epochs | - | - | `val_accuracy` above 0.2 | - | 0.7914 (30 of 30) | met, exit 0 | 23.3 ms | 1,576.1 MiB | 439 s |
+| G3b | `vit/vit_pico`, imagenette, 32 to 64 px, 30 epochs, from G3a | 77, 1, 2, 2 | `same_task`, `different_data` | `val_accuracy` above 0.2 and above the loaded weights | 0.0391 | 0.8076 (29 of 30) | met, exit 0 | 84.3 ms | 4,235.2 MiB | 408 s |
+| G4 overlap | `vit/vit_pico`, cifar10, seed 43, 1 epoch on the CPU, from G3a (seed 42) | 80, 0, 0, 0 | `same_task`, `overlap` | `val_accuracy` above 0.2 and above the loaded weights | 0.8340 | 0.8320 (1 of 1) | missed, exit 1 | 2,166.5 ms | host 8,739 MiB | 999 s |
+| G5a | `convunext/tiny`, oxford_pet, 20 epochs | - | - | `val_miou` above 0.1993 | - | 0.7087 (20 of 20) | met, exit 0 | 72.5 ms | 3,626.8 MiB | 571 s |
+| G5b | `convunext_biased/tiny` (denoising), 1,200 COCO and DIV2K files, 64 px patches, 24 epochs, from G5a | 156, 0, 2, 2 | `cross_task`, `unknown` | PSNR gain above 1.0 dB and above the loaded weights | -35.2792 dB | 10.1597 (23 of 24) | met, exit 0 | 53.3 ms | 800.1 MiB | 913 s |
+| G6 | `tirex/tiny`, builtin bank, lookback 168 to 336, 4 epochs of 500 steps, from the forecasting gate's longer G3 tirex run above | 47, 0, 0, 0 | `same_task`, `same_split` | `val_mae` below min(naive-last 0.8435, seasonal-naive 0.7160, loaded) | 0.8554, does not bind | 0.6429 (4 of 4) | met, exit 0 | 50.4 ms | 310.7 MiB | 158 s |
+
+G1's test block, scored once on the best weights over 256 crops of 9 test scenes: loss 0.5304 +- 0.0213, Pearson 0.8014; the
+layout scores 1.0512 on the same crops (Pearson 0.4129). G3b resampled `pos_embed/pos_embedding` from 65 to 257 rows, kept the
+source's `patch_size` 4, and reset the head, since Imagenette's class names are not those of cifar10. It reads Imagenette
+because a larger ViT grid needs a dataset that is resized: cifar100 images are 32 px and in-memory datasets are not resized, so
+`transform_args.image_size=64` on cifar100 is refused before the claim. G5b's bar is on the PSNR gain over the noisy input.
+
+**G4.** `nbeats/base` asking for `data.lookback=336` from the forecasting gate's G1 run, trained at 168, exited 2 after 10 s
+with the geometry message of the table above and claimed no directory. The overlap run counted that its source trained on 4,531
+of its 5,000 selection rows (the seeded permutations of the two seeds, rebuilt independently, give 4,531) and on 0 of its 10,000
+test rows, so `selection_biased` is true and the success line ends in `(selection-biased)`. Its loaded weights scored
+`val_accuracy` 0.8340 on those rows and one epoch reached 0.8320, so the run exited 1: the bar under `init` refusing a fine-tune
+that did not improve on its source, whose selection score the overlap inflates. That exit is the rule working, not a fault. The
+gate added only `p4g_gate_*` run directories to `results/`: 76 entries before, 85 after.
 <!-- init-gate:end -->
 
 **Figures, analysis and TensorBoard**: five keys decide what is written besides the models and the
