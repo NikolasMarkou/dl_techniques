@@ -1,6 +1,7 @@
 """Start a run from an earlier run's weights (``init``): the transfer engine.
 
-The unit of a transfer is the individual weight, keyed by its Keras variable path. Every weight of
+The unit of a transfer is the individual weight, keyed by its Keras variable path relative to its
+model (a leading ``<model.name>/`` dropped, on both sides; nothing else renamed). Every weight of
 the target is either copied from the source weight at the same path (after a declared cross-task
 prefix), resampled by a rule its family declares, reset as a declared head, or grown as a new
 block of a deeper variant; every source weight is either used or dropped as a declared head.
@@ -9,24 +10,26 @@ directions), so a refusal leaves every target weight as it was. Pass ``model.wei
 3.8 it holds the BatchNorm moving statistics and no ``SeedGenerator`` state (that is in
 ``model.variables``), so a dropout seed is never transferred.
 
-Nothing here imports TensorFlow or Keras at module scope; the one resample rule imports the
-DINOv2 bicubic matrix inside the function.
+Nothing here imports TensorFlow, Keras or numpy at module scope (``registry`` rows import the
+declarations, and ``python -m train help`` stays light); numpy and the DINOv2 bicubic matrix are
+imported inside the functions that use them.
 
 Interface contract
 ------------------
-``TransferSpec``
-    One family's declaration. ``head``: path prefixes of the final layer, reset when the head is
-    not reused; ``resample``: target path to rule name (a key of :data:`RULES`); ``grow``: a regex
-    matched at the start of a path, naming a depth-indexed block a deeper variant may add;
-    ``pinned``: factory arguments the target takes from the source; ``fixed``: geometry keys the
-    family cannot change; ``sources``: ``(task, family)`` of another task to the
-    :class:`CrossTask` that maps its paths.
+``TransferSpec`` (declared in :mod:`train.api.registry`)
+    One family's declaration; every path in it is relative to the model. ``head``: path prefixes
+    of the final layer, reset when the head is not reused; ``resample``: target path to rule name
+    (a key of :data:`RULES`); ``grow``: a regex matched at the start of a path, naming a
+    depth-indexed block a deeper variant may add; ``pinned``: factory arguments the target takes
+    from the source; ``fixed``: geometry keys the family cannot change (``channels``,
+    ``lookback``, ``horizon``); ``sources``: ``(task, family)`` of another task to the
+    :class:`~train.api.registry.CrossTask` that maps its paths; ``positional``: top-level path
+    components inside which weights whose paths differ pair by order, when both sides hold the
+    same count and every pair has equal shape and dtype.
 
-    :raises ValueError: for a ``resample`` rule name that is not in :data:`RULES`.
-
-``plan_transfer(source_weights, target_weights, spec, relation=None, head_reset=False, name=...)``
-    :param source_weights: the source model's ``weights``.
-    :param target_weights: the target model's ``weights``.
+``plan_transfer(source_model, target_model, spec, relation=None, head_reset=False, name=...)``
+    :param source_model: the source model (anything with ``name`` and ``weights``).
+    :param target_model: the target model.
     :param spec: the target family's :class:`TransferSpec`.
     :param relation: ``None`` for a source of the same family and task; for a cross-task source,
         the :class:`CrossTask` entry of ``spec.sources``, whose head is always reset.
@@ -39,8 +42,8 @@ Interface contract
 ``check(plan)``
     :raises ConfigError: when a target weight has no source weight of its shape and dtype and no
         declared rule, or a source weight is neither used nor dropped; the message names
-        ``<n> of <m>`` weights, the first five paths with both shapes, ``+<k> more`` and
-        "nothing was copied".
+        ``<n> of <m>`` weights, the first five paths (relative to their model) with both shapes,
+        ``+<k> more`` and "nothing was copied".
 
 ``apply(plan)``
     Calls :func:`check`, then assigns every copy and resample. Returns ``None``.
@@ -54,42 +57,16 @@ Interface contract
 """
 
 import re
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
-
-import numpy as np
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 
 from .errors import ConfigError
+from .registry import CrossTask, TransferSpec
 
 #: How many offending paths a refusal lists before ``+<k> more``.
 SHOWN = 5
-
-
-@dataclass(frozen=True)
-class CrossTask:
-    """How a source of another task maps onto this family: a target prefix and the dropped source head."""
-
-    prefix: str = ""
-    drop: Tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class TransferSpec:
-    """One family's transfer declaration (fields in the module docstring)."""
-
-    head: Tuple[str, ...] = ()
-    resample: Mapping[str, str] = field(default_factory=dict)
-    grow: Optional[str] = None
-    pinned: Tuple[str, ...] = ()
-    fixed: Tuple[str, ...] = ()
-    sources: Mapping[Tuple[str, str], CrossTask] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        unknown = sorted(set(self.resample.values()) - set(RULES))
-        if unknown:
-            raise ValueError(f"unknown resample rule(s) {unknown}; the rules are {sorted(RULES)}")
 
 
 @dataclass(frozen=True)
@@ -109,12 +86,19 @@ class TransferPlan:
     unused: Tuple[str, ...]  # source paths
 
 
-def _by_path(weights: Sequence[Any], side: str) -> Dict[str, Any]:
+def _by_path(model: Any, side: str) -> Dict[str, Any]:
+    """``{path relative to the model: variable}``, in ``model.weights`` order."""
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-030: drop ONLY a leading "<model.name>/". A subclassed
+    # model roots every path at its instance name (vision_transformer_pico vs vision_transformer_tiny,
+    # res_net vs the segmenter's backbone/), which is not its architecture. Do not strip any other
+    # component or suffix: an inner "_1" or "rnn_2" is a real difference (D-031 pairs those by position).
+    root = f"{model.name}/"
     found: Dict[str, Any] = {}
-    for variable in weights:
-        if variable.path in found:
-            raise ConfigError(f"Invalid value for 'init': the {side} holds two weights at {variable.path}")
-        found[variable.path] = variable
+    for variable in model.weights:
+        path = variable.path[len(root):] if variable.path.startswith(root) else variable.path
+        if path in found:
+            raise ConfigError(f"Invalid value for 'init': the {side} holds two weights at {path}")
+        found[path] = variable
     return found
 
 
@@ -135,23 +119,42 @@ def _side(variable: Any) -> str:
     return f"{_shape(variable)} {variable.dtype}" if variable is not None else "none"
 
 
-def plan_transfer(source_weights: Sequence[Any], target_weights: Sequence[Any], spec: TransferSpec,
+def _pair_by_position(source: Dict[str, Any], target: Dict[str, Any], components: Sequence[str]) -> None:
+    """Re-key ``source`` inside each component to the target's paths, by order, when that pairs every weight."""
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-031: order pairing ONLY inside the declared components
+    # and ONLY when counts, shapes and dtypes all agree; otherwise leave the paths for the usual
+    # refusal. Do not widen it to the whole model or rename paths: xlstm's rnn/m_lstm_cell become
+    # rnn_2/m_lstm_cell_1 when a source loads beside its target, and nothing else drifts.
+    for component in components:
+        theirs = [path for path in source if _under(path, (component,))]
+        ours = [path for path in target if _under(path, (component,))]
+        pairs = list(zip(theirs, ours))
+        if theirs != ours and len(theirs) == len(ours) and all(
+                _shape(source[a][1]) == _shape(target[b]) and source[a][1].dtype == target[b].dtype for a, b in pairs):
+            source.update({b: source.pop(a) for a, b in pairs})
+
+
+def plan_transfer(source_model: Any, target_model: Any, spec: TransferSpec,
                   relation: Optional[CrossTask] = None, head_reset: bool = False,
                   name: str = "the target model") -> TransferPlan:
     """Pair every weight by path under ``spec``; assign nothing (contract in the module docstring)."""
     # DECISION plan-2026-11-18T072904-0fd54b91/D-005: one weight per Keras variable path, never
     # whole layers by name (a name loader loses a layer on one differing weight and sees no nested
     # backbone) and never names normalized (auto-named layers need a declared positional rule).
+    import numpy as np
+
     prefix = relation.prefix if relation is not None else ""
     drop = relation.drop if relation is not None else (spec.head if head_reset else ())
     reset_heads = spec.head if (relation is not None or head_reset) else ()
-    raw = _by_path(source_weights, "source")
+    raw = _by_path(source_model, "source")
     dropped = tuple(path for path in raw if _under(path, drop))
     source = {prefix + path: (path, var) for path, var in raw.items() if not _under(path, drop)}
+    target = _by_path(target_model, "target")
+    _pair_by_position(source, target, spec.positional)
     source_blocks = {_block(spec.grow, path) for path in source} - {None}
     copies, copied, resampled, reset, grown, missing = [], [], [], [], [], []
     used = set()
-    for path, var in _by_path(target_weights, "target").items():
+    for path, var in target.items():
         src = source.get(path, (None, None))[1]
         rule = spec.resample.get(path)
         if _under(path, reset_heads):
@@ -169,7 +172,7 @@ def plan_transfer(source_weights: Sequence[Any], target_weights: Sequence[Any], 
         else:
             missing.append(f"{path}: target {_side(var)}, source {_side(src)}")
     unused = tuple(f"{original} {_side(var)}" for path, (original, var) in source.items() if path not in used)
-    return TransferPlan(name, len(target_weights), len(source_weights), tuple(copies), tuple(copied),
+    return TransferPlan(name, len(target), len(raw), tuple(copies), tuple(copied),
                         tuple(resampled), tuple(reset), tuple(grown), dropped, tuple(missing), unused)
 
 
@@ -177,7 +180,8 @@ def _refuse(problems: Sequence[str], total: int, whose: str, what: str) -> None:
     if problems:
         more = f" (+{len(problems) - SHOWN} more)" if len(problems) > SHOWN else ""
         raise ConfigError(f"Invalid value for 'init': {len(problems)} of {total} weights of {whose} {what}: "
-                          f"{'; '.join(problems[:SHOWN])}{more}; nothing was copied")
+                          f"{'; '.join(problems[:SHOWN])}{more}; nothing was copied "
+                          "(paths without the model's own name)")
 
 
 def check(plan: TransferPlan) -> None:
@@ -206,11 +210,13 @@ def _grid(rows: int) -> int:
     return side
 
 
-def vit_pos_bicubic(value: np.ndarray, target_shape: Tuple[int, ...]) -> np.ndarray:
+def vit_pos_bicubic(value: Any, target_shape: Tuple[int, ...]) -> Any:
     """Resample a ViT position table to a larger square grid (contract in the module docstring)."""
     # DECISION plan-2026-11-18T072904-0fd54b91/D-009: torch's bicubic without antialiasing, to a
     # LARGER grid only. Do not allow a smaller grid: downsampling without antialiasing aliases, and
     # timm antialiases, so a shrink would silently differ from the reference implementation.
+    import numpy as np
+
     from dl_techniques.models.vision.dino.dino_v2 import torch_bicubic_resize_matrix
 
     if len(target_shape) != 3 or target_shape[0] != value.shape[0] or target_shape[2] != value.shape[2]:
@@ -227,4 +233,4 @@ def vit_pos_bicubic(value: np.ndarray, target_shape: Tuple[int, ...]) -> np.ndar
 
 
 #: Resample rules by the name a :class:`TransferSpec` declares.
-RULES: Dict[str, Callable[[np.ndarray, Tuple[int, ...]], np.ndarray]] = {"vit_pos_bicubic": vit_pos_bicubic}
+RULES: Dict[str, Callable[[Any, Tuple[int, ...]], Any]] = {"vit_pos_bicubic": vit_pos_bicubic}

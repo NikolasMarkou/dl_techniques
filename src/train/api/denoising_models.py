@@ -117,7 +117,7 @@ from . import recipes
 from .args import AutoContext, OptimArgs
 from .config import unknown_key_message
 from .errors import ConfigError, ConfigValidationError
-from .registry import ModelSpec, load_attr
+from .registry import CrossTask, ModelSpec, TransferSpec, load_attr
 # The one walk through nested layers (private to segmentation_models by name only: it is the helper its observers use).
 from .segmentation_models import _layers_of
 
@@ -714,6 +714,16 @@ def compile_options_for(family: str, precision: str) -> Dict[str, Any]:
     return {}
 
 
+def _denoiser_transfer(head: str, sources: Optional[Mapping[Tuple[str, str], CrossTask]] = None) -> TransferSpec:
+    """What ``init`` moves into a denoising family whose final layer is ``head`` (paths relative to the model).
+
+    The output has the input's channels, so a channel change is a stem change: ``channels`` is fixed and the head
+    is reset only across tasks. ``sources``: the cross-task pairs (the biased ConvUNext takes the segmentation
+    ConvUNext of its builder, ``final_output`` dropped and reset).
+    """
+    return TransferSpec(head=(head,), fixed=("channels",), sources=dict(sources or {}))
+
+
 def builtin_denoising_models() -> Tuple[ModelSpec, ...]:
     """Return the five denoising family specs, freshly built; see the module contract."""
     unet_stride = f"{_SEG}:convunext_stride"
@@ -726,6 +736,7 @@ def builtin_denoising_models() -> Tuple[ModelSpec, ...]:
             defaults=BFCNN,
             resolve_model_args=f"{_HERE}:resolve_denoising_args",
             observe=f"{_HERE}:observe_bfcnn",
+            transfer=_denoiser_transfer("final_conv"),
             properties=("bias_free",),
         ),
         ModelSpec(
@@ -737,6 +748,7 @@ def builtin_denoising_models() -> Tuple[ModelSpec, ...]:
             resolve_model_args=f"{_HERE}:resolve_denoising_args",
             stride=f"{_HERE}:bfunet_stride",
             observe=f"{_HERE}:observe_bfunet",
+            transfer=_denoiser_transfer("final_output"),
             properties=("bias_free",),
         ),
         ModelSpec(
@@ -749,6 +761,7 @@ def builtin_denoising_models() -> Tuple[ModelSpec, ...]:
             stride=unet_stride,
             observe=f"{_SEG}:observe_convunext",
             properties=("bias_free",),
+            transfer=_denoiser_transfer("final_output"),
         ),
         ModelSpec(
             family="convunext_biased",
@@ -759,6 +772,9 @@ def builtin_denoising_models() -> Tuple[ModelSpec, ...]:
             resolve_model_args=f"{_HERE}:resolve_denoising_args",
             stride=unet_stride,
             observe=f"{_SEG}:observe_convunext",
+            transfer=_denoiser_transfer(
+                "final_output", sources={("image_segmentation", "convunext"): CrossTask(drop=("final_output",))}
+            ),
         ),
         ModelSpec(
             family="scunet",
@@ -768,5 +784,6 @@ def builtin_denoising_models() -> Tuple[ModelSpec, ...]:
             defaults=SCUNET,
             resolve_model_args=f"{_HERE}:resolve_denoising_args",
             observe=f"{_HERE}:observe_scunet",
+            transfer=_denoiser_transfer("scu_net/enhancement_head/output_conv"),
         ),
     )

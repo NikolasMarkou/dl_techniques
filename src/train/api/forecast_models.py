@@ -90,7 +90,7 @@ from .config import unknown_key_message
 from .denoising_models import named_parameters
 from .errors import ConfigError, ConfigValidationError
 from .forecast_args import MIN_LOOKBACK, TASK, WATCH_METRIC
-from .registry import ModelSpec
+from .registry import ModelSpec, TransferSpec
 
 # ---------------------------------------------------------------------
 
@@ -259,6 +259,10 @@ class FamilyRow:
         extra`` when the key is given (the seasonal ets: a full ``seasonal_period`` plus one step); ``why_over`` is the reason.
     :param min_horizon: the smallest horizon the family builds at (nbeats needs 2: its seasonality basis has half the horizon in
         thetas), ``why_horizon`` the reason; ``1`` for a family that takes any.
+    :param transfer: what ``init`` moves into the family (:class:`~train.api.registry.TransferSpec`, carried onto its
+        ``ModelSpec``): the head reset on a change of horizon, head, quantile levels or channels, and the geometry keys
+        whose change alters a weight's shape (``fixed``). A family of one channel (``max_channels`` 1) declares no
+        channel key: the task refuses the channel count first.
     """
 
     variants: str
@@ -272,6 +276,7 @@ class FamilyRow:
     why_over: str = ""
     min_horizon: int = 1
     why_horizon: str = ""
+    transfer: Optional[TransferSpec] = None
 
 
 # DECISION plan-2026-11-13T105600-3a8319ef/D-028
@@ -281,16 +286,27 @@ class FamilyRow:
 FAMILIES: Dict[str, FamilyRow] = {
     # The minimums are MEASURED (by building each variant at decreasing lookbacks), not derived: the variants listed are the
     # ones small enough to build; tirex large and timestral 28M and up were not built and take the floor of every family.
+    # nbeats sizes dense1, the thetas and the basis matrices by the lookback, the horizon and the channels: no head of
+    # its own, nothing a change of the three can keep.
     NBEATS: FamilyRow(
-        f"{_HERE}:NBEATS_VARIANTS", min_horizon=2,
+        f"{_HERE}:NBEATS_VARIANTS", min_horizon=2, transfer=TransferSpec(fixed=("lookback", "horizon", "channels")),
         why_horizon="its seasonality stack has forecast_length // 2 harmonics, which is 0 at a horizon of 1; the library raises "
         "'thetas_dim[1] must be positive'"),
     PRISM: FamilyRow(
         f"{_TS}.prism.model:PRISM.MODEL_VARIANTS", min_lookback={"tiny": 8, "small": 31, "base": 31, "large": 61},
         why_lookback="its wavelet tree, set by the variant's tree_depth and num_wavelet_levels, needs a context long enough for "
-        "the deepest band; the library refuses a shorter one as an unsupportable PRISM configuration"),
-    TIREX: FamilyRow(f"{_TS}.tirex.model:TiRexCore.MODEL_VARIANTS", 1, "TiRexCore reads one series, (B, L, 1)"),
-    XLSTM: FamilyRow(f"{_TS}.xlstm.forecaster:xLSTMForecaster.MODEL_VARIANTS"),
+        "the deepest band; the library refuses a shorter one as an unsupportable PRISM configuration",
+        # temporal_projector maps the lookback onto the horizon, so it is the head and a lookback change alters it.
+        transfer=TransferSpec(head=("temporal_projector", "point_forecast_head", "quantile_forecast_head"),
+                              fixed=("lookback", "channels"))),
+    TIREX: FamilyRow(f"{_TS}.tirex.model:TiRexCore.MODEL_VARIANTS", 1, "TiRexCore reads one series, (B, L, 1)",
+                     transfer=TransferSpec(head=("quantile_head",))),
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-031: positional names the blocks of both variants whose inner rnn and
+    # cell layers are auto-named and take the next free name when a source loads beside its target (tiny:
+    # mlstm_block_0, slstm_block_1; small: blocks 0 to 3). Do not drop it: without it every xlstm init is refused.
+    XLSTM: FamilyRow(f"{_TS}.xlstm.forecaster:xLSTMForecaster.MODEL_VARIANTS", transfer=TransferSpec(
+        head=("point_head", "quantile_head"), fixed=("channels",),
+        positional=("mlstm_block_0", "mlstm_block_1", "slstm_block_1", "slstm_block_2", "slstm_block_3"))),
     ETS: FamilyRow(
         f"{_TS}.ets.model:ETS_VARIANTS", 1, "ETSModel is a recursion over one scalar series, (B, L, 1)",
         min_lookback_over={"AAA": ("seasonal_period", 1)},
@@ -299,9 +315,13 @@ FAMILIES: Dict[str, FamilyRow] = {
             "XLA fails the gradient of the unrolled smoothing loop (InvalidArgumentError at "
             "gradient_tape/ets_model_1/while/.../accumulator, measured on GPU 0)"
         ),
+        transfer=TransferSpec(),  # one smoothing scalar, the same at every lookback and horizon
     ),
-    TIMESTRAL: FamilyRow(f"{_TS}.timestral.model:TimestralModel.MODEL_VARIANTS", static_batch=True),
-    MDN: FamilyRow(f"{_HERE}:MDN_VARIANTS", 1, "the mixture is over the horizon of one series, (B, L, 1)"),
+    TIMESTRAL: FamilyRow(f"{_TS}.timestral.model:TimestralModel.MODEL_VARIANTS", static_batch=True,
+                         transfer=TransferSpec(head=("quantile_head",))),  # channel-free: every weight kept
+    MDN: FamilyRow(f"{_HERE}:MDN_VARIANTS", 1, "the mixture is over the horizon of one series, (B, L, 1)",
+                   transfer=TransferSpec(head=("mdn_core/mdn_layer/mdn_mus", "mdn_core/mdn_layer/mdn_sigmas"),
+                                         fixed=("lookback",))),  # mdn_core/dense_0 reads the flattened lookback
 }
 
 
@@ -680,6 +700,7 @@ def builtin_forecast_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=RECIPES[family],
             resolve_model_args=f"{_HERE}:resolve_forecast_args",
+            transfer=row.transfer,
         )
         for family, row in FAMILIES.items()
     )

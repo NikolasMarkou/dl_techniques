@@ -408,6 +408,13 @@ def recipe_notices_of(family: str) -> List[Tuple[str, str]]:
 
 
 
+#: Why the pretrain rows declare no ``TransferSpec``; ``init`` names it in its refusal.
+NO_TRANSFER = (
+    "pretrain does not start from earlier weights: it writes no record, and no family of another task shares the BEiT "
+    "or Energy Transformer trunk (follow-up: the pretrain record)"
+)
+
+
 def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
     """Return the two pretrain family specs, freshly built; see the module contract."""
     return (
@@ -418,6 +425,7 @@ def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=ET_RECIPE,
             resolve_model_args=f"{_HERE}:resolve_pretrain_args",
+            transfer_reason=NO_TRANSFER,
         ),
         ModelSpec(
             family=BEIT,
@@ -426,5 +434,6 @@ def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=BEIT_RECIPE,
             resolve_model_args=f"{_HERE}:resolve_pretrain_args",
+            transfer_reason=NO_TRANSFER,
         ),
     )

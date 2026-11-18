@@ -69,7 +69,7 @@ from .args import ERASING_PRESET, AutoContext, OptimArgs
 from .config import AUTO
 from .errors import ConfigError, UnresolvedAutoError
 from . import registry
-from .registry import ModelSpec
+from .registry import ModelSpec, TransferSpec
 
 # ---------------------------------------------------------------------
 
@@ -642,6 +642,21 @@ def build_model(
 
 _HERE = "train.api.recipes"
 
+#: What ``init`` moves between two classifiers of one family (paths relative to the model). The head is
+#: ``classification_head``; the 3-channel stem kernel makes ``channels`` fixed. ``pinned`` keeps the source's
+#: architecture where a resolver below derives it from the image size or the dataset (vit ``patch_size``, the
+#: resnet ``stem_type``, the convnext ``strides``); ``grow`` names the blocks a deeper variant adds.
+_CLASSIFIER_HEAD = ("classification_head",)
+VIT_TRANSFER = TransferSpec(
+    head=_CLASSIFIER_HEAD, resample={"pos_embed/pos_embedding": "vit_pos_bicubic"}, grow=r"transformer_layer_\d+",
+    pinned=("patch_size",), fixed=("channels",),
+)
+RESNET_TRANSFER = TransferSpec(
+    head=_CLASSIFIER_HEAD, grow=r"stage\d+_block\d+", pinned=("stem_type",), fixed=("channels",),
+)
+CONVNEXT_TRANSFER = TransferSpec(head=_CLASSIFIER_HEAD, pinned=("strides",), fixed=("channels",))
+CLIFFORDNET_TRANSFER = TransferSpec(head=_CLASSIFIER_HEAD, fixed=("channels",))
+
 
 def builtin_models() -> Tuple[ModelSpec, ...]:
     """Return the six classification family specs, freshly built.
@@ -659,6 +674,7 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=VIT,
             resolve_model_args=f"{_HERE}:resolve_vit_args",
+            transfer=VIT_TRANSFER,
         ),
         ModelSpec(
             family="resnet",
@@ -667,6 +683,7 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=RESNET,
             resolve_model_args=f"{_HERE}:resolve_resnet_args",
+            transfer=RESNET_TRANSFER,
         ),
         ModelSpec(
             family="convnext_v1",
@@ -675,6 +692,7 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=_convnext_recipe(),
             resolve_model_args=f"{_HERE}:resolve_convnext_args",
+            transfer=CONVNEXT_TRANSFER,
         ),
         ModelSpec(
             family="convnext_v2",
@@ -683,6 +701,7 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=_convnext_recipe(),
             resolve_model_args=f"{_HERE}:resolve_convnext_args",
+            transfer=CONVNEXT_TRANSFER,
         ),
         ModelSpec(
             family="cliffordnet",
@@ -693,6 +712,7 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
                 0.3, {"cn_64_5": {"model_args": {"stochastic_depth_rate": 0.4}}}, 8
             ),
             resolve_model_args=f"{_HERE}:resolve_cliffordnet_args",
+            transfer=CLIFFORDNET_TRANSFER,
         ),
         ModelSpec(
             family="cliffordnet_hier",
@@ -701,6 +721,7 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=_cliffordnet_recipe(0.1, {}, 16),
             resolve_model_args=f"{_HERE}:resolve_cliffordnet_args",
+            transfer=CLIFFORDNET_TRANSFER,
         ),
     )
 

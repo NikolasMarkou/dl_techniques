@@ -53,6 +53,14 @@ Interface contract
         and ``per_variant`` overlays merged in. This, not ``defaults``, is what
         goes into an ``AutoContext``.
 
+``TransferSpec`` / ``CrossTask``
+    One family's declaration for ``init`` (``ModelSpec.transfer``), read by
+    :mod:`train.api.init_from`, whose docstring has the fields. Paths in it are relative to the model
+    (without the model's own name). Standard library only, so a row stays on the help path.
+
+    :raises ValueError: for a ``resample`` rule name that ``init_from.RULES`` does not hold, or a
+        ``positional`` entry that is not one top-level path component.
+
 ``load_attr(path)``
     :param path: ``"module:attr"`` or ``"module:Class.attr"``.
     :return: the object. An import or attribute failure propagates; it means
@@ -117,6 +125,38 @@ def _require_attr_path(owner: str, field_name: str, text: str) -> None:
 
 
 @dataclass(frozen=True)
+class CrossTask:
+    """How a source of another task maps onto a family: a target prefix and the dropped source head."""
+
+    prefix: str = ""
+    drop: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TransferSpec:
+    """One family's transfer declaration for ``init`` (fields in :mod:`train.api.init_from`)."""
+
+    head: Tuple[str, ...] = ()
+    resample: Mapping[str, str] = field(default_factory=dict)
+    grow: Optional[str] = None
+    pinned: Tuple[str, ...] = ()
+    fixed: Tuple[str, ...] = ()
+    sources: Mapping[Tuple[str, str], CrossTask] = field(default_factory=dict)
+    positional: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.resample:
+            # Imported here: init_from imports this module, and only a row that resamples needs the rule names.
+            from .init_from import RULES
+
+            unknown = sorted(set(self.resample.values()) - set(RULES))
+            if unknown:
+                raise ValueError(f"unknown resample rule(s) {unknown}; the rules are {sorted(RULES)}")
+        if any(not name or "/" in name for name in self.positional):
+            raise ValueError(f"TransferSpec.positional names top-level path components, got {self.positional!r}")
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     """One model family, as data.
 
@@ -149,6 +189,10 @@ class ModelSpec:
     :param properties: promises about the family's models that a task reads and verifies,
         drawn from :data:`KNOWN_PROPERTIES` (a tuple of distinct names). ``()`` (the default):
         none, and no task reads anything here. Nothing in the shared sequence switches on it.
+    :param transfer: how ``init`` moves an earlier run's weights into this family
+        (:class:`TransferSpec`); ``None`` (the default) when the family takes none.
+    :param transfer_reason: why ``transfer`` is ``None``; ``init`` names it in its refusal. A
+        built-in row declares one of the two (the census in ``test_init_from_families.py``).
     """
 
     family: str
@@ -160,6 +204,8 @@ class ModelSpec:
     stride: Optional[Union[int, str]] = None
     observe: Optional[str] = None
     properties: Tuple[str, ...] = ()
+    transfer: Optional[TransferSpec] = None
+    transfer_reason: str = ""
 
     def __post_init__(self) -> None:
         if not self.family or "/" in self.family:

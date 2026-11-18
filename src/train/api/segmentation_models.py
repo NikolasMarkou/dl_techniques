@@ -179,7 +179,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 from . import recipes
 from .args import AutoContext, OptimArgs
 from .errors import ConfigError
-from .registry import ModelSpec, load_attr
+from .registry import CrossTask, ModelSpec, TransferSpec, load_attr
 
 # ---------------------------------------------------------------------
 
@@ -738,6 +738,27 @@ RESNET_SEG = _segmentation_recipe(
 )
 
 
+#: What ``init`` moves into each segmentation family (paths relative to the model; every stem is 3-channel, so
+#: ``channels`` is fixed). The resnet_seg and convnext_seg decoders (``segmentation_head``) have no counterpart in a
+#: classifier, so the whole decoder is the head: reset across tasks and on a change of classes. A classifier of the
+#: backbone's family seeds the backbone under ``backbone/`` with its ``classification_head`` dropped; convunext takes
+#: the biased denoiser of its builder with ``final_output`` dropped.
+SEG_HEAD = ("segmentation_head",)
+_FROM_CLASSIFIER = CrossTask(prefix="backbone/", drop=("classification_head",))
+CONVUNEXT_TRANSFER = TransferSpec(
+    head=("final_output",), fixed=("channels",),
+    sources={("image_denoising", "convunext_biased"): CrossTask(drop=("final_output",))},
+)
+ACCUNET_TRANSFER = TransferSpec(head=("acc_u_net/output_conv",), fixed=("channels",))
+RESNET_SEG_TRANSFER = TransferSpec(
+    head=SEG_HEAD, grow=r"backbone/stage\d+_block\d+", fixed=("channels",),
+    sources={("image_classification", "resnet"): _FROM_CLASSIFIER},
+)
+CONVNEXT_SEG_TRANSFER = TransferSpec(
+    head=SEG_HEAD, fixed=("channels",), sources={("image_classification", "convnext_v1"): _FROM_CLASSIFIER},
+)
+
+
 def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
     """Return the segmentation family specs, freshly built; see the module contract."""
     return (
@@ -750,6 +771,7 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=f"{_HERE}:convunext_stride",
             observe=f"{_HERE}:observe_convunext",
+            transfer=CONVUNEXT_TRANSFER,
         ),
         ModelSpec(
             family="accunet",
@@ -760,6 +782,7 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=ACCUNET_STRIDE,
             observe=f"{_HERE}:observe_accunet",
+            transfer=ACCUNET_TRANSFER,
         ),
         ModelSpec(
             family="resnet_seg",
@@ -770,6 +793,7 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=f"{_HERE}:resnet_seg_stride",
             observe=f"{_HERE}:observe_resnet_seg",
+            transfer=RESNET_SEG_TRANSFER,
         ),
         ModelSpec(
             family="convnext_seg",
@@ -780,5 +804,6 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=f"{_HERE}:convnext_seg_stride",
             observe=f"{_HERE}:observe_convnext_seg",
+            transfer=CONVNEXT_SEG_TRANSFER,
         ),
     )

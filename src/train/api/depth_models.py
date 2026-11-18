@@ -72,7 +72,7 @@ from .depth_args import (
     pretrained_start,
 )
 from .errors import ConfigError, ConfigValidationError
-from .registry import ModelSpec, load_attr
+from .registry import ModelSpec, TransferSpec, load_attr
 
 # ---------------------------------------------------------------------
 
@@ -279,5 +279,8 @@ def builtin_depth_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=RECIPE,
             resolve_model_args=f"{_HERE}:resolve_depth_args",
+            # Every weight is kept at every image size: DINOv2 stores its position table at the official grid and
+            # resamples it at call. The head is one output, always reused; nothing is pinned or fixed.
+            transfer=TransferSpec(head=("depth_head/output_conv2_2",)),
         ),
     )
