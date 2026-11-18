@@ -201,7 +201,8 @@ def world():
         # (test_the_builtin_sources_are_refused_before_the_claim).
         patch.setattr(data_args, "check_builtin_sources", lambda data: None)
         # The row `init` names no run directory; the source reader has its own file (test_init_from_runs).
-        patch.setattr(init_from, "read_source", lambda init, trainer, config, context: None)
+        # The stand-in returns what _resolve reads from a Source: its pins, none here.
+        patch.setattr(init_from, "read_source", lambda init, trainer, config, context: SimpleNamespace(pins={}))
         recipes.register_builtin_models()
         registry.register_task(
             registry.TaskSpec(
