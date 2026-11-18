@@ -472,8 +472,8 @@ class DepthEstimationTrainer(TaskTrainer):
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
         notes = [
-            f"initial loss {baseline['loss']:.6g} is {ratio:.3g}x the constant baseline on the {data.n_select} fixed "
-            "selection crops: a plain evaluate in inference mode; see the `init_scale_warning` note",
+            *([f"initial loss {baseline['loss']:.6g} is {ratio:.3g}x the constant baseline on the {data.n_select} fixed "
+               "selection crops: a plain evaluate in inference mode; see the `init_scale_warning` note"] if ratio is not None else []),
             *classification_run.RUN_NOTES[:2],
             "`val_loss` is the masked affine-invariant loss of Depth Anything V1 on the fixed selection crops (a function of "
             "the weights alone); the compiled `abs_rel`, `sq_rel`, `rmse`, `rmse_log` and `delta_1.25` score the prediction "
@@ -585,6 +585,7 @@ class DepthEstimationTrainer(TaskTrainer):
         extras: Dict[str, Any] = {
             "baselines": dict(baselines),
             "epoch_zero": {"val_loss": epoch_zero, "binds": bool(math.isfinite(epoch_zero) and epoch_zero < terms)},
+            **({"epoch_zero_of": "init"} if config.init is not None else {}),
             "held_out": held_out,
         }
         return Evaluation(

@@ -100,7 +100,7 @@ from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from .. import recipes, registry
+from .. import init_from, recipes, registry
 from ..args import (
     AnalysisArgs,
     AutoContext,
@@ -492,8 +492,8 @@ class ImageClassificationTrainer(TaskTrainer):
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
         notes = [
-            f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
-            f"(ratio {ratio:.2f}), a plain evaluate on the validation split",
+            *([f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
+               f"(ratio {ratio:.2f}), a plain evaluate on the validation split"] if ratio is not None else []),
             *classification_run.RUN_NOTES,
         ]
         if data.test_ds is None:
@@ -542,6 +542,7 @@ class ImageClassificationTrainer(TaskTrainer):
         # The one thing kept is the reload check of ``best_model.keras``, run on the
         # selection split with its metrics discarded.
         has_test = data.test_ds is not None
+        self._loaded = init_from.loaded_value(config, fit.run_dir, "accuracy")
         if checkpoint_cfg.save_best:
             # The in-memory model holds the BEST weights here (EarlyStopping restored them).
             reloaded, load_error, max_diff = classification_run.check_best_checkpoint(

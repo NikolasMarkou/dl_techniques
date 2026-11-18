@@ -771,6 +771,28 @@ def test_init_warm_starts_from_a_run_directory_and_a_model_file_is_refused_befor
     assert not out.exists()
 
 
+def test_init_warm_starts_that_do_not_improve_on_the_loaded_weights_miss_the_bar(world, folders, tmp_path, monkeypatch):
+    """Under ``init`` the best ``val_psnr`` must beat the loaded weights' epoch zero (plan-2026-11-18T072904-0fd54b91/D-013)."""
+    keras.backend.clear_session()
+    first = train_image_denoising(**mapping(tmp_path / "first", folders, "convunext_biased", epochs=1))
+    real = dr.identity_scores
+    # The input's PSNR 100 dB lower: the loaded weights clear the absolute bar (1 dB over the input) at epoch zero.
+    monkeypatch.setattr(dr, "identity_scores", lambda *args: {**real(*args), "psnr": real(*args)["psnr"] - 100.0})
+    out = tmp_path / "warm"
+    keras.backend.clear_session()
+    # lr 1e-30 and no warmup (its start rate 1e-8 trains: measured +0.0005 dB) move no float32 weight of a layernorm
+    # model: the fine-tune scores what the loaded weights scored.
+    still = {"lr": 1e-30, "warmup_epochs": 0}
+    code = cli.main(["image_denoising", *flatten("", mapping(out, folders, "convunext_biased", epochs=1,
+                                                             init=str(first.run_dir), optim_args=still), [])])
+    summary = read_json(out / "results_summary.json")
+    loaded = read_json(out / "checkpoints" / "fit_state.json")["initial"]["metrics"]["psnr"]
+    assert code == 1 and summary["success"] is False
+    assert summary["success_value"] == pytest.approx(loaded - summary["input_psnr"], abs=1e-4)
+    assert summary["success_value"] > summary["success_threshold"]  # the absolute bar alone would call it met
+    assert "Evaluate of the loaded weights before fit: " in (out / "run.log").read_text()
+
+
 # ---------------------------------------------------------------------
 # The identity loss of a set with no noise
 # ---------------------------------------------------------------------

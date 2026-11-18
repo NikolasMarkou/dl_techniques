@@ -21,7 +21,11 @@ source. ``keras.backend.clear_session()`` runs before every run, as a fresh proc
 The ``split`` tests (D-012, D-037): the source's training data against this run's selection and test data, counted and
 never refused. Each count is compared with an oracle written here (numpy set intersections of the seeded cuts, the
 forecasting segment arithmetic, the scene sets); the task hooks are called on fake data where a run would add nothing,
-and two real tiny runs check the record, the summary flags, the success line and that the run succeeds.
+and two real tiny runs check the record, the summary flags, the success line and that the run finishes.
+
+The ``bar`` tests (D-013): under ``init`` a classification, segmentation or denoising run must also beat the loaded
+weights' epoch-zero success value, read from the fit sidecar (also on a resume); a stub sidecar drives the real bars,
+and runs at a 1e-30 learning rate (no float32 weight moves) miss the bar their absolute threshold alone would pass.
 """
 
 import builtins
@@ -992,14 +996,16 @@ def summary_of(run_dir: Path) -> Dict[str, Any]:
     return json.loads((Path(run_dir) / "results_summary.json").read_text())
 
 
-def test_split_end_to_end_an_overlap_and_an_unknown_split_are_marked_and_the_runs_succeed(
+def test_split_end_to_end_an_overlap_and_an_unknown_split_are_marked_and_the_runs_finish(
         world, cifar_source, trees, tmp_path, monkeypatch):
     from tests.classification_fakes import use_tiny_raw
 
     use_tiny_raw(monkeypatch, n_train=40, n_test=8)
     out = tmp_path / "seed43"
     keras.backend.clear_session()
-    assert train_image_classification(**cifar_request(out, seed=43, init=str(cifar_source))).success is True
+    # The verdict is the bar's (D-013: a fine-tune must beat its loaded weights), never the overlap's: the run finishes.
+    assert train_image_classification(**cifar_request(out, seed=43, init=str(cifar_source))).success is summary_of(
+        out)["success"]
     record = record_of(out)
     split = record["init"]["split"]
     expected = len(cut(40, 42)[0] & cut(40, 43)[1])
@@ -1008,7 +1014,7 @@ def test_split_end_to_end_an_overlap_and_an_unknown_split_are_marked_and_the_run
     flags = {key: summary_of(out)[key] for key in ("selection_biased", "test_biased", "overlap_unknown")}
     assert flags == {"selection_biased": True, "test_biased": False, "overlap_unknown": False}
     log = (out / "run.log").read_text()
-    assert re.search(r"Reached success_threshold \S+ on \S+: best \S+ \(selection-biased\)", log), log[-2000:]
+    assert re.search(r"(Reached|Missed) success_threshold \S+ on \S+: best \S+ \(selection-biased\)", log), log[-2000:]
     assert "seed=42, data.validation_split=0.1, data.max_samples=null as the source's give 0" in log
     assert predictor.record_problems(record) == []
     for broken in ({**split, "n_select_overlap": None}, {**split, "relation": "leaked"}, {**split, "extra": 1}):
@@ -1016,7 +1022,8 @@ def test_split_end_to_end_an_overlap_and_an_unknown_split_are_marked_and_the_run
     # A folder target of a built-in source: no rule matches its files to the source's rows.
     out = tmp_path / "folder"
     keras.backend.clear_session()
-    assert train_image_classification(**classify(str(out), trees["ten"], 32, init=str(cifar_source))).success is True
+    assert train_image_classification(**classify(str(out), trees["ten"], 32, init=str(cifar_source))).success is (
+        summary_of(out)["success"])
     split = record_of(out)["init"]["split"]
     assert (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == ("unknown", None, None)
     assert summary_of(out)["overlap_unknown"] is True and summary_of(out)["selection_biased"] is False
@@ -1101,3 +1108,109 @@ def test_split_denoising_counts_the_sources_train_files_among_this_runs_held_out
     assert target.init_overlap(apart, target.config, fake)["n_select_overlap"] == 0
     gone = a_source({"data": {"train_dirs": [str(tmp_path / "gone")], "val_dirs": [str(val)]}})
     assert target.init_overlap(gone, target.config, fake)["relation"] == "unknown"
+
+
+# ---------------------------------------------------------------------
+# bar: under init a fine-tune must beat the loaded weights' epoch zero (D-013)
+# ---------------------------------------------------------------------
+
+#: ``task: (trainer, initial.metrics key, the loaded weights' score, the identity's PSNR the success value is net of,
+#: the absolute bar)``; every one of the three is higher-is-better, and the loaded weights already clear the bar.
+BAR_TASKS = {
+    "classification": (ImageClassificationTrainer, "accuracy", 0.6, 0.0, 0.2),
+    "segmentation": (ImageSegmentationTrainer, "miou", 0.6, 0.0, 0.2),
+    "denoising": (ImageDenoisingTrainer, "psnr", 26.0, 20.0, 1.0),
+}
+
+
+#: A rate that moves no float32 weight: lr 1e-30 and no warmup (whose start rate, 1e-8, would train).
+STILL = {"lr": 1e-30, "warmup_epochs": 0}
+
+
+def write_sidecar(run_dir: Path, metrics: Dict[str, float]) -> Path:
+    from train.common.resume_state import update_fit_state
+
+    path = Path(run_dir) / "checkpoints" / "fit_state.json"
+    update_fit_state(path, initial={"metrics": metrics, "ratio": None, "warned": None})
+    return path
+
+
+@pytest.mark.parametrize("task", sorted(BAR_TASKS))
+def test_bar_under_init_a_fine_tune_must_beat_the_loaded_weights_epoch_zero_read_from_the_sidecar(task, tmp_path):
+    trainer_class, key, score, net_of, threshold = BAR_TASKS[task]
+    write_sidecar(tmp_path, {"loss": 1.0, key: score})
+    config = SimpleNamespace(init="/the/source", metric_args=SimpleNamespace(success_threshold=None))
+    trainer = object.__new__(trainer_class)
+    held = score - net_of  # what the fine-tune reaches when it only holds the loaded weights' score
+    assert trainer.bar_is_met(config, held, threshold) is True  # the absolute bar alone: today's verdict
+    trainer._loaded = init_from.loaded_value(config, tmp_path, key, net_of)
+    assert trainer._loaded == held
+    assert trainer.bar_is_met(config, held, threshold) is False
+    low = np.float32(held)
+    step = np.spacing(low)
+    assert trainer.bar_is_met(config, float(low + np.float32(16) * step), threshold) is False  # inside the tie band
+    assert trainer.bar_is_met(config, float(low + np.float32(17) * step), threshold) is True
+    assert trainer.bar_is_met(config, held - 0.1, threshold) is False
+    # Without init nothing is read (not even a missing file) and the verdict is today's.
+    assert init_from.loaded_value(SimpleNamespace(init=None), tmp_path / "missing", key) is None
+    trainer._loaded = None
+    assert trainer.bar_is_met(config, held, threshold) is True
+    # A sidecar without the value under init is named, not read as zero.
+    write_sidecar(tmp_path / "bare", {"loss": 1.0})
+    with pytest.raises(ValueError, match=rf"initial\.metrics\.{key}"):
+        init_from.loaded_value(config, tmp_path / "bare", key)
+
+
+def test_bar_a_classifier_that_does_not_improve_on_its_loaded_weights_misses_and_its_resume_reads_the_sidecar(
+        world, trees, vit_source, tmp_path):
+    from .test_image_denoising_task import flatten
+
+    out = tmp_path / "run"
+    # lr 1e-30 with no warmup (whose start rate is 1e-8) moves no float32 weight, so the fine-tune scores what the
+    # loaded weights scored at epoch zero; QUIET's success_threshold 0.0 is met by any score.
+    request = classify(str(out), trees["ten"], 32, init=str(vit_source), optim_args=STILL)
+    keras.backend.clear_session()
+    assert train_image_classification(**request).success is False
+    sidecar_path = out / "checkpoints" / "fit_state.json"
+    sidecar, summary = json.loads(sidecar_path.read_text()), summary_of(out)
+    loaded = sidecar["initial"]["metrics"]["accuracy"]
+    assert summary["success_value"] == pytest.approx(loaded, abs=1e-6) and loaded >= summary["success_threshold"]
+    log = (out / "run.log").read_text()
+    assert "Evaluate of the loaded weights before fit: " in log and "Untrained evaluate BEFORE fit" not in log
+    assert re.search(r"Under init the best val_accuracy \S+ does not beat the loaded weights' epoch-zero \S+", log)
+    assert (summary["initial_loss_ratio"], summary["init_scale_warning"], sidecar["initial"]["ratio"]) == (None,) * 3
+    assert init_from.NOT_JUDGED_UNDER_INIT in summary["notes"]
+    # A reporting-only resume reads epoch zero from the sidecar, not from the restored weights: the same number is the
+    # same miss (exit 1 on the command line), a lower number there is a met bar.
+    for score, code in ((loaded, 1), (-1.0, 0)):
+        sidecar["initial"]["metrics"]["accuracy"] = score
+        sidecar_path.write_text(json.dumps(sidecar))
+        (out / "results_summary.json").unlink()
+        keras.backend.clear_session()
+        assert cli.main(["image_classification", *flatten("", {**request, "resume_interrupted": True}, [])]) == code
+        assert summary_of(out)["reporting_resumed"] is True and summary_of(out)["success"] is (code == 0)
+
+
+@pytest.fixture(scope="module")
+def segmenter(world, segmentation_data, tmp_path_factory):
+    """convunext/tiny segmentation at 32 px, 1 epoch (layernorm only: a 1e-30 rate changes no score)."""
+    out = tmp_path_factory.mktemp("segmenter") / "run"
+    keras.backend.clear_session()
+    train_image_segmentation(out=str(out), model="convunext/tiny", data=segmentation_data, epochs=1, batch_size=4,
+                             transform_args={"image_size": [32, 32]},
+                             analysis_args={"model_analysis": False, "figures": False})
+    return out
+
+
+def test_bar_a_segmenter_that_does_not_improve_on_its_loaded_weights_misses(world, segmentation_data, segmenter,
+                                                                             tmp_path):
+    out = tmp_path / "run"
+    keras.backend.clear_session()
+    result = train_image_segmentation(out=str(out), model="convunext/tiny", data=segmentation_data, epochs=1,
+                                      batch_size=4, transform_args={"image_size": [32, 32]}, init=str(segmenter),
+                                      optim_args=STILL, metric_args={"success_threshold": 0.0},
+                                      analysis_args={"model_analysis": False, "figures": False})
+    loaded = json.loads((out / "checkpoints" / "fit_state.json").read_text())["initial"]["metrics"]["miou"]
+    summary = summary_of(out)
+    assert result.success is False and summary["success"] is False
+    assert summary["success_value"] == pytest.approx(loaded, abs=1e-6) and loaded >= summary["success_threshold"]

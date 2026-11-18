@@ -600,8 +600,9 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
         notes = [
-            f"initial `mae` {baseline[METRIC]:.6g} is {ratio:.3g}x the naive-last MAE ({self._baselines['naive_last']:.6g}) on the "
-            f"{data.n_select} fixed selection windows: a plain evaluate in inference mode; see the `init_scale_warning` note",
+            *([f"initial `mae` {baseline[METRIC]:.6g} is {ratio:.3g}x the naive-last MAE ({self._baselines['naive_last']:.6g}) on the "
+               f"{data.n_select} fixed selection windows: a plain evaluate in inference mode; see the `init_scale_warning` note"]
+              if ratio is not None else []),
             *classification_run.RUN_NOTES[:2],
             "every number is in the units of the window's CONTEXT statistics (each window and its target are divided by the "
             "context's own mean and scale; a flat window, counted in `flat_windows`, is in the series' raw units); `val_mae` is the mean absolute error of the point forecast (the median of a "
@@ -730,6 +731,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
                 "binds": bool(self._epoch_zero < min(baselines["naive_last"], baselines["seasonal_naive"])),
             },
             "canonical_metrics": canonical,
+            **({"epoch_zero_of": "init"} if config.init is not None else {}),
         }
         return Evaluation(
             test_metrics_best=test_best,

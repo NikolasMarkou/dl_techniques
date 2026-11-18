@@ -130,7 +130,7 @@ import functools
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
-from .. import recipes, registry
+from .. import init_from, recipes, registry
 from ..args import (
     AnalysisArgs,
     AutoContext,
@@ -664,9 +664,9 @@ class ImageDenoisingTrainer(TaskTrainer):
         identity = self._identity or {}
         start = self._window_start if self._window_start is not None else 0
         notes = [
-            f"initial loss {baseline['loss']:.6g} is {ratio:.3g}x the {config.loss_args.name} loss of the identity "
-            f"({identity.get('loss', float('nan')):.6g}) on the {data.n_select} fixed validation patches: a plain "
-            "evaluate in inference mode; see the `init_scale_warning` note",
+            *([f"initial loss {baseline['loss']:.6g} is {ratio:.3g}x the {config.loss_args.name} loss of the identity "
+               f"({identity.get('loss', float('nan')):.6g}) on the {data.n_select} fixed validation patches: a plain "
+               "evaluate in inference mode; see the `init_scale_warning` note"] if ratio is not None else []),
             *classification_run.RUN_NOTES[:2],
             "`val_loss` and `val_psnr` are scores of the FIXED validation patches (crops and noise keyed on "
             f"(data.val_seed={data_cfg.val_seed}, index)), so they are a function of the weights alone; `val_psnr` is "
@@ -768,6 +768,7 @@ class ImageDenoisingTrainer(TaskTrainer):
         metric_cfg: DenoiseMetricArgs = config.metric_args
         load_error: Optional[str] = None
         max_diff: Optional[float] = None
+        self._loaded = init_from.loaded_value(config, fit.run_dir, "psnr", (self._identity or {}).get("psnr", 0.0))
         # The bias-free probes read the same first validation patches the pre-fit check read. The in-memory model
         # holds the BEST weights until `finalize_last_epoch` swaps the last epoch's in, so the best reading comes
         # first and the final one after it.

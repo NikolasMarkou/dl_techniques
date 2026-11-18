@@ -56,7 +56,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
-from . import registry, resume_decisions
+from . import init_from, registry, resume_decisions
 from .args import AnalysisArgs, CheckpointArgs, MetricArgs, OptimArgs
 from .config import StrictConfig, to_json
 from .data_args import DataFacts
@@ -231,7 +231,7 @@ class Run:
     init_block: Optional[Dict[str, Any]] = None
     params: int = 0
     baseline: Dict[str, float] = dataclasses.field(default_factory=dict)
-    initial_ratio: float = 0.0
+    initial_ratio: Optional[float] = 0.0
     init_warning: Optional[bool] = None
     best_weights: Optional[List[Any]] = None
     summary_head: Dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -612,8 +612,11 @@ def epoch_zero(run: Run) -> None:
         with _a_corrupt_file_is_named(
             run_dir, trainer.files_to_scan(data), "the first evaluation"
         ):
-            run.baseline, run.initial_ratio, run.init_warning = trainer.initial_loss_check(
-                config, run.model, data
+            # DECISION plan-2026-11-18T072904-0fd54b91/D-013: under init epoch 0 is the LOADED weights', for every task.
+            # Do NOT call `initial_loss_check` for them: its ratio, warning and "Untrained" label judge an initialization.
+            run.baseline, run.initial_ratio, run.init_warning = (
+                (init_from.evaluate_loaded(run.model, data, trainer.initial_loss_hint), None, None)
+                if config.init is not None else trainer.initial_loss_check(config, run.model, data)
             )
         # The sidecar keeps the epoch-0 numbers: a resumed model is not an untrained
         # one, so a resume reads them here and evaluates nothing (D-058).
@@ -621,7 +624,7 @@ def epoch_zero(run: Run) -> None:
             run.sidecar_path,
             initial={
                 "metrics": run.baseline,
-                "ratio": float(run.initial_ratio),
+                "ratio": None if run.initial_ratio is None else float(run.initial_ratio),
                 "warned": None if run.init_warning is None else bool(run.init_warning),
             },
             data_counts=resume_decisions.data_counts(data),

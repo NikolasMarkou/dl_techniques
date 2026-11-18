@@ -210,7 +210,8 @@ Hooks (override in a task)
 ``bar_is_met(config, reached, threshold)``
     Whether ``reached`` (``success_value``) clears ``threshold`` (``success_threshold``). Default:
     ``reached >= threshold``. A task whose bar is the score of a constant predictor overrides it
-    to say STRICTLY above in one dtype (``image_segmentation``, D-087).
+    to say STRICTLY above in one dtype (``image_segmentation``, D-087). Under ``init`` a task that sets
+    ``_loaded`` also needs ``reached`` strictly above it (:func:`train.api.init_from.beats_loaded`, D-013).
 ``extra_callbacks(config, data)``
     Callbacks inserted after ``LastEpochWeights``. Default: none.
 ``figure_callbacks(config, data, vis_dir)``
@@ -339,7 +340,7 @@ import os
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
-from . import registry, resume_decisions
+from . import init_from, registry, resume_decisions
 from .args import AutoContext, DebugArgs, MetricArgs, OptimArgs, _is_auto
 from .config import StrictConfig, assert_resolved, join_path
 from .data_args import DataFacts
@@ -582,6 +583,8 @@ class TaskTrainer:
     task: ClassVar[str] = ""
     success_metric: ClassVar[str] = ""
     resume_order: ClassVar[Optional[str]] = None
+    #: Under ``init``: the loaded weights' epoch-zero ``success_value``, set by ``evaluate_and_report`` (D-013).
+    _loaded: Optional[float] = None
 
     def __init__(self, config: StrictConfig) -> None:
         missing = [name for name in CONFIG_FIELDS if not hasattr(config, name)]
@@ -648,8 +651,8 @@ class TaskTrainer:
         raise NotImplementedError
 
     def bar_is_met(self, config: StrictConfig, reached: float, threshold: float) -> bool:
-        """Return whether ``reached`` clears ``threshold``; default: ``reached >= threshold``."""
-        return bool(reached >= threshold)
+        """Return whether ``reached`` clears ``threshold``; default: ``reached >= threshold`` (and ``_loaded``'s term)."""
+        return bool(reached >= threshold) and init_from.beats_loaded(reached, self._loaded, self.success_metric)
 
     def extra_callbacks(self, config: StrictConfig, data: Any) -> List[Any]:
         return []
@@ -1187,7 +1190,7 @@ class TaskTrainer:
         data: Any,
         params: int,
         baseline: Dict[str, float],
-        initial_ratio: float,
+        initial_ratio: Optional[float],
         init_warning: Optional[bool],
         devices: Dict[str, Any],
     ) -> Dict[str, Any]:
@@ -1250,7 +1253,7 @@ class TaskTrainer:
         """Return the summary's ``notes``: the task's, then the lines of the sequence itself."""
         notes = list(self.task_notes(config, baseline, ratio, data))
         if init_warning is None:
-            notes.append(self.unjudged_note(config))
+            notes.append(self.unjudged_note(config) if config.init is None else init_from.NOT_JUDGED_UNDER_INIT)
         complete = None if resume is None else resume_decisions.training_complete_reason(resume, config)
         if complete is not None:
             notes.append(
@@ -1318,7 +1321,7 @@ class TaskTrainer:
         message = (
             f"Training diverged: {non_finite} hold a non-finite or missing value after "
             f"{epochs_run} epoch(s); no evaluation, figures, analysis or final_model.keras "
-            f"were produced. Initial-loss ratio was {initial_ratio:.3g}."
+            "were produced." + ("" if initial_ratio is None else f" Initial-loss ratio was {initial_ratio:.3g}.")
         )
         logger.error(message)
         write_summary_json(

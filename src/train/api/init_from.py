@@ -630,3 +630,59 @@ def seeded_rows_split(source: Source, config: Any, data: Any, table: Optional[in
     trained = seeded_split_indices(n, 0, keys["seed"], keys["data.validation_split"], keys["data.max_samples"])[0]
     selected = seeded_split_indices(n, 0, config.seed, mine["data.validation_split"], ours.max_samples)[1]
     return counted_split("rows", keys, np.intersect1d(trained, selected).size, len(selected), 0, data.n_test)
+
+
+
+# ---------------------------------------------------------------------
+# The epoch-zero evaluation and the bar of an init run (D-013)
+# ---------------------------------------------------------------------
+
+#: The ``notes`` line of an ``init`` run, whose ``initial_loss_ratio`` and ``init_scale_warning`` are null.
+NOT_JUDGED_UNDER_INIT = ("`initial_loss_ratio` and `init_scale_warning` are null (not computed): under `init` the "
+                         "epoch-0 evaluation is of the loaded weights, not of an initialization")
+
+
+def evaluate_loaded(model: Any, data: Any, hint: str) -> Dict[str, float]:
+    """The epoch-0 evaluation of an ``init`` run (no ratio, no verdict); a non-finite value raises ``RuntimeError``."""
+    import math
+
+    from train.common import classification_run
+
+    metrics = classification_run.evaluate_dict(model, data.select_ds)
+    shown = ", ".join(f"val {name} {value:.6g}" for name, value in metrics.items())
+    logger.info(f"Evaluate of the loaded weights before fit: {shown} on {data.n_select} selection samples")
+    if not all(math.isfinite(value) for value in metrics.values()):
+        raise RuntimeError(f"Initial validation {shown}: the loaded weights diverge on this run's data. {hint}")
+    return metrics
+
+
+def loaded_value(config: Any, run_dir: Any, key: str, net_of: float = 0.0) -> Optional[float]:
+    """Under ``init``, the fit sidecar's ``initial.metrics[key]`` minus ``net_of`` (a resume reads the same number);
+    else ``None``, reading nothing. :raises ValueError: under ``init``, a sidecar without that value."""
+    if config.init is None:
+        return None
+    path = Path(run_dir) / "checkpoints" / "fit_state.json"
+    value = json.loads(path.read_text()).get("initial", {}).get("metrics", {}).get(key) if path.is_file() else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{path} holds no initial.metrics.{key}, the loaded weights' epoch-zero value the bar must beat")
+    return float(value) - net_of
+
+
+def beats_loaded(reached: float, loaded: Optional[float], name: str) -> bool:
+    """Whether ``reached`` is above ``loaded`` by more than ``tie_band(1)`` float32 steps; true when ``loaded`` is None."""
+    # DECISION plan-2026-11-18T072904-0fd54b91/D-013
+    # Under init the success value must be STRICTLY above the loaded weights' epoch zero, in float32, beyond the tie band:
+    # a good source clears an absolute bar at epoch 0. Do NOT drop the term or use `>=` (a fine-tune that only held the
+    # source's score would pass), and do NOT apply it without init (`loaded` None keeps every other verdict).
+    if loaded is None:
+        return True
+    import numpy as np
+
+    from train.common.forecast_run import tie_band
+
+    low, band = np.float32(loaded), tie_band(1)
+    met = bool(np.float32(reached) > low + np.float32(band) * abs(np.spacing(low)))
+    if not met:
+        logger.info(f"Under init the best {name} {reached:.6g} does not beat the loaded weights' epoch-zero "
+                    f"{loaded:.6g} by more than {band} float32 steps")
+    return met
