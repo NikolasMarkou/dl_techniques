@@ -17,7 +17,7 @@ out). Adoption of these helpers across sibling modules is partial; a module
 that declines one says so in a comment naming what it measured instead.
 
 ``validate_head_divisibility`` (16 importers) and ``compute_attention_scale``
-(18 importers) are consolidated here. **Those two counts are MECHANICAL.
+(19 importers) are consolidated here. **Those two counts are MECHANICAL.
 Re-derive them before editing either**, from the repository root, with an AST
 walk over ``layers/`` matching ``ast.ImportFrom`` whose last dotted module
 component is ``common`` — a text search over-counts, since both names also
@@ -34,11 +34,11 @@ appear in prose (including in this docstring)::
     print(c["validate_head_divisibility"], c["compute_attention_scale"])
     PY
 
-It prints ``16 18``.
+It prints ``16 19``.
 
 ``apply_attention_mask``'s ``rescue_axis`` names the axis the CALLER's softmax
 reduces over — never inferred, for the same reason polarity is never inferred.
-**NINE of the THIRTEEN adopters** DERIVE the axis from their own
+**TEN of the FOURTEEN adopters** DERIVE the axis from their own
 ``probability_config`` rather than inheriting the ``-1`` default; the other
 four (``beit_attention.py``, ``capsule_routing_attention.py``,
 ``mean_shift_attention.py``, ``ring_attention.py``) each have their own

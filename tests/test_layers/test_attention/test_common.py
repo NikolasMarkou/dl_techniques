@@ -1103,7 +1103,8 @@ class TestCreateQkNorms:
         pkg = pathlib.Path(common_mod.__file__).parent
         adopters = (
             "area_attention.py", "capsule_routing_attention.py",
-            "differential_attention.py", "group_query_attention.py",
+            "differential_attention.py", "grouped_differential_attention.py",
+            "group_query_attention.py",
             "hopfield_attention.py", "lighthouse_attention.py",
             "multi_head_cross_attention.py", "non_local_attention.py",
             "ring_attention.py", "rpc_attention.py",
@@ -1163,10 +1164,10 @@ class TestTheAdopterCountsAreMechanical:
                 derivers.append(path.name)
         return adopters, derivers
 
-    def test_there_are_exactly_thirteen_adopters_and_nine_derive_the_axis(self):
+    def test_there_are_exactly_fourteen_adopters_and_ten_derive_the_axis(self):
         adopters, derivers = self._counts()
-        assert len(adopters) == 13, f"adopters drifted: {adopters}"
-        assert len(derivers) == 9, f"derivers drifted: {derivers}"
+        assert len(adopters) == 14, f"adopters drifted: {adopters}"
+        assert len(derivers) == 10, f"derivers drifted: {derivers}"
         assert set(derivers) <= set(adopters)
 
     def test_the_four_non_deriving_adopters_are_the_documented_ones(self):
@@ -1518,6 +1519,7 @@ class TestSplitAndMergeHeads:
             "anchor_attention.py",
             "beit_attention.py",
             "differential_attention.py",
+            "grouped_differential_attention.py",
             "capsule_routing_attention.py",
         ):
             tree = ast.parse((pkg / name).read_text(encoding="utf-8"))
@@ -1536,12 +1538,13 @@ class TestSplitAndMergeHeads:
             assert not private, (name, private)
 
 
-# The 13 layers that refuse the four score-level routing types. ``formerly_lowercased`` marks
+# The 14 layers that refuse the four score-level routing types. ``formerly_lowercased`` marks
 # the three that already lowered the type before the helper existed; the other ten compared
 # case-sensitively, so a mixed-case type slipped past them (the behaviour D-035 fixes).
 _VALIDATING_LAYERS = (
     ("capsule_routing_attention", "CapsuleRoutingSelfAttention", dict(num_heads=2, key_dim=8), True),
     ("differential_attention", "DifferentialMultiHeadAttention", dict(dim=32, num_heads=2, head_dim=16), True),
+    ("grouped_differential_attention", "GroupedDifferentialAttention", dict(dim=32, num_heads=4, head_dim=16), False),
     ("multi_head_cross_attention", "MultiHeadCrossAttention", dict(dim=32, num_heads=2), True),
     ("non_local_attention", "NonLocalAttention", dict(attention_channels=32), False),
     ("hopfield_attention", "HopfieldAttention", dict(num_heads=2, key_dim=8), False),
@@ -1610,7 +1613,7 @@ class TestValidateLogitProbabilityType:
         """RED at the previous commit for the ten layers that compared case-sensitively.
 
         ``formerly_lowercased`` layers raised a layer-specific wording before; the
-        shared wording is asserted for all thirteen so the message cannot drift per layer.
+        shared wording is asserted for every layer so the message cannot drift per layer.
         """
         layer_cls = _validating_layer_class(module, cls)
         with pytest.raises(ValueError, match=f"Invalid probability_type 'Routing': not supported by {cls}"):
@@ -1647,7 +1650,7 @@ class TestValidateLogitProbabilityType:
         assert any(_is_routing_type_collection(n) for n in ast.walk(also))
         assert not any(_is_routing_type_collection(n) for n in ast.walk(miss))
 
-    def test_the_thirteen_layers_import_the_helper(self):
+    def test_every_validating_layer_imports_the_helper(self):
         import ast
         import pathlib
 
@@ -1767,7 +1770,7 @@ class TestProbabilityAxis:
         }
         assert "probability_axis" not in imported
 
-    def test_the_nine_deriving_layers_import_the_helper(self):
+    def test_the_ten_deriving_layers_import_the_helper(self):
         import ast
         import pathlib
 
@@ -1776,7 +1779,7 @@ class TestProbabilityAxis:
         pkg = pathlib.Path(common_mod.__file__).parent
         for module in (
             "area_attention", "differential_attention", "gated_attention",
-            "group_query_attention", "hopfield_attention", "multi_head_cross_attention",
+            "grouped_differential_attention", "group_query_attention", "hopfield_attention", "multi_head_cross_attention",
             "multi_head_latent_attention", "rpc_attention", "single_window_attention",
         ):
             tree = ast.parse((pkg / f"{module}.py").read_text(encoding="utf-8"))

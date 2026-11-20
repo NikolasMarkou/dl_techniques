@@ -106,6 +106,13 @@ ROWS: Dict[str, Row] = {
          ("q2_dense", "kernel_initializer"), ("k2_dense", "kernel_initializer"),
          ("v_dense", "kernel_initializer"), ("proj", "kernel_initializer")],
         ["lambda_param"] + _dense_paths("q1", "k1", "q2", "k2", "v", "proj")),
+    "grouped_differential": Row(
+        "grouped_differential", {"dim": 64, "num_heads": 4, "head_dim": 16}, _TOKENS, 15,
+        [("q1_dense", "kernel_initializer"), ("k1_dense", "kernel_initializer"),
+         ("q2_dense", "kernel_initializer"), ("k2_dense", "kernel_initializer"),
+         ("v_dense", "kernel_initializer"), ("proj", "kernel_initializer")],
+        ["lambda_q1", "lambda_k1", "lambda_q2", "lambda_k2"]
+        + _dense_paths("q1", "k1", "q2", "k2", "v", "proj") + ["head_norm/scale"]),
     # Built clean: one instance at q_proj, a clone at every later projection. The oracle compares all 12
     # kernels (66 pairs); the sites stop at v_proj because the three short-conv kernels take their own
     # VarianceScaling between v_proj and f_down, spending three default seeds there.

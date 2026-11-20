@@ -5,8 +5,8 @@ interface that builds them from a config dict. Import a class directly, or
 call `create_attention_layer(type=...)` when the type comes from
 configuration.
 
-`factory.py` registers 37 keys; this package re-exports 39 layer classes,
-34 of them reachable through `create_attention_layer(type=...)`. The other
+`factory.py` registers 38 keys; this package re-exports 40 layer classes,
+35 of them reachable through `create_attention_layer(type=...)`. The other
 5 are direct-import only: `Ideogram4Attention`, `MMDiTJointAttention`,
 `AttentionRoutingCapsule`, `CapsuleBlockV2`, `WindowAttention`.
 
@@ -51,6 +51,7 @@ from .multi_head_attention import MultiHeadAttention
 from .multi_head_cross_attention import MultiHeadCrossAttention
 from .group_query_attention import GroupedQueryAttention
 from .differential_attention import DifferentialMultiHeadAttention
+from .grouped_differential_attention import GroupedDifferentialAttention
 from .multi_head_latent_attention import MultiHeadLatentAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 
@@ -126,6 +127,7 @@ __all__ = [
     "MultiHeadCrossAttention",
     "GroupedQueryAttention",
     "DifferentialMultiHeadAttention",
+    "GroupedDifferentialAttention",
     "MultiHeadLatentAttention",
     "SharedWeightsCrossAttention",
 

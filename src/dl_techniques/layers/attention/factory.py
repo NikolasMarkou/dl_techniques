@@ -1,7 +1,7 @@
 """
 Attention layer factory: one registry, one construction path, strict kwargs.
 
-``ATTENTION_REGISTRY`` maps 37 string keys to the callable that builds each
+``ATTENTION_REGISTRY`` maps 38 string keys to the callable that builds each
 attention layer, plus that layer's metadata. ``create_attention_layer`` is
 the single construction path: it looks the key up, rejects any keyword the
 target type does not declare, fills in the registry defaults, and
@@ -94,6 +94,7 @@ Registered types:
     fnet                  FNetFourierTransform
     gated                 GatedAttention
     group_query           GroupedQueryAttention
+    grouped_differential  GroupedDifferentialAttention
     hopfield              HopfieldAttention
     kimi_delta            KimiDeltaAttention
     lighthouse            LighthouseAttention
@@ -122,7 +123,7 @@ Registered types:
     window_zigzag         create_zigzag_window_attention
 
 This table is generated from ``ATTENTION_REGISTRY`` below, not transcribed.
-``README.md`` carries the same 37 keys with the instance type in its Class
+``README.md`` carries the same 38 keys with the instance type in its Class
 column, so the three window keys read ``WindowAttention`` there and name
 the builder function here. The registry is the source of truth for both.
 """
@@ -143,6 +144,7 @@ from .capsule_routing_attention import CapsuleRoutingSelfAttention
 from .channel_attention import ChannelAttention
 from .convolutional_block_attention import CBAM
 from .differential_attention import DifferentialMultiHeadAttention
+from .grouped_differential_attention import GroupedDifferentialAttention
 from .energy_attention import EnergyAttention
 from .fnet_fourier_transform import FNetFourierTransform
 from .gated_attention import GatedAttention
@@ -191,6 +193,7 @@ AttentionType = Literal[
     'fnet',
     'gated',
     'group_query',
+    'grouped_differential',
     'hopfield',
     'kimi_delta',
     'lighthouse',
@@ -451,6 +454,39 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': '2x standard MHA computational cost',
         'paper': 'Differential Transformer'
+    },
+
+    'grouped_differential': {
+        'class': GroupedDifferentialAttention,
+        'description': (
+            'Differential attention with an asymmetric G:1 split of the heads between '
+            'signal and noise-control groups. The G*h signal heads each have their own '
+            'query/key; the h noise heads and h value heads are shared across the G '
+            'signal groups, as in grouped-query attention. Lambda is the paper-faithful '
+            'exp(lq1.lk1) - exp(lq2.lk2) + lambda_init(layer_idx) with a per-head RMSNorm.'
+        ),
+        'required_params': ['dim', 'num_heads', 'head_dim'],
+        'optional_params': {
+            'group_ratio': 3,
+            'dropout_rate': 0.0,
+            'attention_dropout_rate': 0.0,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None,
+            'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None,
+            'activity_regularizer': None
+        },
+        'use_case': (
+            'Language models that want differential noise cancellation without paying '
+            'half of the heads for the noise map. The paper finds G=3 best from scratch '
+            'and G=4 best for progressive continual training.'
+        ),
+        'complexity': 'G*h signal maps plus h shared noise maps; V and the noise context cover h heads',
+        'paper': 'Grouped Differential Attention'
     },
 
     'energy': {
@@ -1668,7 +1704,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     # Validate positive integer parameters
     positive_int_params = [
         'area', 'dim', 'channels', 'attention_channels', 'num_heads',
-        'num_kv_heads', 'window_size', 'head_dim', 'kv_latent_dim'
+        'num_kv_heads', 'window_size', 'head_dim', 'kv_latent_dim', 'group_ratio'
     ]
     # DECISION plan-2026-08-11T012340-f63796dc/D-006: compare components, not
     # the value -- window_size is scalar for 3 types but (Wh, Ww) for 'beit';
@@ -1724,6 +1760,14 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
             raise ValueError(
                 f"For group_query attention, num_heads ({kwargs['num_heads']}) "
                 f"must be divisible by num_kv_heads ({kwargs['num_kv_heads']})"
+            )
+
+    if attention_type == 'grouped_differential':
+        group_ratio = kwargs.get('group_ratio', 3)
+        if 'num_heads' in kwargs and kwargs['num_heads'] % (group_ratio + 1) != 0:
+            raise ValueError(
+                f"For grouped_differential attention, num_heads ({kwargs['num_heads']}) "
+                f"must be divisible by group_ratio + 1 ({group_ratio + 1})"
             )
 
     if attention_type == 'differential':
@@ -1853,7 +1897,7 @@ def create_attention_layer(
 ) -> keras.layers.Layer:
     """Build one attention layer. An undeclared keyword raises.
 
-    The single construction path for all 37 registered types. It looks
+    The single construction path for all 38 registered types. It looks
     ``attention_type`` up, rejects any keyword that type does not declare, fills
     the registry defaults in under the caller's values, and constructs. The
     module docstring's architecture diagram draws the full ordering, including

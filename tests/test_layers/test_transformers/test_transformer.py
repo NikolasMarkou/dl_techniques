@@ -72,6 +72,22 @@ class TestTransformerLayer:
         return tf.random.normal(shape=(4, 16, 64))
 
     # ===============================================
+    # 0. layer_idx reaches the depth-dependent attention types
+    # ===============================================
+    @pytest.mark.parametrize("attention_type", ['differential', 'grouped_differential'])
+    @pytest.mark.parametrize("normalization_position", ['pre', 'post'])
+    def test_layer_idx_is_forwarded_to_depth_dependent_attention(
+        self, layer_config, sample_input, attention_type, normalization_position
+    ):
+        """``layer_idx`` selects lambda_init; a block that drops it silently runs every depth at 0."""
+        layer = TransformerLayer(
+            **layer_config, attention_type=attention_type,
+            normalization_position=normalization_position)
+        shallow = layer(sample_input, layer_idx=0, training=False)
+        deep = layer(sample_input, layer_idx=8, training=False)
+        assert float(tf.reduce_max(tf.abs(shallow - deep))) > 1e-4
+
+    # ===============================================
     # 1. Initialization and Build Tests
     # ===============================================
     def test_initialization_defaults(self, layer_config):
@@ -217,6 +233,9 @@ class TestTransformerLayer:
             {'attention_type': 'group_query', 'attention_args': {'num_kv_heads': 2}},
             # hidden_size (64) / num_heads (4) = 16
             {'attention_type': 'differential', 'attention_args': {'head_dim': 16}},
+            # num_heads (4) must be divisible by group_ratio + 1 (default 3 + 1 = 4); head_dim comes
+            # from the shared required-params table (hidden_size // num_heads).
+            {'attention_type': 'grouped_differential', 'attention_args': {}},
         ]
     )
     @pytest.mark.parametrize("ffn_type", ['mlp', 'swiglu', 'glu', 'geglu'])

@@ -1,6 +1,6 @@
 # attention
 
-Keras 3 attention and token-mixing layers for the `dl_techniques` library, plus a factory that builds any of 37 registered types from a string key and a keyword dictionary. Import path: `dl_techniques.layers.attention`.
+Keras 3 attention and token-mixing layers for the `dl_techniques` library, plus a factory that builds any of 38 registered types from a string key and a keyword dictionary. Import path: `dl_techniques.layers.attention`.
 
 ## What it is for
 
@@ -34,8 +34,8 @@ Shared building blocks live in `common.py`: an attention-mask helper (`apply_att
 
 ## Files
 
-- `__init__.py` - re-exports 7 factory-interface names (6 functions and the `AttentionType` alias) and 39 layer classes, 46 names in `__all__`. Import order fixes Keras registration order.
-- `factory.py` - `ATTENTION_REGISTRY` (37 entries with metadata), `AttentionType` literal, the six re-exported functions, and `assemble_attention_config` (not re-exported).
+- `__init__.py` - re-exports 7 factory-interface names (6 functions and the `AttentionType` alias) and 40 layer classes, 47 names in `__all__`. Import order fixes Keras registration order.
+- `factory.py` - `ATTENTION_REGISTRY` (38 entries with metadata), `AttentionType` literal, the six re-exported functions, and `assemble_attention_config` (not re-exported).
 - `common.py` - `MASK_BIAS_VALUE`, `mask_dtype`, `apply_attention_mask`, `validate_head_divisibility`, `compute_attention_scale`, `dtype_name`, `split_heads`, `merge_heads`, `create_qk_norms`, `NON_LOGIT_PROBABILITY_TYPES`, `validate_logit_probability_type`, `probability_axis`. Not re-exported.
 - `GUIDE.md` - authoring guide for new attention layers.
 - `multi_head_attention.py` - `MultiHeadAttention`, a thin self-attention wrapper around `MultiHeadCrossAttention`.
@@ -45,6 +45,7 @@ Shared building blocks live in `common.py`: an attention-mask helper (`apply_att
 - `mobile_mqa.py` - `MobileMQA`, a subclass of `GroupedQueryAttention` with one key/value head and optional K/V downsampling.
 - `multi_head_latent_attention.py` - `MultiHeadLatentAttention`, DeepSeek-V2 latent KV compression with decoupled RoPE.
 - `differential_attention.py` - `DifferentialMultiHeadAttention`, difference of two attention maps.
+- `grouped_differential_attention.py` - `GroupedDifferentialAttention`, differential attention with a `G:1` signal-to-noise head split and a shared noise group.
 - `gated_attention.py` - `GatedAttention`, QK-norm, partial RoPE, sigmoid output gate, optional grouped KV heads.
 - `shared_weights_cross_attention.py` - `SharedWeightsCrossAttention`, two modalities in one tensor sharing one QKV projection.
 - `anchor_attention.py` - `AnchorAttention`, anchor-token bottleneck for long sequences.
@@ -100,7 +101,7 @@ from dl_techniques.layers.attention import (
     validate_attention_config,
 )
 
-list_attention_types()                      # 37 keys, sorted
+list_attention_types()                      # 38 keys, sorted
 get_attention_requirements('window')        # one entry's metadata
 validate_attention_config('window', dim=96, window_size=7, num_heads=4)  # raises on a bad config
 ```
@@ -129,6 +130,7 @@ win = WindowAttention(dim=96, window_size=7, num_heads=4, partition_mode='zigzag
 | `fnet` | `FNetFourierTransform` | Parameter-free Fourier mixing | none |
 | `gated` | `GatedAttention` | QK-norm, partial RoPE, output gate | `dim`, `num_heads` |
 | `group_query` | `GroupedQueryAttention` | Fewer K/V heads than Q heads | `dim`, `num_heads`, `num_kv_heads` |
+| `grouped_differential` | `GroupedDifferentialAttention` | Differential attention with a `G:1` signal-to-noise head split; the noise heads and values are shared across the signal groups | `dim`, `num_heads`, `head_dim` |
 | `hopfield` | `HopfieldAttention` | Hopfield retrieval; `update_steps_max=0` is plain attention | `num_heads`, `key_dim` |
 | `kimi_delta` | `KimiDeltaAttention` | Gated delta-rule linear attention with per-channel decay; causal, O(N), carries state between calls | `dim`, `num_heads` |
 | `lighthouse` | `LighthouseAttention` | Pooled pyramid, top-K, causal | `dim`, `num_heads` |
@@ -157,7 +159,7 @@ Everything not listed as required is optional with a registry default. Read the 
 
 ## Things to know
 
-- Call signatures differ. Most mask-taking layers are `call(inputs, attention_mask=None, training=None)`. Exceptions: `group_query`, `ring` and `mobile_mqa` put `training` before `attention_mask`; `differential` has an extra `layer_idx` argument before `training`; `hopfield` puts `return_attention_scores` before `training` and also accepts `[query, key, value]`; `mean_shift` has the same `return_attention_scores` position and accepts `[query, key_value]` with `blurring=False`; `energy` adds `mask` and `adjacency_weight` after `training`; `kimi_delta` adds `initial_state` and `return_state` after `training`, and returns `(output, state)` when `return_state=True`; `single_window` adds `pad_to_window`; `rpc` names its mask `mask=`; `linear` takes `training` then an ignored `mask=`; `shared_weights_cross` requires `split_sizes` positionally; `multi_head_cross`, `multi_head_latent` and `perceiver` take `query_input` and an optional `kv_input`. Layers with no mask argument at all: `channel`, `cbam` and `multi_dconv_head_transposed` take only `(inputs, training=None)`, as do `lighthouse` and `tripse*`; `performer` adds `return_attention_scores`; `anchor` takes `(x, num_anchor_tokens=None, training=None)`; `ideogram4` takes `(x, segment_ids, cos, sin, training=None)`; `mmdit_joint` takes one list `[hidden_states, encoder_hidden_states]`. `WindowAttention.call` is plain `(inputs, attention_mask=None, training=None)`. Pass `attention_mask` and `training` by keyword.
+- Call signatures differ. Most mask-taking layers are `call(inputs, attention_mask=None, training=None)`. Exceptions: `group_query`, `ring` and `mobile_mqa` put `training` before `attention_mask`; `differential` and `grouped_differential` have an extra `layer_idx` argument before `training`; `hopfield` puts `return_attention_scores` before `training` and also accepts `[query, key, value]`; `mean_shift` has the same `return_attention_scores` position and accepts `[query, key_value]` with `blurring=False`; `energy` adds `mask` and `adjacency_weight` after `training`; `kimi_delta` adds `initial_state` and `return_state` after `training`, and returns `(output, state)` when `return_state=True`; `single_window` adds `pad_to_window`; `rpc` names its mask `mask=`; `linear` takes `training` then an ignored `mask=`; `shared_weights_cross` requires `split_sizes` positionally; `multi_head_cross`, `multi_head_latent` and `perceiver` take `query_input` and an optional `kv_input`. Layers with no mask argument at all: `channel`, `cbam` and `multi_dconv_head_transposed` take only `(inputs, training=None)`, as do `lighthouse` and `tripse*`; `performer` adds `return_attention_scores`; `anchor` takes `(x, num_anchor_tokens=None, training=None)`; `ideogram4` takes `(x, segment_ids, cos, sin, training=None)`; `mmdit_joint` takes one list `[hidden_states, encoder_hidden_states]`. `WindowAttention.call` is plain `(inputs, attention_mask=None, training=None)`. Pass `attention_mask` and `training` by keyword.
 - Masks are not uniform. Most layers treat `attention_mask` as a keep mask (nonzero means attend). `non_local` instead takes an additive mask (0 keeps, a large negative value masks). `spatial`, `mobile_mqa` and `shared_weights_cross` accept the argument and never use it. `linear` silently discards `mask=`. `fnet` only zeroes padded rows after mixing.
 - `window` folds a 1-D sequence into a square grid. For text use `window_band`. `window_band` refuses `use_relative_position_bias=True`. The class allows `window_size=0` for the band, but the factory rejects any `window_size <= 0`.
 - `lighthouse` needs a statically known sequence length (else `RuntimeError` in `call`), and its causality is block-granular, not per position.

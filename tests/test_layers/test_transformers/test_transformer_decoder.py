@@ -665,6 +665,7 @@ class TestMasklessSelfAttentionTypes:
         # `TransformerLayer.n_kv_head`'s `None -> num_heads` resolution.
         ('group_query', 'num_kv_heads', HEADS),
         ('differential', 'head_dim', HIDDEN // HEADS),
+        ('grouped_differential', 'head_dim', HIDDEN // HEADS),
         ('multi_head_latent', 'kv_latent_dim', max(1, HIDDEN // 4)),
     ])
     def test_f07_parameter_gaps_now_carry_a_default(
@@ -730,7 +731,7 @@ class TestMasklessSelfAttentionTypes:
         assert layer._self_attention_params('self_attention')[param] == override
 
     @pytest.mark.parametrize("attention_type", [
-        'window', 'group_query', 'differential', 'multi_head_latent'])
+        'window', 'group_query', 'differential', 'grouped_differential', 'multi_head_latent'])
     def test_f07_types_agree_with_TransformerLayer_on_the_required_params(
             self, attention_type):
         """D-015: both dispatchers must read ONE table, not two copies.

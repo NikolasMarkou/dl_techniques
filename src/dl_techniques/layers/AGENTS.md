@@ -49,7 +49,7 @@ Subpackages. F = has `factory.py`. Counts were measured with the registry object
 | --- | :-: | --- | --- |
 | `activations/` | Y | 25 activation types, plus `common.py` argument helpers | `ACTIVATION_REGISTRY` has 25 keys. Curated `__init__` (38 names) |
 | `adapters/` | Y | `LoRAAdapter`, `GatedAdapter` | One key, `lora`. Curated (13 names). `GatedAdapter` is exported but deliberately not a key. Gate half is `statistics/local_support_gate.py` |
-| `attention/` | Y | 37 attention types | `ATTENTION_REGISTRY` 37 keys. Curated (46 names: 39 classes, 6 factory functions, `AttentionType`). `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` are exported without a key. `assemble_attention_config` is not exported. Sphinx docstrings mandatory |
+| `attention/` | Y | 38 attention types | `ATTENTION_REGISTRY` 38 keys. Curated (47 names: 40 classes, 6 factory functions, `AttentionType`). `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` are exported without a key. `assemble_attention_config` is not exported. Sphinx docstrings mandatory |
 | `embedding/` | Y | Patch, positional, sinusoidal, RoPE, token, class-label, timestep embeddings | 24 layer classes, 16 keys. 8 classes have no key: `AxialRoPE2D` (exported by `__init__`), and `ClassTokenPrepend`, `MaskTokenApply`, `RegisterTokens`, `StateIndicatorEmbedding`, `HierarchicalCodebookEmbedding`, `PatchEmbed3D`, `VideoRoPE3D` (not exported, import from the module). `__init__` (11 names) exports only 3 layer classes (`AxialRoPE2D`, `ClassLabelEmbedding`, `TimestepEmbedding`), 4 NumPy sin-cos table builders and the factory names. Its docstring is stale (says 23 classes, 7 without a key) |
 | `ffn/` | Y | Feed-forward variants | `FFN_REGISTRY` 22 keys over 20 classes (`glu`, `reglu`, `bilinear` are configurations of `GLUFFN`). Curated (27 names: the 20 classes plus the factory interface incl. `assemble_ffn_config`) |
 | `heads/` | Y | 29 registered task-head classes (8 NLP, 10 vision, 6 VLM, 5 time series) in `nlp/`, `vision/`, `vision_language/`, `time_series/` | Curated (49 names, from `heads.nlp`, `vision`, `vision_language`, `time_series` plus `create_head`); the eight NLP in-model helpers (`TASK_HEAD_NAME`, `build_model_task_head`, ...) are not exported, import them from `heads.nlp`. `create_head(domain, *args, **kwargs)` forwards verbatim to a per-domain factory. Domain signatures differ on purpose. `validation.py`, `masking.py` hold shared checks |
@@ -109,7 +109,7 @@ Factory entry points:
 | Domain | Entry point | Registry |
 | --- | --- | --- |
 | Normalization | `create_normalization_layer(normalization_type, name=None, epsilon=1e-6, **kw)` in `norms/factory.py` | 19 keys |
-| Attention | `create_attention_layer(attention_type, name=None, **kw)` in `attention/factory.py` | 37 |
+| Attention | `create_attention_layer(attention_type, name=None, **kw)` in `attention/factory.py` | 38 |
 | FFN | `create_ffn_layer(ffn_type, name=None, **kw)` in `ffn/factory.py` | 22 |
 | Embedding | `create_embedding_layer(embedding_type, name=None, **kw)` in `embedding/factory.py` | 16 |
 | Activation | `create_activation_layer(activation_type, name=None, **kw)` in `activations/factory.py` | 25 |

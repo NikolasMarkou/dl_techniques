@@ -99,6 +99,7 @@ class TestBeitRequiredParamsTable:
             ('window', {'window_size': (4, 4)}),
             ('group_query', {'num_kv_heads': 4}),
             ('differential', {'head_dim': 16, 'lambda_init': 0.8}),
+            ('grouped_differential', {'head_dim': 16}),
             ('multi_head_latent', {'kv_latent_dim': 16}),
             ('multi_head', {}),
             ('fnet', {}),

@@ -460,7 +460,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
             x = self.self_attention_norm(inputs, training=training)
             # Branch order mirrors TransformerLayer.call: differential is the
             # only type that takes layer_idx.
-            if self.self_attention_type == 'differential':
+            if self.self_attention_type in ('differential', 'grouped_differential'):
                 x = self.self_attention(
                     x, attention_mask=self_mask, layer_idx=layer_idx, training=training)
             elif self.self_attention_type in self._MASKLESS_ATTENTION_TYPES:
@@ -486,7 +486,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
             residual = inputs
             # Same three-way branch as the pre-norm path above; a fix applied
             # to only one of the two call sites leaves the default 'post' path broken.
-            if self.self_attention_type == 'differential':
+            if self.self_attention_type in ('differential', 'grouped_differential'):
                 x = self.self_attention(
                     inputs, attention_mask=self_mask, layer_idx=layer_idx, training=training)
             elif self.self_attention_type in self._MASKLESS_ATTENTION_TYPES:

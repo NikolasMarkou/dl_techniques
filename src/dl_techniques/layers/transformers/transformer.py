@@ -281,6 +281,10 @@ def build_transformer_attention_required_params(
         return {'num_kv_heads': num_kv_heads if num_kv_heads is not None else num_heads}
     if attention_type == 'differential':
         return {'head_dim': hidden_size // num_heads, 'lambda_init': lambda_init}
+    if attention_type == 'grouped_differential':
+        # No lambda_init: GDA derives it from layer_idx. group_ratio keeps its
+        # factory default (3); override it through attention_args.
+        return {'head_dim': hidden_size // num_heads}
     if attention_type == 'multi_head_latent':
         # MLA requires kv_latent_dim; neither block has a dedicated ctor
         # param for it, so this documented default is the only source.
@@ -366,6 +370,10 @@ class TransformerLayer(keras.layers.Layer):
         * ``mean_shift`` is registered after that measurement and has its own
           branch; it takes the padding ``attention_mask`` like ``multi_head``
           and is therefore usable too.
+        * ``grouped_differential`` shares the ``differential`` branch and its
+          ``layer_idx`` call argument. It needs ``num_heads`` divisible by
+          ``group_ratio + 1`` (default ``group_ratio=3``, so a multiple of 4);
+          set another ratio through ``attention_args={'group_ratio': ...}``.
 
         ``attention_type='anchor'`` runs in standard self-attention mode
         here. ``AnchorAttention``'s hierarchical bottleneck is selected by
@@ -457,6 +465,8 @@ class TransformerLayer(keras.layers.Layer):
     # DECISION plan-2026-07-31T132403-b3f540cb/D-016: never add 'window' here;
     # it genuinely honours a causal mask and adding it would make masking silently non-causal. See decisions.md.
     _MASKLESS_ATTENTION_TYPES = frozenset({'fnet', 'anchor', 'lighthouse'})
+    #: Attention types whose ``call`` takes ``layer_idx`` (depth-dependent lambda).
+    _LAYER_IDX_ATTENTION_TYPES = frozenset({'differential', 'grouped_differential'})
 
     def __init__(
             self,
@@ -737,7 +747,7 @@ class TransformerLayer(keras.layers.Layer):
                 'use_bias': self.use_bias,
                 'name': name
             }
-        elif self.attention_type == 'differential':
+        elif self.attention_type in ('differential', 'grouped_differential'):
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
@@ -988,7 +998,7 @@ class TransformerLayer(keras.layers.Layer):
             results for those three. See each layer's own docstring for the
             measured cost of its missing mask.
         :type attention_mask: Optional[keras.KerasTensor]
-        :param layer_idx: Layer index (used by differential attention).
+        :param layer_idx: Layer index (used by differential and grouped differential attention).
         :type layer_idx: int
         :param training: Training mode flag.
         :type training: Optional[bool]
@@ -1000,7 +1010,7 @@ class TransformerLayer(keras.layers.Layer):
         if self.normalization_position == 'pre':
             # 1. Attention block
             x = self.attention_norm(inputs, training=training)
-            if self.attention_type == 'differential':
+            if self.attention_type in self._LAYER_IDX_ATTENTION_TYPES:
                 x = self.attention(x, attention_mask=attention_mask, layer_idx=layer_idx, training=training)
             elif self.attention_type in self._MASKLESS_ATTENTION_TYPES:
                 x = self.attention(x, training=training)
@@ -1024,7 +1034,7 @@ class TransformerLayer(keras.layers.Layer):
             layer_output = x + residual
         else:
             # 1. Attention block
-            if self.attention_type == 'differential':
+            if self.attention_type in self._LAYER_IDX_ATTENTION_TYPES:
                 x = self.attention(
                     inputs,
                     attention_mask=attention_mask,
