@@ -53,7 +53,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.initializers import clone_initializer
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms.factory import create_normalization_layer
 
@@ -162,6 +162,9 @@ class GroupedDifferentialAttention(keras.layers.Layer):
     :vartype num_noise_heads: int
     :ivar num_signal_heads: ``G * h``, the head count entering the output projection.
     :vartype num_signal_heads: int
+    :ivar attn_dropout_1: Dropout on the signal map; created always, run only when
+        ``attention_dropout_rate > 0``.
+    :vartype attn_dropout_1: keras.layers.Dropout
     :ivar lambda_q1: Learned vector, width ``head_dim``, ``None`` until ``build()``.
     :vartype lambda_q1: Optional[keras.Variable]
     :ivar lambda_k1: Learned vector, width ``head_dim``, ``None`` until ``build()``.
@@ -266,9 +269,11 @@ class GroupedDifferentialAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        # A string or dict spec, never the caller's instance: each Dense resolves its own
+        # initializer from it, so no two projections replay one random draw.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
+        self.bias_initializer = initializer_spec(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # h noise/value heads, G * h signal heads.
@@ -286,38 +291,32 @@ class GroupedDifferentialAttention(keras.layers.Layer):
                 "bias_regularizer": self.bias_regularizer,
             }
 
-            # Only `q1` keeps the configured initializer instance; every other site
-            # takes its own clone so a seeded initializer does not replay one draw
-            # at all six projections (see differential_attention.py, D-056).
             self.q1_dense = keras.layers.Dense(
                 self._signal_dim, kernel_initializer=self.kernel_initializer,
                 name="q1", **dense_kwargs)
             self.k1_dense = keras.layers.Dense(
-                self._signal_dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                self._signal_dim, kernel_initializer=self.kernel_initializer,
                 name="k1", **dense_kwargs)
             self.q2_dense = keras.layers.Dense(
-                self._noise_dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                self._noise_dim, kernel_initializer=self.kernel_initializer,
                 name="q2", **dense_kwargs)
             self.k2_dense = keras.layers.Dense(
-                self._noise_dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                self._noise_dim, kernel_initializer=self.kernel_initializer,
                 name="k2", **dense_kwargs)
             self.v_dense = keras.layers.Dense(
-                self._noise_dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                self._noise_dim, kernel_initializer=self.kernel_initializer,
                 name="v", **dense_kwargs)
             self.proj = keras.layers.Dense(
-                self.dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                self.dim, kernel_initializer=self.kernel_initializer,
                 name="proj", **dense_kwargs)
 
             self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
 
-            if self.attention_dropout_rate > 0.0:
-                self.attn_dropout_1 = keras.layers.Dropout(
-                    self.attention_dropout_rate, name="attn_dropout_1")
-                self.attn_dropout_2 = keras.layers.Dropout(
-                    self.attention_dropout_rate, name="attn_dropout_2")
-            else:
-                self.attn_dropout_1 = None
-                self.attn_dropout_2 = None
+            # Created always, built and run only when the rate is positive.
+            self.attn_dropout_1 = keras.layers.Dropout(
+                self.attention_dropout_rate, name="attn_dropout_1")
+            self.attn_dropout_2 = keras.layers.Dropout(
+                self.attention_dropout_rate, name="attn_dropout_2")
 
             self.attn_prob_1 = ProbabilityOutput(
                 probability_type=self.probability_type,
@@ -377,13 +376,13 @@ class GroupedDifferentialAttention(keras.layers.Layer):
                 f"Input dimension {input_shape[-1]} doesn't match expected dimension {self.dim}"
             )
 
-        # Ye et al. initialise the four vectors from N(0, 0.1).
-        lambda_initializer = keras.initializers.RandomNormal(mean=0.0, stddev=0.1)
+        # Ye et al. initialise the four vectors from N(0, 0.1); one fresh instance per
+        # vector, so the four draws are independent.
         for name in ("lambda_q1", "lambda_k1", "lambda_q2", "lambda_k2"):
             setattr(self, name, self.add_weight(
                 name=name,
                 shape=(self.head_dim,),
-                initializer=clone_initializer(lambda_initializer),
+                initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.1),
                 trainable=True,
             ))
 
@@ -401,7 +400,7 @@ class GroupedDifferentialAttention(keras.layers.Layer):
         noise_scores = (batch, self.num_noise_heads, length, length)
         self.attn_prob_1.build(signal_scores)
         self.attn_prob_2.build(noise_scores)
-        if self.attn_dropout_1 is not None:
+        if self.attention_dropout_rate > 0.0:
             self.attn_dropout_1.build(signal_scores)
             self.attn_dropout_2.build(noise_scores)
 
@@ -490,7 +489,7 @@ class GroupedDifferentialAttention(keras.layers.Layer):
         q_norm: Optional[keras.layers.Layer],
         k_norm: Optional[keras.layers.Layer],
         attn_prob: ProbabilityOutput,
-        attn_dropout_layer: Optional[keras.layers.Dropout],
+        attn_dropout_layer: keras.layers.Dropout,
         attention_mask: Optional[keras.KerasTensor],
         training: Optional[bool],
     ) -> keras.KerasTensor:
@@ -506,8 +505,9 @@ class GroupedDifferentialAttention(keras.layers.Layer):
         :type k_norm: Optional[keras.layers.Layer]
         :param attn_prob: Probability normalization for this map.
         :type attn_prob: ProbabilityOutput
-        :param attn_dropout_layer: Optional dropout on the map.
-        :type attn_dropout_layer: Optional[keras.layers.Dropout]
+        :param attn_dropout_layer: Dropout on the map, run only when
+            ``attention_dropout_rate`` is positive.
+        :type attn_dropout_layer: keras.layers.Dropout
         :param attention_mask: Optional keep mask in the caller's raw rank.
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Keras training flag.
@@ -527,7 +527,7 @@ class GroupedDifferentialAttention(keras.layers.Layer):
             scores = self._apply_attention_mask(scores, attention_mask)
 
         attn = attn_prob(scores, training=training)
-        if attn_dropout_layer is not None:
+        if self.attention_dropout_rate > 0.0:
             attn = attn_dropout_layer(attn, training=training)
         return attn
 
@@ -553,6 +553,12 @@ class GroupedDifferentialAttention(keras.layers.Layer):
         :return: ``(batch_size, sequence_length, dim)``.
         :rtype: keras.KerasTensor
         """
+        # Static contract, re-asserted: build() sees only the first shape to arrive.
+        if len(inputs.shape) != 3 or inputs.shape[-1] not in (None, self.dim):
+            raise ValueError(
+                f"Expected input (batch_size, seq_len, {self.dim}), got shape {tuple(inputs.shape)}"
+            )
+
         q1 = split_heads(self.q1_dense(inputs), self.num_signal_heads, self.head_dim)
         k1 = split_heads(self.k1_dense(inputs), self.num_signal_heads, self.head_dim)
         q2 = split_heads(self.q2_dense(inputs), self.num_noise_heads, self.head_dim)

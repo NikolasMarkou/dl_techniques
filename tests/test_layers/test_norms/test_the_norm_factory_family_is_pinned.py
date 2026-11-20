@@ -81,22 +81,18 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: ``mixed_sequential_block.py`` with one site instead of three: 193 sites, 99 files, 148 dynamic, 45 literal;
 #: then the NAM model, its trainers and tests were removed (cc5199915), taking two files and three dynamic sites out of the
 #: table but leaving the totals pin below at the old numbers: 190 sites, 97 files, 145 dynamic, 45 literal (re-pinned in step 13.8 of plan 98b866fb).
+#: then ``common.create_qk_norms`` replaced the spelled-out Q/K norm pairs of eleven attention layers (1ef48b469;
+#: the pairs now sit in ``common.py``, two dynamic sites) and ``grouped_differential_attention.py`` added one literal
+#: ``'rms_norm'`` site (its per-head norm): 168 sites, 89 files, 122 dynamic, 46 literal, re-pinned in the GeoNorm
+#: compliance commit (the table had already been stale since 1ef48b469).
 #: Edit it in the commit that adds or removes a site.
 NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
-    "dl_techniques/layers/attention/area_attention.py": (2, 0),
-    "dl_techniques/layers/attention/capsule_routing_attention.py": (2, 0),
-    "dl_techniques/layers/attention/differential_attention.py": (4, 0),
+    "dl_techniques/layers/attention/common.py": (2, 0),
     "dl_techniques/layers/attention/gated_attention.py": (2, 1),
-    "dl_techniques/layers/attention/group_query_attention.py": (2, 0),
-    "dl_techniques/layers/attention/hopfield_attention.py": (2, 0),
-    "dl_techniques/layers/attention/lighthouse_attention.py": (2, 0),
-    "dl_techniques/layers/attention/multi_head_cross_attention.py": (2, 0),
+    "dl_techniques/layers/attention/grouped_differential_attention.py": (0, 1),
+    "dl_techniques/layers/attention/kimi_delta_attention.py": (1, 0),
     "dl_techniques/layers/attention/multi_head_latent_attention.py": (2, 0),
-    "dl_techniques/layers/attention/non_local_attention.py": (3, 0),
-    "dl_techniques/layers/attention/ring_attention.py": (2, 0),
-    "dl_techniques/layers/attention/rpc_attention.py": (2, 0),
-    "dl_techniques/layers/attention/shared_weights_cross_attention.py": (2, 0),
-    "dl_techniques/layers/attention/single_window_attention.py": (2, 0),
+    "dl_techniques/layers/attention/non_local_attention.py": (1, 0),
     "dl_techniques/layers/conv_blocks/basic_block.py": (3, 0),
     "dl_techniques/layers/conv_blocks/bottleneck_block.py": (4, 0),
     "dl_techniques/layers/conv_blocks/conv_block.py": (1, 0),
@@ -275,7 +271,7 @@ class TestTheNormFactoryCallSitePopulationIsPinned:
     def test_the_totals_match_the_census(self, norm_call_sites):
         dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
         literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
-        assert (dynamic, literal, len(NORM_CALL_SITES)) == (145, 45, 97), (
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (122, 46, 89), (
             "the census's own totals moved; re-derive the module docstring's numbers"
         )
 
