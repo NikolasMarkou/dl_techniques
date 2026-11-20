@@ -1,11 +1,11 @@
 # norms
 
 Path: `src/dl_techniques/layers/norms/`
-Purpose: 17 Keras 3 layer classes plus a string-keyed factory (19 registered keys) for the `dl_techniques` library.
+Purpose: 18 Keras 3 layer classes plus a string-keyed factory (19 registered keys) for the `dl_techniques` library.
 
 ## Scope
 
-Lives here: activation normalization layers (RMS, band, logit, bias-free batch norm, GRN, LRN, DynamicTanh, EnergyLayerNorm), the weight reparameterization layer `PolarWeightNorm` with its `polar_encode` / `polar_decode` helpers, the factory, and the shared masking helper.
+Lives here: activation normalization layers (RMS, band, logit, bias-free batch norm, GRN, LRN, DynamicTanh, EnergyLayerNorm), the weight reparameterization layer `PolarWeightNorm` with its `polar_encode` / `polar_decode` helpers, `GeoNorm` (a two-input geodesic residual update, not a factory type), the factory, and the shared masking helper.
 
 Does not live here: the stock Keras `LayerNormalization` / `BatchNormalization` (the factory only wraps them), per-block normalization wiring in transformers or attention (those call `create_normalization_layer` from here), and `LAYER_NORM_EPSILON` in `layers/transformers/causal_stack.py`, which is deliberately `1e-3` and bypasses the factory.
 
@@ -44,7 +44,7 @@ Layer families and their computation:
 
 | File | Role | Notes |
 | --- | --- | --- |
-| `__init__.py` | Public surface | `__all__` has 24 names: 17 classes (including `PolarWeightNorm`, which is not a factory type), `polar_encode`, `polar_decode`, 4 factory functions, `NormalizationType` |
+| `__init__.py` | Public surface | `__all__` has 25 names: 18 classes (including `PolarWeightNorm` and `GeoNorm`, which are not factory types), `polar_encode`, `polar_decode`, 4 factory functions, `NormalizationType` |
 | `factory.py` | Factory, validator, registry, info | 784 lines. Module docstring still says "18 registered types / sixteen from this package"; the real counts are 19 keys, of which 17 are package keys (16 distinct classes) |
 | `_masking.py` | `normalizes_only_the_feature_axis(axis, rank=None)` | `rank=None` (the `__init__` moment): True only if every entry is `-1`. With a rank (the `build()` moment): rank < 2 gives False, else resolved axes must equal `{rank-1}`. Imported by exactly 7 modules |
 | `rms_norm.py` | `RMSNorm` | `scale` stored at `param_shape` (one dim per normalized axis), reshaped in `call()` only for non-trailing ascending axes |
@@ -61,6 +61,7 @@ Layer families and their computation:
 | `local_response_norm.py` | `LocalResponseNormalization`, `_NeighbourhoodBandInitializer` | rank 3 or 4; one non-trainable `neighbourhood_band` weight `(C, C)` |
 | `dynamic_tanh.py` | `DynamicTanh` | weights `alpha` (scalar), `weight`, `bias`; `supports_masking=True` always |
 | `energy_layer_norm.py` | `EnergyLayerNorm` | scalar `gamma`, vector `delta`; statistics over the last axis only |
+| `geo_norm.py` | `GeoNorm` | two inputs `[x, s]`, no weights; `x` is rotated along the tangent part of `s` on the sphere of radius `||x||` per token; schedule, clamp and epsilon floors in the constructor |
 | `polar_weight_norm.py` | `PolarWeightNorm`, `polar_encode`, `polar_decode` | not a factory type; Dense-style layer with `radius` `(units,)` and `angles` `(units, d-1)` |
 
 ## Public interface
@@ -99,6 +100,7 @@ Class constructors (defaults as in code):
 - `LocalResponseNormalization(depth_radius=2, alpha=1e-4, beta=0.75, k=1.0, data_format=None)`: `depth_radius` a non-negative non-bool `int`; `alpha`, `beta`, `k` > 0; `data_format` in `None`, `'channels_last'`, `'channels_first'` (`None` resolves to `keras.config.image_data_format()`); `channels_first` needs rank 4.
 - `DynamicTanh(axis=-1, alpha_init_value=0.5, kernel_initializer='ones', bias_initializer='zeros', kernel_regularizer=None, bias_regularizer=None, kernel_constraint=None, bias_constraint=None)`: `axis` int or list; stored as a list.
 - `EnergyLayerNorm(epsilon=1e-5, gamma_initializer='ones', delta_initializer='zeros', gamma_constraint=<sentinel>)`.
+- `GeoNorm(schedule="harmonic", alpha=1.0, clamp=pi/4, total_layers=None, epsilon=1e-6)`, called as `GeoNorm()([x, s], layer_idx=0)`. `schedule` is `harmonic` (`1/(k+1)`), `sqrt` (`1/sqrt(k+1)`) or `linear` (`(T-k)/T`, needs `total_layers`); `clamp=None` turns the angle clamp off. Not a factory key: the factory's contract is one tensor in, one out.
 - `PolarWeightNorm(units, activation=None, use_bias=True, kernel_initializer="glorot_uniform", bias_initializer="zeros", radius_regularizer=None, angle_regularizer=None, bias_regularizer=None, epsilon=1e-12)`.
 - `polar_encode(x: (N, d)) -> (radius (N, 1), angles (N, d-1))`, `d` a statically known power of two; `polar_decode(radius, angles) -> (N, d)`.
 
@@ -140,6 +142,7 @@ Weights by layer:
 - **`DynamicTanh` rejects `alpha_init_value <= 0` in `__init__`.** This is checkpoint-visible (an archive with such a config fails to load). Only the config value is checked, not the learned weight. Delete the guard rather than weaken it if a real checkpoint appears.
 - **`BiasFreeBatchNorm` must stay variance-only.** Never add `moving_mean` or `beta`; either breaks degree-1 homogeneity at inference. Moving statistics are read with `autocast=False`.
 - **`LocalResponseNormalization` builds its band via `add_weight(trainable=False)`**, in `compute_dtype`, not as a bare tensor from `build()` (graph-scope bug) and not in `floatx()` (precision bug under a float64 policy).
+- **`GeoNorm`: the angle clamp comes BEFORE the step decay.** `theta = alpha * decay(k) * min(||v||/||x||, clamp)`, so under the harmonic schedule the largest rotation at block `k` is `alpha * clamp / (k+1)`. The paper's Appendix D listing is not a reference: its `clamp` argument is ignored, its harmonic branch assigns to `theta_attn` (no decay ever applies), its default method name is misspelled and it adds integer `scale` and `bias` parameters the text says do not exist. `tests/test_layers/test_norms/test_geo_norm.py` reads the angle off the output so a schedule wired to nothing fails. The floors act on the sum of squares (`maximum(sum_sq, epsilon**2)`), because the gradient of sqrt at an exact zero is not finite. Do not add `supports_masking`: the layer takes a list.
 - **`PolarWeightNorm.build()` is eager** (NumPy seed kernel). Never trace an unbuilt instance. The forward pass runs in float32. `activation` goes through `layers.activations.common.resolve_activation`, which rejects `keras.layers.Layer` instances.
 - **`get_config()` returns every constructor argument**, and `axis` as written (not build-normalized). `GlobalResponseNormalization.get_config()` returns `eps` as `float`.
 
@@ -174,6 +177,6 @@ External: `keras` (Keras 3, `keras.ops` for math), `numpy` (only `polar_weight_n
 - **Deciding on an epsilon arm**: use `setdefault('epsilon', epsilon)` if the class has `epsilon`. If its stabilizing constant has another name (`eps`, `k`), map or skip it as `global_response_norm` and `local_response_norm` do.
 - **Masking**: if the layer is per-position along the feature axis, import `normalizes_only_the_feature_axis`, call it in `__init__` and again in `build()`. Otherwise leave `supports_masking` at its default.
 - **Style**: Sphinx/reST docstrings (`:param:` / `:type:` / `:raises:`) like every other file here. Use `keras.ops` for math. Several older files still do `from keras import ops`; new code uses `import keras` and qualifies at the call site. Log through `dl_techniques.utils.logger`.
-- **Tests** live in `tests/test_layers/test_norms/`. Per-class files: `test_rms_norm.py`, `test_zero_centered_rms_norm.py`, `test_band_rms.py`, `test_zero_centered_band_rms_norm.py`, `test_adaptive_band_rms.py`, `test_zero_centered_adaptive_band_rms_norm.py`, `test_band_logit_norm.py`, `test_logit_norm.py`, `test_max_logit_norm.py`, `test_bias_free_batch_norm.py`, `test_global_response_norm.py`, `test_local_response_norm.py`, `test_dynamic_tanh.py`, `test_energy_layer_norm.py`, `test_polar_weight_norm.py`. Cross-cutting guards: `test_factory.py`, `test_the_norm_factory_family_is_pinned.py` (pins keys and the epsilon behavior), `test_the_factory_and_class_validators_agree.py`, `test_the_norms_propagate_masks.py`, `test_the_norm_statistics_follow_the_dtype_policy.py`, `test_the_scale_broadcasts_on_a_non_trailing_axis.py`, `test_an_inner_layer_follows_the_owners_dtype.py`, `test_the_base_from_config_round_trips.py`, `test_the_negative_alpha_init_is_checkpoint_visible.py`.
+- **Tests** live in `tests/test_layers/test_norms/`. Per-class files: `test_geo_norm.py`, `test_rms_norm.py`, `test_zero_centered_rms_norm.py`, `test_band_rms.py`, `test_zero_centered_band_rms_norm.py`, `test_adaptive_band_rms.py`, `test_zero_centered_adaptive_band_rms_norm.py`, `test_band_logit_norm.py`, `test_logit_norm.py`, `test_max_logit_norm.py`, `test_bias_free_batch_norm.py`, `test_global_response_norm.py`, `test_local_response_norm.py`, `test_dynamic_tanh.py`, `test_energy_layer_norm.py`, `test_polar_weight_norm.py`. Cross-cutting guards: `test_factory.py`, `test_the_norm_factory_family_is_pinned.py` (pins keys and the epsilon behavior), `test_the_factory_and_class_validators_agree.py`, `test_the_norms_propagate_masks.py`, `test_the_norm_statistics_follow_the_dtype_policy.py`, `test_the_scale_broadcasts_on_a_non_trailing_axis.py`, `test_an_inner_layer_follows_the_owners_dtype.py`, `test_the_base_from_config_round_trips.py`, `test_the_negative_alpha_init_is_checkpoint_visible.py`.
 - **Running tests** (from the repo root, with the `.venv`): `.venv/bin/python -m pytest tests/test_layers/test_norms/ -q`. Scope to this directory plus the consumers you touched. Do not run the full suite (about 1.5 hours). Do not run pytest jobs in parallel.
 - **Known stale text in code**: the `factory.py` module docstring says 18 types and "sixteen" package classes, and the comment above `_TYPE_TO_CLASS` says "18 keys" (real: 19 keys, 17 of them package keys, 16 distinct package classes); the `_accepted_params` docstring quotes 113 omitted pairs while `get_normalization_info` quotes 107; the `LocalResponseNormalization` note says `count_params()` reports 0, but the layer holds a `(C, C)` non-trainable band, so it reports `C*C` (measured 256 for C=16). Fix these when touching the files.

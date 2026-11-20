@@ -15,13 +15,14 @@ What is exported
 * **Others** - :class:`BiasFreeBatchNorm`, :class:`GlobalResponseNormalization`,
   :class:`LocalResponseNormalization`,
   :class:`DynamicTanh`, :class:`EnergyLayerNorm`, :class:`PolarWeightNorm`,
+  :class:`GeoNorm` (a two-input residual update, not a factory type),
   plus the module-level helpers :func:`polar_encode` and :func:`polar_decode`.
 * **Factory** - :func:`create_normalization_layer`,
   :func:`create_normalization_from_config`, :func:`get_normalization_info`,
   :func:`validate_normalization_config` and the ``NormalizationType`` alias.
 
-``__all__`` names 17 classes, 2 module-level functions, 4 factory functions and
-1 type alias: 24 names in total.
+``__all__`` names 18 classes, 2 module-level functions, 4 factory functions and
+1 type alias: 25 names in total.
 
 Choosing a layer
 ----------------
@@ -74,6 +75,7 @@ from .local_response_norm import LocalResponseNormalization
 from .dynamic_tanh import DynamicTanh
 from .energy_layer_norm import EnergyLayerNorm
 from .polar_weight_norm import PolarWeightNorm, polar_encode, polar_decode
+from .geo_norm import GeoNorm
 from .factory import (
     create_normalization_layer,
     create_normalization_from_config,
@@ -100,6 +102,7 @@ __all__ = [
     "DynamicTanh",
     "EnergyLayerNorm",
     "PolarWeightNorm",
+    "GeoNorm",
     "polar_encode",
     "polar_decode",
     "create_normalization_layer",

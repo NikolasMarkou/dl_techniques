@@ -38,7 +38,7 @@ from ..ffn import assemble_ffn_config, create_ffn_from_config, FFNType
 from ..ffn.factory import FFN_REGISTRY
 from ..attention import create_attention_layer, AttentionType
 from ..attention.factory import ATTENTION_REGISTRY
-from ..norms import create_normalization_layer, NormalizationType
+from ..norms import create_normalization_layer, NormalizationType, GeoNorm
 from ...initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
@@ -47,7 +47,7 @@ from dl_techniques.layers.activations.common import resolve_activation, serializ
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
-NormalizationPositionType = Literal['post', 'pre']
+NormalizationPositionType = Literal['post', 'pre', 'geo']
 
 
 # ---------------------------------------------------------------------
@@ -303,7 +303,7 @@ class TransformerLayer(keras.layers.Layer):
     Implements a standard transformer block: multi-head self-attention
     followed by a position-wise feed-forward network, each wrapped in a
     residual connection and normalization. The data flow is determined by
-    ``normalization_position`` (pre or post). Every sub-component (attention,
+    ``normalization_position`` (pre, post or geo). Every sub-component (attention,
     FFN, normalization) is built through a factory function, so swapping
     architectures is a constructor argument, not a subclass.
 
@@ -386,7 +386,17 @@ class TransformerLayer(keras.layers.Layer):
     :type attention_args: Optional[Dict[str, Any]]
     :param normalization_type: Normalization type. Default: ``'layer_norm'``.
     :type normalization_type: NormalizationType
-    :param normalization_position: ``'pre'`` or ``'post'`` normalization.
+    :param normalization_position: ``'pre'``, ``'post'`` or ``'geo'``. ``'geo'``
+        replaces each post-norm step ``Norm(x + sublayer(x))`` with a
+        :class:`~dl_techniques.layers.norms.GeoNorm` geodesic update of ``x`` along the
+        sublayer output (arXiv:2601.22095). Both sublayers of a block use the
+        ``layer_idx`` passed to :meth:`call` for the layer-wise step decay, so
+        a stack must pass its own depth (``BERT`` and ``DistilBERT`` do). With
+        ``'geo'`` the ``normalization_type`` is not used: ``attention_norm`` and
+        ``output_norm`` are :class:`GeoNorm` instances configured by
+        ``attention_norm_args`` and ``ffn_norm_args`` (``schedule``, ``alpha``, ``clamp``,
+        ``total_layers``, ``epsilon``), and the ``'linear'`` schedule needs
+        ``total_layers`` in both.
     :type normalization_position: NormalizationPositionType
     :param attention_norm_args: Custom arguments for the attention norm layer.
     :type attention_norm_args: Optional[Dict[str, Any]]
@@ -516,9 +526,9 @@ class TransformerLayer(keras.layers.Layer):
             )
         # call() dispatches on `== 'pre'` with an unguarded else for post-norm,
         # so a typo like 'Pre' would silently run the wrong branch. Same check as `TransformerDecoderLayer.__init__`.
-        if normalization_position not in ('pre', 'post'):
+        if normalization_position not in ('pre', 'post', 'geo'):
             raise ValueError(
-                f"normalization_position must be 'pre' or 'post', got {normalization_position}"
+                f"normalization_position must be 'pre', 'post' or 'geo', got {normalization_position}"
             )
 
         self.hidden_size = hidden_size
@@ -663,6 +673,15 @@ class TransformerLayer(keras.layers.Layer):
         :raises ValueError: If layer creation fails.
         """
         custom_args = self.attention_norm_args if layer_type == 'attention' else self.ffn_norm_args
+        if self.normalization_position == 'geo':
+            # GeoNorm takes two inputs, so it is not a factory type; the norm slots hold it directly.
+            try:
+                return GeoNorm(name=name, **custom_args)
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"Failed to create GeoNorm for {layer_type}. "
+                    f"Custom args: {list(custom_args.keys())}. Original error: {e}"
+                )
         try:
             return create_normalization_layer(
                 normalization_type=self.normalization_type,
@@ -954,8 +973,13 @@ class TransformerLayer(keras.layers.Layer):
             )
 
         # Build all sub-layers in computational order
-        self.attention_norm.build(input_shape)
-        self.output_norm.build(input_shape)
+        if self.normalization_position == 'geo':
+            # GeoNorm consumes [state, sublayer_output], two tensors of the block's shape.
+            self.attention_norm.build([input_shape, input_shape])
+            self.output_norm.build([input_shape, input_shape])
+        else:
+            self.attention_norm.build(input_shape)
+            self.output_norm.build(input_shape)
         self.attention.build(input_shape)
         self.ffn_layer.build(input_shape)
         self.dropout.build(input_shape)
@@ -1032,6 +1056,35 @@ class TransformerLayer(keras.layers.Layer):
             if self.ffn_layer_scale is not None:
                 x = self.ffn_layer_scale(x, training=training)
             layer_output = x + residual
+        elif self.normalization_position == 'geo':
+            # 1. Attention block: geodesic step from the state along the sublayer output.
+            if self.attention_type in self._LAYER_IDX_ATTENTION_TYPES:
+                x = self.attention(
+                    inputs,
+                    attention_mask=attention_mask,
+                    layer_idx=layer_idx,
+                    training=training)
+            elif self.attention_type in self._MASKLESS_ATTENTION_TYPES:
+                x = self.attention(inputs, training=training)
+            else:
+                x = self.attention(
+                    inputs,
+                    attention_mask=attention_mask,
+                    training=training)
+            if self.attention_stochastic_depth is not None:
+                x = self.attention_stochastic_depth(x, training=training)
+            if self.attention_layer_scale is not None:
+                x = self.attention_layer_scale(x, training=training)
+            attention_output = self.attention_norm([residual, x], layer_idx=layer_idx, training=training)
+
+            # 2. FFN block
+            x = self.ffn_layer(attention_output, training=training)
+            x = self.dropout(x, training=training)
+            if self.ffn_stochastic_depth is not None:
+                x = self.ffn_stochastic_depth(x, training=training)
+            if self.ffn_layer_scale is not None:
+                x = self.ffn_layer_scale(x, training=training)
+            layer_output = self.output_norm([attention_output, x], layer_idx=layer_idx, training=training)
         else:
             # 1. Attention block
             if self.attention_type in self._LAYER_IDX_ATTENTION_TYPES:

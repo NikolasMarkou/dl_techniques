@@ -88,6 +88,75 @@ class TestTransformerLayer:
         assert float(tf.reduce_max(tf.abs(shallow - deep))) > 1e-4
 
     # ===============================================
+    # 0b. normalization_position='geo' (GeoNorm geodesic update)
+    # ===============================================
+    def test_geo_blocks_keep_every_token_on_its_input_sphere(self, layer_config, sample_input):
+        """Both sublayers are norm-preserving geodesic steps, so the block output has the input's norm."""
+        layer = TransformerLayer(**layer_config, normalization_position='geo')
+        out = layer(sample_input, layer_idx=2, training=False)
+        np.testing.assert_allclose(
+            tf.norm(out, axis=-1).numpy(), tf.norm(sample_input, axis=-1).numpy(), rtol=1e-4, atol=0)
+
+    def test_geo_blocks_hold_no_normalization_weights(self, layer_config, sample_input):
+        layer = TransformerLayer(**layer_config, normalization_position='geo')
+        layer(sample_input, training=False)
+        assert layer.attention_norm.weights == [] and layer.output_norm.weights == []
+
+    def test_geo_blocks_step_less_in_deeper_layers(self, layer_config, sample_input):
+        layer = TransformerLayer(**layer_config, normalization_position='geo')
+        shallow = layer(sample_input, layer_idx=0, training=False)
+        deep = layer(sample_input, layer_idx=9, training=False)
+        move = lambda y: float(tf.reduce_mean(tf.norm(y - sample_input, axis=-1)))
+        assert move(deep) < move(shallow)
+
+    def test_geo_norm_args_reach_the_geo_layers(self, layer_config):
+        layer = TransformerLayer(
+            **layer_config, normalization_position='geo',
+            attention_norm_args={'schedule': 'sqrt', 'clamp': None},
+            ffn_norm_args={'schedule': 'linear', 'total_layers': 6, 'alpha': 0.5})
+        assert (layer.attention_norm.schedule, layer.attention_norm.clamp) == ('sqrt', None)
+        assert (layer.output_norm.schedule, layer.output_norm.total_layers, layer.output_norm.alpha) == ('linear', 6, 0.5)
+
+    def test_normalization_position_geo_is_a_structural_knob(self, layer_config, sample_input):
+        """'geo' removes the norm weights, so it is pinned on the weight-shape signature (guide 13.3.2),
+        not on an output difference, which different random draws would satisfy anyway."""
+        from tests.test_models.knob_sensitivity_oracle import assert_structural_knob_changes_weights
+
+        def build(position):
+            layer = TransformerLayer(**layer_config, normalization_position=position)
+            layer(sample_input, training=False)
+            return layer
+
+        signatures = assert_structural_knob_changes_weights(
+            {p: (lambda p=p: build(p)) for p in ('post', 'geo')}, knob='normalization_position')
+        # the default layer_norm holds a scale and an offset in each of the two norm slots
+        assert len(signatures['post']) - len(signatures['geo']) == 4
+
+    @pytest.mark.parametrize("args", [{'schedule': 'linear'}, {'nosuchparam': 1}, {'schedule': 'cosine'}])
+    def test_geo_rejects_a_bad_norm_config(self, layer_config, args):
+        with pytest.raises(ValueError, match="GeoNorm"):
+            TransformerLayer(**layer_config, normalization_position='geo', attention_norm_args=args)
+
+    def test_an_unknown_normalization_position_is_refused(self, layer_config):
+        with pytest.raises(ValueError, match="'pre', 'post' or 'geo'"):
+            TransformerLayer(**layer_config, normalization_position='sandwich')
+
+    @pytest.mark.parametrize("attention_type", ['multi_head', 'differential', 'grouped_differential'])
+    def test_geo_blocks_survive_a_keras_round_trip(self, layer_config, sample_input, attention_type):
+        inputs = keras.Input(shape=sample_input.shape[1:])
+        block = TransformerLayer(
+            **layer_config, attention_type=attention_type, normalization_position='geo',
+            attention_norm_args={'schedule': 'sqrt'}, name='block')
+        model = keras.Model(inputs, block(inputs, layer_idx=3))
+        before = model.predict(sample_input, verbose=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'geo.keras')
+            model.save(path)
+            loaded = keras.models.load_model(path)
+        assert loaded.get_layer('block').attention_norm.schedule == 'sqrt'
+        np.testing.assert_allclose(loaded.predict(sample_input, verbose=0), before, rtol=0, atol=1e-6)
+
+    # ===============================================
     # 1. Initialization and Build Tests
     # ===============================================
     def test_initialization_defaults(self, layer_config):

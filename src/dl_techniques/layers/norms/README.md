@@ -1,6 +1,6 @@
 # norms
 
-A package of 17 Keras 3 layer classes (16 normalization layers plus `PolarWeightNorm`, a weight reparameterization), and a factory that builds 19 named normalization types from a string key. Of the 19 keys, 2 are stock Keras layers and 17 are this package's classes. Those 17 keys map to 16 distinct classes, because `dml_plus_focal` and `dml_plus_center` both build `DMLPlus`. It lives at `src/dl_techniques/layers/norms/` in the `dl_techniques` library.
+A package of 18 Keras 3 layer classes (16 normalization layers plus `PolarWeightNorm`, a weight reparameterization, and `GeoNorm`, a two-input residual update), and a factory that builds 19 named normalization types from a string key. Of the 19 keys, 2 are stock Keras layers and 17 are this package's classes. Those 17 keys map to 16 distinct classes, because `dml_plus_focal` and `dml_plus_center` both build `DMLPlus`. It lives at `src/dl_techniques/layers/norms/` in the `dl_techniques` library.
 
 ## What it is for
 
@@ -29,10 +29,11 @@ Families:
 - **Others**: `bias_free_batch_norm` (variance only, no mean, no beta), `global_response_norm` (ConvNeXt V2 GRN), `local_response_norm` (AlexNet LRN), `dynamic_tanh` (`weight * tanh(alpha * x) + bias`, no statistics at all), `energy_layer_norm` (scalar gamma, vector delta).
 - **Standard Keras**: `layer_norm` and `batch_norm` are wrappers over the stock Keras layers, only reachable through the factory.
 - **Not a factory type**: `PolarWeightNorm`, a Dense-style layer whose kernel is stored as a radius per unit plus polar angles. It normalizes weights, not activations.
+- **Not a factory type**: `GeoNorm` (arXiv:2601.22095), which replaces the Post-Norm step `Norm(x + sublayer(x))` with a geodesic step on the hypersphere. It takes `[x, sublayer_output]` and keeps `||x||`; it has no weights.
 
 ## Files
 
-- `__init__.py` - exports 24 names: 17 classes, `polar_encode`, `polar_decode`, the 4 factory functions and the `NormalizationType` alias.
+- `__init__.py` - exports 25 names: 18 classes, `polar_encode`, `polar_decode`, the 4 factory functions and the `NormalizationType` alias.
 - `factory.py` - `create_normalization_layer`, `create_normalization_from_config`, `validate_normalization_config`, `get_normalization_info`, the `NormalizationType` literal and the `_TYPE_TO_CLASS` registry.
 - `_masking.py` - `normalizes_only_the_feature_axis`, the helper that decides whether a layer may claim `supports_masking`.
 - `rms_norm.py` - `RMSNorm`.
@@ -50,6 +51,7 @@ Families:
 - `dynamic_tanh.py` - `DynamicTanh`.
 - `energy_layer_norm.py` - `EnergyLayerNorm`.
 - `polar_weight_norm.py` - `PolarWeightNorm`, `polar_encode`, `polar_decode`.
+- `geo_norm.py` - `GeoNorm`, geodesic residual update with layer-wise step decay.
 
 ## How to use it
 
@@ -122,6 +124,7 @@ Constructor defaults worth knowing (class defaults, not factory defaults):
 - **`DynamicTanh` rejects `alpha_init_value <= 0`.** A saved model whose config holds a non-positive value no longer loads.
 - **`EnergyLayerNorm` keeps `gamma` a scalar on purpose.** Its output is the gradient of a Lagrangian with a positive semi-definite Hessian, which the Energy Transformer's energy-descent guarantee needs. A per-feature gamma breaks that. `gamma` is constrained to `>= 1e-3` by default; pass `gamma_constraint=None` to turn it off.
 - **`PolarWeightNorm` is not shape-preserving or a factory type.** It maps `(..., fan_in)` to `(..., units)`, rebuilds its kernel on every forward pass, and runs the forward pass in float32. Build it by calling it once eagerly (or via `keras.Input`) before wrapping it in `tf.function`, because `build()` uses NumPy.
+- **`GeoNorm` is a two-input layer and not a factory type.** `GeoNorm()([x, s], layer_idx=k)`; `layer_idx` is a call argument (0-based block index, not in `get_config()`), so a stack must pass it or every block steps at `k = 0`. Defaults: `schedule='harmonic'`, `alpha=1.0`, `clamp=pi/4` (`None` disables it; applied to `||v||/||x||` before the decay), `epsilon=1e-6`. `TransformerLayer(normalization_position='geo')` builds two of them.
 - **`LocalResponseNormalization` holds one non-trainable weight**, `neighbourhood_band`, shape `(C, C)`, built from `depth_radius`.
 - **Statistics dtype.** The RMS family, `bias_free_batch_norm` and `energy_layer_norm` compute their statistics in float32 at minimum (float64 under a float64 policy) and cast back to the input dtype.
 - Tests are in `tests/test_layers/test_norms/`.

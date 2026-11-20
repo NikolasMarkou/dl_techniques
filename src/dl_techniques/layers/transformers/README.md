@@ -24,7 +24,7 @@ flowchart TD
     J --> K[the other registered blocks]
 ```
 
-A `TransformerLayer` runs two residual sub-blocks on a `(batch, seq, hidden)` tensor: attention, then an FFN (or a mixture of experts). With `normalization_position='pre'` each sub-block is `x + sublayer(norm(x))`. With `'post'` (the default) it is `norm(x + sublayer(x))`. Optional stochastic depth (randomly skipping a branch during training) and LayerScale (a small learned per-channel scale on each branch) can be added to both branches.
+A `TransformerLayer` runs two residual sub-blocks on a `(batch, seq, hidden)` tensor: attention, then an FFN (or a mixture of experts). With `normalization_position='pre'` each sub-block is `x + sublayer(norm(x))`. With `'post'` (the default) it is `norm(x + sublayer(x))`. With `'geo'` (GeoNorm, arXiv:2601.22095) each sub-block is a geodesic step on the hypersphere from `x` along the sublayer output, with layer-wise step decay from the `layer_idx` the caller passes. Optional stochastic depth (randomly skipping a branch during training) and LayerScale (a small learned per-channel scale on each branch) can be added to both branches.
 
 The stacks add the parts around the blocks:
 
