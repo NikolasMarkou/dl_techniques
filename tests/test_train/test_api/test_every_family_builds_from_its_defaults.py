@@ -1,4 +1,4 @@
-"""The six model families, their recipes, and the rules that turn a recipe into a model.
+"""The eight classification families, their recipes, and the rules that turn a recipe into a model.
 
 Four things are pinned:
 
@@ -13,10 +13,13 @@ Four things are pinned:
   classes, and one forward call returns ten logits.
 
 The literals were read from the legacy trainers (the comments in
-``train/api/recipes.py`` cite the lines), not from the recipes under test.
+``train/api/recipes.py`` cite the lines), not from the recipes under test. The ``beit`` and
+``energy_transformer`` rows (plan 5c6cc105 Step 5) take the legacy classification trainers' optimizer
+and the ``vit`` recipe's epochs, batch and per-dataset overlays.
 """
 
 import dataclasses
+import functools
 import subprocess
 import sys
 
@@ -45,8 +48,8 @@ from ._groups import task_class
 # The listing
 # ---------------------------------------------------------------------
 
-#: Every variant of every CLASSIFICATION family, by name. 6 + 5 + 6 + 9 + 9 + 1 = 36. The rest of this
-#: file (recipes, overlays, builds at 32x32 with ten classes) is about these six; the segmentation
+#: Every variant of every CLASSIFICATION family, by name. 6 + 5 + 6 + 9 + 9 + 1 + 4 + 3 = 43. The rest of this
+#: file (recipes, overlays, builds at 32x32 with ten classes) is about these eight; the segmentation
 #: families are listed in :data:`SEGMENTATION_VARIANTS` and have their own files
 #: (``test_image_segmentation_task.py``, ``test_backbone_segmentation_families.py``).
 VARIANTS = {
@@ -61,7 +64,11 @@ VARIANTS = {
         "cn_32_5", "cn_64_5",
     ],
     "cliffordnet_hier": ["hier_345"],
+    "beit": ["beit_tiny", "beit_small", "beit_base", "beit_large"],
+    "energy_transformer": ["et_tiny", "et_small", "et_base"],
 }
+#: The two classifiers whose trunk a pretrain row trains (plan 5c6cc105 Step 5); their factories take no regularizer.
+MIM_CLASSIFIERS = ("beit", "energy_transformer")
 TASK = "image_classification"
 SEGMENTATION = "image_segmentation"
 
@@ -148,7 +155,9 @@ def context(family, variant, dataset, image_size=32, num_classes=10):
 def test_the_listing_is_the_literal_variant_tables(builtin):
     assert sorted(builtin) == sorted(ALL_VARIANTS)
     expected = sorted(f"{f}/{v}" for f, names in ALL_VARIANTS.items() for v in names)
-    assert len(expected) == 109  # 76 before the pretrain families (3 + 4), the forecasting families (23), depth (3)
+    # 76 before the pretrain families (3 + 4), the forecasting families (23), depth (3); 109 + 4 + 3 classifier
+    # variants of beit and energy_transformer (plan 5c6cc105 Step 5).
+    assert len(expected) == 116
     assert registry.list_models() == expected
     for family, spec in builtin.items():
         if family in SEGMENTATION_VARIANTS:
@@ -252,6 +261,11 @@ DEFAULTS = {
         watch_metric="val_accuracy", watch_mode="max", patience=30,
     ),
 }
+# beit and energy_transformer: train/beit/train_classification.py and train/energy_transformer/train_classification.py
+# TrainingConfig (lr 5e-4, AdamW, cosine, wd 0.05, global clip 1.0, patience 15; warmup 5 and 2) at the vit recipe's
+# epochs and batch (the legacy 100 epochs at batch 32 are not taken, and the recipe notice says so).
+DEFAULTS["beit"] = dict(DEFAULTS["vit"], lr=5e-4)
+DEFAULTS["energy_transformer"] = dict(DEFAULTS["beit"], warmup_epochs=2)
 DEFAULTS["convnext_v2"] = DEFAULTS["convnext_v1"]
 DEFAULTS["cliffordnet_hier"] = DEFAULTS["cliffordnet"]
 
@@ -407,6 +421,14 @@ OVERLAYS = [
      {"stochastic_depth_rate": 0.1}, {}),
     ("cliffordnet_hier", "hier_345", "imagenet", 224, "none", 0.0,
      {"stochastic_depth_rate": 0.1}, {}),
+    ("beit", "beit_tiny", "cifar10", 32, "cifar_light", 0.0,
+     {"drop_path_rate": 0.1, "dropout_rate": 0.0, "patch_size": 4}, {}),
+    ("beit", "beit_base", "imagenette", 224, "none", 0.0,
+     {"drop_path_rate": 0.1, "dropout_rate": 0.0, "patch_size": 16}, {}),
+    ("energy_transformer", "et_tiny", "cifar100", 32, "cifar_light", 0.0,
+     {"num_steps": 12, "dropout_rate": 0.0, "patch_size": 4}, {}),
+    ("energy_transformer", "et_small", "imagenet", 224, "none", 0.0,
+     {"num_steps": 12, "dropout_rate": 0.0, "patch_size": 16}, {}),
 ]
 
 
@@ -474,7 +496,7 @@ def resolved(family, variant, dataset="cifar10", image_size=32, user=None, **opt
 
 
 def test_adamw_gets_no_model_regularizer(builtin):
-    for family in ("vit", "convnext_v1", "cliffordnet"):
+    for family in ("vit", "convnext_v1", "cliffordnet", *MIM_CLASSIFIERS):
         kwargs, optim = resolved(family, FIRST_VARIANT[family])
         assert optim.optimizer == "adamw" and optim.weight_decay > 0
         assert kwargs.get("kernel_regularizer") is None
@@ -502,6 +524,8 @@ def test_the_decay_is_in_exactly_one_place(builtin):
     """Across both optimizers and every family, the decay is never counted twice."""
     for family in sorted(VARIANTS):
         for name in ("adamw", "sgd"):
+            if name == "sgd" and family in MIM_CLASSIFIERS:
+                continue  # refused instead: their factories take no regularizer (the test below)
             kwargs, optim = resolved(
                 family, FIRST_VARIANT[family], optimizer=name, lr=0.01, weight_decay=0.03,
                 momentum=0.9 if name == "sgd" else None,
@@ -513,6 +537,52 @@ def test_the_decay_is_in_exactly_one_place(builtin):
             assert in_model == (name == "sgd")
             if in_model:
                 assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(0.03 / 2)
+
+
+@pytest.mark.parametrize("family", MIM_CLASSIFIERS)
+def test_the_mim_classifiers_refuse_what_their_factory_would_drop_or_crash_on_before_the_claim(family, builtin):
+    """sgd's decay has no regularizer to become, and three keys would be refused after the claim (a ValueError for
+    ``kernel_regularizer``), crash it (a TypeError for ``name``) or train a model with no head (``include_top``)."""
+    variant = FIRST_VARIANT[family]
+    with pytest.raises(ConfigError) as caught:
+        resolved(family, variant, optimizer="sgd", lr=0.05, weight_decay=0.01, momentum=0.9)
+    assert "optim_args.weight_decay" in str(caught.value) and f"builds none for {family!r}" in str(caught.value)
+    for key, value in (("kernel_regularizer", None), ("kernel_regularizer", {"class_name": "L2"}),
+                       ("include_top", False), ("name", "x"), ("use_shared_relative_position_bias", True)):
+        with pytest.raises(ConfigError, match=rf"Invalid value for 'model_args.{key}': it is not offered for '{family}'"):
+            resolved(family, variant, user={key: value})
+    # Each reason is still true of the library (a factory that took one would make its row a dead refusal).
+    spec = builtin[family]
+    built = []
+    for key, value in (("kernel_regularizer", None), ("name", "x"), ("include_top", False),
+                       ("use_shared_relative_position_bias", True)):
+        try:
+            model = recipes.build_model(spec, variant, 10, (32, 32, 3), {"patch_size": 4, key: value})
+            built.append((key, tuple(model(np.zeros((1, 32, 32, 3), "float32")).shape)))
+        except (ConfigError, TypeError) as error:
+            assert isinstance(error, TypeError) == (key == "name"), (key, error)
+    # Only BEiT builds with include_top=False, and then emits its pooled features where the logits belong.
+    assert built == ([("include_top", (1, 192))] if family == "beit" else [])
+    with pytest.raises(ConfigError, match="'scale' is fixed by the variant"):
+        resolved(family, variant, user={"scale": "base"})
+    # The controls: sgd without a decay resolves, and so does a key the factory takes.
+    kwargs, _ = resolved(family, variant, optimizer="sgd", lr=0.05, momentum=0.9)
+    assert "kernel_regularizer" not in kwargs
+    assert resolved(family, variant, user={"dropout_rate": 0.2})[0]["dropout_rate"] == 0.2
+
+
+def test_the_energy_transformer_classifier_refuses_an_unbounded_clip_with_et_mims_sentence(builtin):
+    """One function refuses it for both Energy Transformer rows: the sentences differ only in the family's name."""
+    for given in ({"global_clipnorm": None}, {"clipnorm": 0.5}):
+        with pytest.raises(ConfigError) as caught:
+            resolved("energy_transformer", "et_tiny", **given)
+        with pytest.raises(ConfigError) as pretrain:
+            resolved("et_mim", "et_tiny", **given)
+        assert "'energy_transformer' family needs the global gradient clip" in str(caught.value), given
+        assert str(caught.value) == str(pretrain.value).replace("'et_mim'", "'energy_transformer'"), given
+    # The controls: a clip of another size, and BEiT with none, resolve.
+    assert resolved("energy_transformer", "et_tiny", global_clipnorm=0.5)[1].global_clipnorm == 0.5
+    assert resolved("beit", "beit_tiny", global_clipnorm=None)[1].global_clipnorm is None
 
 
 def test_sgd_on_an_adamw_family_takes_no_decay_from_the_recipe(builtin):
@@ -579,6 +649,8 @@ def test_sgd_on_a_family_without_a_regularizer_path_still_decays(family, variant
         ("convnext_v2", True),
         ("cliffordnet", True),
         ("cliffordnet_hier", True),
+        ("beit", False),
+        ("energy_transformer", False),
     ],
 )
 def test_warmup_reaching_epochs_is_a_recipe_decision(family, refused, builtin):
@@ -597,7 +669,7 @@ def test_warmup_reaching_epochs_is_a_recipe_decision(family, refused, builtin):
 # Building
 # ---------------------------------------------------------------------
 
-#: Attributes the built model must carry, so the recipe reached the factory.
+#: Attributes the built model must carry, so the recipe reached the factory (a dotted name reads the backbone).
 BUILT = {
     "vit": {"patch_size": (4, 4), "dropout_rate": 0.1, "attention_dropout_rate": 0.1},
     "resnet": {"stem_type": "cifar"},
@@ -605,6 +677,8 @@ BUILT = {
     "convnext_v2": {"strides": 2, "drop_path_rate": 0.1, "dropout_rate": 0.1},
     "cliffordnet": {"stochastic_depth_rate": 0.3},
     "cliffordnet_hier": {"stochastic_depth_rate": 0.1},
+    "beit": {"backbone.patch_size": 4, "backbone.drop_path_rate": 0.1, "dropout_rate": 0.0},
+    "energy_transformer": {"backbone.patch_size": (4, 4), "backbone.num_steps": 12, "dropout_rate": 0.0},
 }
 
 
@@ -618,7 +692,7 @@ def test_each_family_builds_from_its_defaults(family, builtin):
     assert logits.shape == (2, 10)
     assert np.isfinite(logits).all()
     for name, value in BUILT[family].items():
-        assert getattr(model, name) == value, name
+        assert functools.reduce(getattr, name.split("."), model) == value, name
 
 
 def test_an_unknown_model_args_key_is_a_config_error(builtin):

@@ -443,6 +443,9 @@ REFUSALS: List[Tuple[str, Dict[str, Any], Tuple[str, ...]]] = [
     ("beit_mim", {"patch_size": 8}, ("model_args.patch_size", "data.patch_size")),
     ("beit_mim", {"name": "x"}, ("model_args.name", "is not offered by 'beit_mim'")),
     ("beit_mim", {"scale": "small"}, ("model_args.scale", "is not offered by 'beit_mim'")),
+    # plan 5c6cc105 D-031: the constructor raises for it, which would refuse it only after the claim.
+    ("beit_mim", {"use_shared_relative_position_bias": True},
+     ("model_args.use_shared_relative_position_bias", "is not offered by 'beit_mim'", "does not implement it")),
     ("beit_mim", {"no_such_key": 1}, ("Unknown key 'model_args.no_such_key'",)),
 ]
 

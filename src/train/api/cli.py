@@ -186,7 +186,8 @@ from .config import (
 from .errors import ConfigError, ConfigValidationError, DLTrainError
 from .forecast_predictor import FLAT_WINDOW_EXPORT_NOTE
 from .predictor import (
-    CLASSIFICATION, DENOISING, DEPTH, FORECASTING, PRETRAIN, SEGMENTATION, known_tasks_line, record_beside,
+    CLASSIFICATION, CLASSIFICATION_EXPORT_REFUSALS, DENOISING, DEPTH, FORECASTING, PRETRAIN, SEGMENTATION,
+    known_tasks_line, record_beside,
 )
 from .pretrain_predictor import EXPORT_REFUSALS as PRETRAIN_EXPORT_REFUSALS
 
@@ -307,7 +308,8 @@ EXPORT_NOTES = (
     "one score per class per pixel: (batch, height, width, classes), at the input_size in that file",
     "(height and width are fixed to it, the batch is free); the mask is the argmax over the last",
     "axis, after the caller resizes the scores to the picture. mixed_float16 runs differ from Keras",
-    "by up to about 1e-4 in onnx.",
+    "by up to about 1e-4 in onnx. Refused with the reason: "
+    + ", ".join(f"{fmt} of {family}" for family, fmt in CLASSIFICATION_EXPORT_REFUSALS) + ".",
     "",
     "a denoising model takes float32 images (batch, height, width, channels) with pixels in [0, 1]:",
     "no mean, no std and no sigma input (it is blind to the noise level), and the file's height and width",

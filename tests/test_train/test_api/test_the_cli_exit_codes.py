@@ -318,8 +318,9 @@ def test_a_list_command_accepts_every_help_word(command, word, cwd):
         # denoising families (plan d483ffab step 7: four with five variants each, scunet with three) and the 7 of the two
         # pretrain families (et_mim with three, beit_mim with four) and the 23 of the seven
         # forecasting families (nbeats 3, prism 4, tirex 4, xlstm 2, ets 3, timestral 4, mdn 3) and the 3 of the one depth
-        # family (depth_anything: vit_s, vit_b, vit_l).
-        assert len(result.stdout.split()) == 109
+        # family (depth_anything: vit_s, vit_b, vit_l); 109 + the 7 of the beit (4) and energy_transformer (3) classifiers
+        # (plan 5c6cc105 Step 5).
+        assert len(result.stdout.split()) == 116
 
 
 # A task that raises a DLTrainError of its own is a user-fixable failure, not a

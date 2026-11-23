@@ -204,8 +204,9 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
 ``EXPORT_RULES[task]`` (an :class:`ExportRule`)
     What ``export`` asks the task: ``shape_of(record)`` is the shape the command line traces (the record's input
     shape; a denoiser's is ``(None, None, channels)``, a free height and width), ``check(record, format, shape)``
-    raises a :class:`ConfigError` for a cell of the task's export table that is refused (denoising, forecasting and
-    pretrain only, :data:`train.api.denoising_predictor.EXPORT_REFUSALS`,
+    raises a :class:`ConfigError` for a cell of the task's export table that is refused (classification, denoising,
+    forecasting and pretrain only, :data:`CLASSIFICATION_EXPORT_REFUSALS`,
+    :data:`train.api.denoising_predictor.EXPORT_REFUSALS`,
     :data:`train.api.forecast_predictor.EXPORT_REFUSALS`, :data:`train.api.pretrain_predictor.EXPORT_REFUSALS`) and,
     for forecasting, depth and pretrain, for a traced shape that is not the record's (a depth model exports every
     format at its trained size only, :func:`train.api.depth_predictor.check_export`, and so does a pretrain model,
@@ -278,6 +279,7 @@ from .args import is_count
 from .depth_args import TASK as DEPTH
 from .errors import ConfigError
 from .pretrain_args import TASK as PRETRAIN
+from .recipes import ET_CLASSIFIER
 from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 
 # ---------------------------------------------------------------------
@@ -2037,6 +2039,43 @@ def _no_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Option
     """The export rule of a task whose every cell exports: nothing is refused."""
 
 
+#: Why a tflite file of an Energy Transformer is refused by both of its tasks (pretrain ``et_mim``, plan 5c6cc105 D-024;
+#: classification ``energy_transformer``, D-030): the converter's error, measured on both.
+HOPFIELD_TFLITE_CAUSE = (
+    "the TFLite converter of TensorFlow 2.18 mistranslates the Hopfield update of every energy-descent step "
+    "(einsum, relu, einsum), so the file is about 0.07 of the scale off after one step and 0.56 after 12, with "
+    "built-in and with select operators alike"
+)
+
+# DECISION plan-2026-11-19T081214-5c6cc105/D-030
+# The energy_transformer tflite cell is refused HERE, before anything is written. Do NOT let the export try it: a
+# classifier has no served function, so the built-in file is written without a numeric check, and it is wrong (1.46 off,
+# 0.53 of the scale, on et_tiny). `test_the_energy_transformer_tflite_refusal_still_has_its_reason` says when to lift it.
+#: The classification export cells that are refused, ``(family, format) -> reason``, each measured.
+CLASSIFICATION_EXPORT_REFUSALS: Dict[Tuple[str, str], str] = {
+    (ET_CLASSIFIER, "tflite"): (
+        f"{HOPFIELD_TFLITE_CAUSE}, and a classifier's built-in file is written with no numeric check, so it would be "
+        "wrong without a word (0.53 of the scale on et_tiny); choose keras, saved_model or onnx"
+    ),
+}
+
+
+def refuse_export_cell(refusals: Mapping[Tuple[str, str], str], record: Mapping[str, Any], format: str) -> None:
+    """Raise :class:`ConfigError` when ``(record["family"], format)`` is a row of ``refusals``, quoting its reason.
+
+    The refusal of the classification and pretrain export checks; it writes nothing.
+    """
+    reason = refusals.get((record["family"], format))
+    if reason is not None:
+        raise ConfigError(
+            f"Invalid value for 'format': {format!r} of a model of the {record['family']!r} family is refused: {reason}"
+        )
+
+
+def _classification_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    refuse_export_cell(CLASSIFICATION_EXPORT_REFUSALS, record, format)
+
+
 def _standardized_logits_note(record: Mapping[str, Any]) -> str:
     return (
         "the exported model takes inputs standardized with the run's mean and std (pixels in [0, 1], then "
@@ -2179,9 +2218,10 @@ PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
 }
 
 #: What ``export`` does per task (see :class:`ExportRule`). Classification and segmentation trace at the record's
-#: own input shape, refuse no cell and say the exported model takes standardized inputs and returns logits.
+#: own input shape and say the exported model takes standardized inputs and returns logits; segmentation refuses no
+#: cell, classification the cells of :data:`CLASSIFICATION_EXPORT_REFUSALS`.
 EXPORT_RULES: Dict[str, ExportRule] = {
-    CLASSIFICATION: ExportRule(_classification_input_shape, _no_export_check, _standardized_logits_note),
+    CLASSIFICATION: ExportRule(_classification_input_shape, _classification_export_check, _standardized_logits_note),
     SEGMENTATION: ExportRule(_segmentation_input_shape, _no_export_check, _standardized_logits_note),
     DENOISING: ExportRule(_denoising_export_shape, _denoising_export_check, _denoising_export_note),
     # A forecaster's file takes RAW windows ``(lookback, channels)`` (rank 2) and returns a forecast in the series' units: it

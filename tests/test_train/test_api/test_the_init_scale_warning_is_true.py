@@ -14,7 +14,7 @@ not caught at epoch 0; a badly scaled model WITHOUT unset statistics still warns
 
 What is pinned:
 
-* per family (all six): which models are judged and which are not, and that the unjudged ones are
+* per family (all eight): which models are judged and which are not, and that the unjudged ones are
   exactly those that hold unset BatchNorm layers;
 * the control that makes the verdict mean something: resnet's inference-mode ratio IS above the
   warning threshold and its training-mode ratio is not, so the old ``True`` was false;
@@ -60,6 +60,8 @@ VERDICT = {
     "convnext_v2/atto": False,
     "cliffordnet/nano": None,
     "cliffordnet_hier/hier_345": None,
+    "beit/beit_tiny": False,
+    "energy_transformer/et_tiny": False,
 }
 
 

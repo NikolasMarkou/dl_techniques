@@ -58,6 +58,8 @@ FAMILIES = [
     ("convnext_v2", "atto"),
     ("cliffordnet", "nano"),
     ("cliffordnet_hier", "hier_345"),
+    ("beit", "beit_tiny"),
+    ("energy_transformer", "et_tiny"),
 ]
 
 

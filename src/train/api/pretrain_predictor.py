@@ -72,7 +72,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from .depth_predictor import ARRAY_SUFFIX
 from .errors import ConfigError
 from .exporting import check_free
-from .predictor import PRETRAIN, PRETRAIN_OUTPUTS, check_record
+from .predictor import HOPFIELD_TFLITE_CAUSE, PRETRAIN, PRETRAIN_OUTPUTS, check_record, refuse_export_cell
 from .pretrain_args import BEIT, ET
 from .run_dir import TASK_FILE
 from .segmentation_predictor import INDEX_NAME, items_of, mask_names, rgb_of
@@ -103,12 +103,7 @@ OUTPUT_NOTE = (
 # drop the row because a new TensorFlow is installed: `test_the_et_mim_tflite_refusal_still_has_its_reason` says when.
 #: The export cells that are refused, ``(family, format) -> reason``, each measured.
 EXPORT_REFUSALS: Dict[Tuple[str, str], str] = {
-    (ET, "tflite"): (
-        "the TFLite converter of TensorFlow 2.18 mistranslates the Hopfield update of every energy-descent step "
-        "(einsum, relu, einsum), so the file is about 0.07 of the scale off after one step and 0.56 after 12, with "
-        "built-in and with select operators alike, and the numeric check would refuse it; choose keras, saved_model "
-        "or onnx"
-    ),
+    (ET, "tflite"): f"{HOPFIELD_TFLITE_CAUSE}, and the numeric check would refuse it; choose keras, saved_model or onnx",
 }
 
 
@@ -287,12 +282,7 @@ def check_export(record: Mapping[str, Any], format: str, shape: Sequence[Optiona
             f"channels) of this {PRETRAIN} model; its backbone takes only the size it was built at, so it is exported "
             "at that size and a file of another size would be a new model"
         )
-    reason = EXPORT_REFUSALS.get((record["family"], format))
-    if reason is not None:
-        raise ConfigError(
-            f"Invalid value for 'format': {format!r} of a model of the {record['family']!r} family is refused: "
-            f"{reason}"
-        )
+    refuse_export_cell(EXPORT_REFUSALS, record, format)
 
 
 def export_note(record: Mapping[str, Any]) -> str:

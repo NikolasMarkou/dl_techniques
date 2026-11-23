@@ -121,7 +121,7 @@ def test_validate_accepts_auto_and_an_int_and_refuses_a_string():
 
 LARGE = ("imagenet", "imagenette")
 SMALL = ("cifar10", "cifar100")
-FAMILIES = ("vit", "resnet", "convnext_v1", "convnext_v2", "cliffordnet", "cliffordnet_hier")
+FAMILIES = ("vit", "resnet", "convnext_v1", "convnext_v2", "cliffordnet", "cliffordnet_hier", "beit", "energy_transformer")
 
 
 CLASSIFICATION = "image_classification"

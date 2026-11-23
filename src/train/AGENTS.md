@@ -567,13 +567,13 @@ classification task calls the same `train.common.classification_run` helpers as 
   segmentation `image_size` must be; `api/segmentation_models.py` holds the adapters (`convunext`, `accunet`, and the
   backbone families `resnet_seg` and `convnext_seg`: the classifier's factory with `include_top=False` plus one
   single-map `SegmentationHead`, D-012 of plan 98b866fb), `check_image_size`, the recipes (`CONVUNEXT`, `ACCUNET`,
-  `RESNET_SEG`, `CONVNEXT_SEG`) and the specs. `recipes.register_builtin_models` registers the six classifiers, the
+  `RESNET_SEG`, `CONVNEXT_SEG`) and the specs. `recipes.register_builtin_models` registers the eight classifiers, the
   four segmentation families (D-077; step 23 held them back until a task and a recipe existed), the five denoising
   families (`api/denoising_models.py:builtin_denoising_models`) and the two pretrain families
   (`api/pretrain_models.py:builtin_pretrain_models`) and the seven forecasting families
   (`api/forecast_models.py:builtin_forecast_models`) and the one depth family
   (`api/depth_models.py:builtin_depth_models`), so a guard that walks
-  `registry.MODELS` meets 25 families (6 + 4 + 5 + 2 + 7 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  `registry.MODELS` meets 27 families (8 + 4 + 5 + 2 + 7 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
   classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
   layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
   changed once with another session's commits; a test fails when the head gains a knob).

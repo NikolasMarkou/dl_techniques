@@ -1,4 +1,4 @@
-"""The six families have a recipe on both ImageNet and Imagenette, and the recipes are what they say.
+"""The eight classification families have a recipe on both ImageNet and Imagenette, and the recipes are what they say.
 
 Step 16 of the plan. Before it, a run of any family on either dataset that had no entry in the
 family's ``per_dataset`` table logged ``No recipe overlay for <family> on <dataset>``: ten of the
@@ -15,7 +15,9 @@ Five things are pinned.
   retyped here. The Imagenette pairs of vit, resnet and convnext have NO legacy source; a test pins
   that fact (convnext refuses Imagenette) so that a legacy trainer that starts to support one turns
   it red and the table's justification is reopened.
-* The notice: no pair warns, and a dataset with no entry still does (the control).
+* The notice: no pair warns, and a dataset with no entry still does (the control). The ``beit`` and
+  ``energy_transformer`` rows (plan 5c6cc105 Step 5) log one info line naming what their recipe carries
+  unmeasured.
 * Every pair builds its smallest variant at 224 px and takes ONE optimizer step on fake data on CPU
   with the optimizer the recipe resolves to; the loss is finite and the step count moves by one.
 * The loss has no label smoothing (the task builds a plain sparse cross-entropy, every legacy value
@@ -46,8 +48,10 @@ TRAIN_IMAGES = {"imagenet": 1_271_167, "imagenette": 8_523}
 #: The smallest variant of each family that is built at 224 px.
 VARIANT = {
     "vit": "vit_pico", "resnet": "resnet18", "convnext_v1": "tiny", "convnext_v2": "atto",
-    "cliffordnet": "nano", "cliffordnet_hier": "hier_345",
+    "cliffordnet": "nano", "cliffordnet_hier": "hier_345", "beit": "beit_tiny", "energy_transformer": "et_tiny",
 }
+#: The two classifiers whose trunk a pretrain row trains, and their legacy classification trainers.
+LEGACY = {"beit": "train.beit.train_classification", "energy_transformer": "train.energy_transformer.train_classification"}
 
 ADAMW_FIELDS = dict(
     optimizer="adamw", momentum=None, beta_1=None, beta_2=None, epsilon=None, schedule="cosine_decay",
@@ -75,6 +79,11 @@ RESNET_OPTIM = dict(
 )
 CONVNEXT_OPTIM = dict(lr=1e-3, weight_decay=1e-4, warmup_epochs=0, decay_over="post_warmup", clipnorm=1.0)
 CONVNEXT_MODEL = {"strides": 4, "drop_path_rate": 0.1, "dropout_rate": 0.0}
+# beit and energy_transformer: the legacy classification trainers' optimizer (lr 5e-4, wd 0.05, global clip 1.0, warmup 5
+# and 2, patience 15) at the vit recipe's epochs and batch (50 and 128, Imagenette 200 epochs), not the legacy 100 at 32.
+MIM_OPTIM = dict(lr=5e-4, weight_decay=0.05, decay_over="total", global_clipnorm=1.0)
+BEIT_MODEL = {"drop_path_rate": 0.1, "dropout_rate": 0.0, "patch_size": 16}
+ET_MODEL = {"num_steps": 12, "dropout_rate": 0.0, "patch_size": 16}
 CLIFFORD_OPTIM = dict(
     lr=1e-3, weight_decay=0.1, warmup_epochs=0, decay_over="post_warmup", beta_1=0.9, beta_2=0.999,
     epsilon=1e-8,
@@ -128,6 +137,18 @@ RECIPES = {
     ("cliffordnet_hier", "imagenette"): row(
         epochs=200, batch_size=16, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
         model_args={"stochastic_depth_rate": 0.1}),
+    ("beit", "imagenet"): row(
+        epochs=50, batch_size=128, patience=15, watch="val_accuracy",
+        optim={**MIM_OPTIM, "warmup_epochs": 5}, model_args=BEIT_MODEL),
+    ("beit", "imagenette"): row(
+        epochs=200, batch_size=128, patience=15, watch="val_accuracy",
+        optim={**MIM_OPTIM, "warmup_epochs": 5}, model_args=BEIT_MODEL),
+    ("energy_transformer", "imagenet"): row(
+        epochs=50, batch_size=128, patience=15, watch="val_accuracy",
+        optim={**MIM_OPTIM, "warmup_epochs": 2}, model_args=ET_MODEL),
+    ("energy_transformer", "imagenette"): row(
+        epochs=200, batch_size=128, patience=15, watch="val_accuracy",
+        optim={**MIM_OPTIM, "warmup_epochs": 2}, model_args=ET_MODEL),
 }
 PAIRS = sorted(RECIPES)
 IDS = [f"{family}-{dataset}" for family, dataset in PAIRS]
@@ -154,8 +175,8 @@ def resolve(builtin, family, dataset):
     return context, optim, transform, kwargs
 
 
-def test_the_table_has_the_twelve_pairs():
-    assert len(PAIRS) == 12
+def test_the_table_has_the_sixteen_pairs():
+    assert len(PAIRS) == 2 * len(VARIANT) == 16  # 12 before plan 5c6cc105 Step 5 added beit and energy_transformer
     assert {family for family, _ in PAIRS} == set(VARIANT)
     assert {dataset for _, dataset in PAIRS} == set(CLASSES)
 
@@ -182,7 +203,7 @@ def test_no_pair_logs_the_no_overlay_warning(builtin, family, dataset, tmp_path)
     notices = trainer(tmp_path).recipe_notices(
         DataFacts(dataset=dataset, num_classes=CLASSES[dataset], image_size=IMAGE_SIZE), family
     )
-    assert notices == []
+    assert [level for level, _ in notices] == (["info"] if family in LEGACY else [])
 
 
 def trainer(tmp_path):
@@ -204,8 +225,23 @@ def test_the_control_a_pair_whose_entry_is_deleted_warns_again(builtin, family, 
     notices = trainer(tmp_path).recipe_notices(
         DataFacts(dataset=dataset, num_classes=CLASSES[dataset], image_size=IMAGE_SIZE), family
     )
-    assert [level for level, _ in notices] == ["warning"]
-    assert f"No recipe overlay for {family} on {dataset}" in notices[0][1]
+    assert [level for level, _ in notices] == (["info"] if family in LEGACY else []) + ["warning"]
+    assert f"No recipe overlay for {family} on {dataset}" in notices[-1][1]
+
+
+@pytest.mark.parametrize("dataset, side", [("cifar10", 32), ("imagenette", IMAGE_SIZE)])
+@pytest.mark.parametrize("family", sorted(LEGACY))
+def test_the_mim_classifier_notice_names_each_unmeasured_number(builtin, family, dataset, side, tmp_path):
+    legacy = legacy_defaults(LEGACY[family])
+    (level, text), = trainer(tmp_path).recipe_notices(DataFacts(dataset=dataset, num_classes=10, image_size=side), family)
+    assert level == "info" and text.startswith(f"{family}: ")
+    assert f"lr {legacy['learning_rate']:g}" in text and f"batch of {legacy['batch_size']}" in text and "not scaled" in text
+    assert f"not the legacy {legacy['epochs']}" in text and "unmeasured" in text
+    if side == 32:
+        assert "cifar_light" in text and "REFLECT" in text and "not measured to fit" not in text
+    else:
+        assert f"{IMAGE_SIZE} px is not measured to fit" in text and "cifar_light" not in text
+    assert ("load-bearing" in text) == (family == "energy_transformer")
 
 
 # ---------------------------------------------------------------------
@@ -307,6 +343,24 @@ def test_resnet_on_imagenet_is_the_legacy_trainers_default(builtin):
     assert "gradient_clipping" not in legacy and "label_smoothing" not in legacy
     # Both arms give the model the same penalty: wd / 2, whose gradient is the SGD weight decay (D-042).
     assert float(kwargs["kernel_regularizer"].l2) == legacy["weight_decay"] / 2
+
+
+@pytest.mark.parametrize("family", sorted(LEGACY))
+def test_beit_and_et_on_imagenette_take_the_legacy_trainers_optimizer_and_model_keys(builtin, family):
+    """Imagenette at 224 px and patch 16 is the legacy trainers' default; epochs and batch are vit's, on purpose."""
+    legacy = legacy_defaults(LEGACY[family])
+    context, optim, _, kwargs = resolve(builtin, family, "imagenette")
+    assert (legacy["dataset"], legacy["image_size"]) == ("imagenette", IMAGE_SIZE)
+    assert (optim.optimizer, optim.schedule) == (legacy["optimizer_type"], legacy["lr_schedule_type"])
+    assert (optim.lr, optim.weight_decay, optim.warmup_epochs, optim.global_clipnorm) == (
+        legacy["learning_rate"], legacy["weight_decay"], legacy["warmup_epochs"], legacy["gradient_clipping"])
+    assert context.defaults["checkpoint_args"]["early_stopping_patience"] == legacy["early_stopping_patience"]
+    own = {"beit": "drop_path_rate", "energy_transformer": "num_steps"}[family]
+    assert (kwargs["dropout_rate"], kwargs["patch_size"], kwargs[own]) == (
+        legacy["dropout_rate"], legacy["patch_size"], legacy[own])
+    vit = builtin["vit"].recipe("imagenette", VARIANT["vit"])
+    taken = (context.defaults["epochs"], context.defaults["batch_size"])
+    assert taken == (vit["epochs"], vit["batch_size"]) and taken != (legacy["epochs"], legacy["batch_size"])
 
 
 @pytest.mark.parametrize("family", ["convnext_v1", "convnext_v2"])

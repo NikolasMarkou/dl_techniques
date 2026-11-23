@@ -58,6 +58,10 @@ def world():
         yield registry.MODELS
 
 
+#: The classification families: the six legacy ones and beit and energy_transformer (plan 5c6cc105 Step 5).
+CLASSIFIERS = ("vit", "resnet", "convnext_v1", "convnext_v2", "cliffordnet", "cliffordnet_hier", "beit",
+               "energy_transformer")
+
 # ---------------------------------------------------------------------
 # The family-to-task refusal
 # ---------------------------------------------------------------------
@@ -66,7 +70,7 @@ def world():
 def test_the_two_segmentation_families_are_segmentation_only_and_the_classifiers_are_not(world):
     for family in ("convunext", "accunet", "resnet_seg", "convnext_seg"):
         assert world[family].tasks == (SEGMENTATION,)
-    for family in ("vit", "resnet", "convnext_v1", "convnext_v2", "cliffordnet", "cliffordnet_hier"):
+    for family in CLASSIFIERS:
         assert world[family].tasks == (CLASSIFICATION,)
 
 
@@ -224,7 +228,7 @@ def test_stride_of_is_an_int_a_function_or_none():
 
 
 def test_no_classifier_has_a_stride(world):
-    for family in ("vit", "resnet", "convnext_v1", "convnext_v2", "cliffordnet", "cliffordnet_hier"):
+    for family in CLASSIFIERS:
         assert world[family].stride is None and world[family].stride_of("any") is None
 
 

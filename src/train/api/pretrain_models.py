@@ -47,7 +47,8 @@ Interface contract
         named with that family), before the run directory is claimed.
     :raises ConfigError: for an sgd weight decay (no model regularizer is built here), a library-supplied key, an adamw
         ``kernel_regularizer``, and for ``et_mim`` a ``global_clipnorm`` that is not a number (the clip is
-        load-bearing: a run that nulls it is refused by name).
+        load-bearing: a run that nulls it is refused by name, by :func:`train.api.recipes.require_global_clip`, which the
+        ``energy_transformer`` classifier calls too).
 
 ``problems_of(family, model_args)``
     :return: one line per refusal of ``model_args`` for ``family`` (``[]`` for none). Pure.
@@ -80,9 +81,9 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import recipes
 from .args import AutoContext, OptimArgs, is_count
-from .config import AUTO, unknown_key_message
+from .config import unknown_key_message
 from .denoising_models import named_parameters
-from .errors import ConfigError, ConfigValidationError, UnresolvedAutoError
+from .errors import ConfigValidationError
 from .pretrain_args import BEIT, ET, GEOMETRY, TASK, WATCH_METRIC
 from .registry import ModelSpec
 
@@ -111,7 +112,7 @@ ALLOWED: Dict[str, Tuple[str, ...]] = {
     BEIT: (
         "hidden_size", "num_layers", "num_heads", "intermediate_size", "layer_scale_init_value", "layer_norm_eps",
         "drop_path_rate", "hidden_dropout_rate", "attention_probs_dropout_rate", "use_absolute_position_embeddings",
-        "use_relative_position_bias", "use_shared_relative_position_bias", "use_mean_pooling", "initializer_range",
+        "use_relative_position_bias", "use_mean_pooling", "initializer_range",
     ),
 }
 
@@ -126,6 +127,9 @@ REFUSED: Dict[str, Dict[str, str]] = {
     BEIT: {
         "name": _BACKBONE_NAME.format(name="beit_backbone"),
         "scale": _BY_VARIANT.format(family=BEIT),
+        # DECISION plan-2026-11-19T081214-5c6cc105/D-031
+        # Do NOT move it to ALLOWED: the BEiT constructor raises for it, after the claim (measured; both BEiT rows refuse it).
+        "use_shared_relative_position_bias": "the library does not implement it (the BEiT constructor raises)",
     },
 }
 
@@ -290,28 +294,7 @@ def resolve_pretrain_args(
     # resolvers refuse it for the same reason.
     recipes.refuse_dropped_sgd_decay(optim_args, TASK, context.family)
     if context.family in REQUIRES_GLOBAL_CLIP:
-        clip = optim_args.global_clipnorm
-        if isinstance(clip, str) and clip == AUTO:
-            raise UnresolvedAutoError(
-                f"optim_args.global_clipnorm is still {AUTO!r}; resolve_auto must run before the model arguments are resolved"
-            )
-        if clip is None:
-            # The energy descent is unrolled num_steps times, so the backward pass composes that many Jacobians and the
-            # gradient norm spikes: the paper reports the model fails to train at a learning rate above 1e-4 without the
-            # clip. A per-variable `clipnorm` is another clip and leaves the global norm unbounded, so it is refused too.
-            clipnorm = optim_args.clipnorm
-            cause = (
-                f"optim_args.clipnorm={clipnorm!r} was set, and a per-variable clipnorm replaced the global clip "
-                "(global_clipnorm resolves to null beside it) and leaves the global norm unbounded: ET needs global_clipnorm; "
-                if clipnorm is not None and not (isinstance(clipnorm, str) and clipnorm == AUTO)
-                else ""
-            )
-            raise ConfigError(
-                f"Invalid value for 'optim_args.global_clipnorm': the {context.family!r} family needs the global gradient "
-                "clip (the energy descent is unrolled, and the paper reports the model fails to train at a learning rate "
-                f"above 1e-4 without it), got null; {cause}set it to a positive number or leave it "
-                "auto, and use global_clipnorm, not clipnorm"
-            )
+        recipes.require_global_clip(optim_args, context.family)  # the energy_transformer classifier calls it too
     merged = recipes.merge_model_args(context, optim_args, model_args, {})
     merged = {key: value for key, value in merged.items() if key not in TASK_KEYS[context.family]}
     lines = problems_of(context.family, merged)

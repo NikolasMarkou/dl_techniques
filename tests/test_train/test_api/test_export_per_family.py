@@ -2,8 +2,8 @@
 
 ``test_export_roundtrip.py`` pins the formats on one ViT, which has no stochastic layer and
 needs no TensorFlow operator the TFLite built-ins lack. This file closes both gaps (review of
-iteration 3, concerns 1 and 2). Six families (vit, resnet, convnext_v1, convnext_v2,
-cliffordnet, cliffordnet_hier) are built small (16x16 inputs, four classes), with stochastic
+iteration 3, concerns 1 and 2). Eight families (vit, resnet, convnext_v1, convnext_v2,
+cliffordnet, cliffordnet_hier, beit, energy_transformer) are built small (16x16 inputs, four classes), with stochastic
 depth on at 0.5 and, for the CliffordNet families, ``layer_scale_init=1.0`` so that a live
 drop path moves the logits by far more than the tolerance (at the default 1e-5 it moves them
 by 5e-6 and no test could see it).
@@ -12,7 +12,9 @@ The claims:
 
 * every family exports to all four formats and the artifact, read back by its own runtime,
   gives the Keras model's ``training=False`` logits (``ATOL`` 1e-4; the largest difference
-  measured over the run is printed in D-066);
+  measured over the run is printed in D-066), except the one cell the classification task refuses
+  (``CLASSIFICATION_EXPORT_REFUSALS``: an energy_transformer tflite file, which the converter writes wrong),
+  whose reason a test holds true;
 * a ``saved_model`` of a family with stochastic depth is REPEATABLE: two ``serve`` calls are
   equal, and equal Keras (the traced call is ``training=False``; ``model.export`` traced
   ``training=None``, which left drop path live and made ``serve`` random until plan 98b866fb
@@ -36,12 +38,15 @@ import pytest
 from dl_techniques.models.vision.cliffordnet.hierarchical import create_hierarchical_cliffordnet
 from dl_techniques.models.vision.cliffordnet.model import create_cliffordnet
 from dl_techniques.models.vision.convnext.convnext_v1 import create_convnext_v1
+from dl_techniques.models.vision.beit.model import create_beit_classifier
 from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
+from dl_techniques.models.vision.energy_transformer.model import create_energy_transformer_classifier
 from dl_techniques.models.vision.resnet.model import create_resnet
 from dl_techniques.models.vision.vit.model import create_vit
-from train.api import exporting
+from train.api import cli, exporting
 from train.api.errors import ConfigError
 from train.api.exporting import FORMATS, TFLITE_SIBLING, export
+from train.api.predictor import CLASSIFICATION_EXPORT_REFUSALS, EXPORT_RULES
 
 ATOL = 1e-4
 SHAPE = (16, 16, 3)
@@ -77,7 +82,15 @@ FAMILIES = {
         ),
         True,
     ),
+    "beit": (
+        lambda: create_beit_classifier("beit_tiny", SHAPE, 4, num_classes=CLASSES, drop_path_rate=0.5), True,
+    ),
+    "energy_transformer": (
+        lambda: create_energy_transformer_classifier("et_tiny", SHAPE, 4, num_classes=CLASSES), False,
+    ),
 }
+#: Every (family, format) the classification task exports; the refused cells have their own tests below.
+CELLS = [(family, fmt) for family in FAMILIES for fmt in FORMATS if (family, fmt) not in CLASSIFICATION_EXPORT_REFUSALS]
 #: The families whose graph holds ``Roll``, which TFLite's built-ins lack.
 NEEDS_SELECT_OPS = ("cliffordnet", "cliffordnet_hier")
 NAMES = {"keras": "m.keras", "saved_model": "m_saved_model", "tflite": "m.tflite", "onnx": "m.onnx"}
@@ -184,8 +197,7 @@ def reference(model, batch):
 # ---------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("format", FORMATS)
-@pytest.mark.parametrize("family", FAMILIES)
+@pytest.mark.parametrize("family, format", CELLS, ids=[f"{f}-{fmt}" for f, fmt in CELLS])
 def test_each_family_exports_each_format_and_matches_keras(family, format, workshop, batch):
     expected = reference(workshop.model(family), batch)
     assert np.abs(expected).max() > 1e-3  # a model that outputs nothing would match anything
@@ -242,7 +254,7 @@ def test_the_graph_of_a_saved_model_holds_no_random_op(family, workshop):
 # ---------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("family", list(FAMILIES))
+@pytest.mark.parametrize("family", [family for family, fmt in CELLS if fmt == "tflite"])
 def test_tflite_warns_about_the_flex_runtime_exactly_for_the_models_that_need_it(family, workshop):
     workshop.artifact(family, "tflite")
     warnings = [
@@ -252,6 +264,31 @@ def test_tflite_warns_about_the_flex_runtime_exactly_for_the_models_that_need_it
         assert len(warnings) == 1 and "Flex" in warnings[0] and "select TF operators" in warnings[0], warnings
     else:
         assert warnings == []
+
+
+def test_the_classification_export_refuses_the_energy_transformer_tflite_before_anything_is_written():
+    check = EXPORT_RULES["image_classification"].check
+    with pytest.raises(ConfigError, match=(
+            r"^Invalid value for 'format': 'tflite' of a model of the 'energy_transformer' family is refused: the TFLite "
+            r"converter of TensorFlow 2\.18 mistranslates the Hopfield update")):
+        check({"family": "energy_transformer"}, "tflite", SHAPE)
+    # The controls: its other formats, and BEiT's tflite, pass the check.
+    for fmt in FORMATS:
+        if fmt != "tflite":
+            check({"family": "energy_transformer"}, fmt, SHAPE)
+    check({"family": "beit"}, "tflite", SHAPE)
+    assert sorted(CLASSIFICATION_EXPORT_REFUSALS) == [("energy_transformer", "tflite")]
+    # The export help names the refused cell, read from the same table.
+    assert "tflite of energy_transformer" in " ".join(" ".join(cli.EXPORT_NOTES).split())
+
+
+def test_the_energy_transformer_tflite_refusal_still_has_its_reason(workshop, batch):
+    """The raw writer converts the classifier with built-in operators and checks nothing (a classifier has no served
+    function), so its file is written wrong: measured 1.46 off, 0.53 of the scale. When a TensorFlow converts the
+    Hopfield update right, this fails: lift the row of ``CLASSIFICATION_EXPORT_REFUSALS``."""
+    expected = reference(workshop.model("energy_transformer"), batch)
+    got = np.asarray(read_back("tflite", workshop.artifact("energy_transformer", "tflite"), batch), np.float64)
+    assert np.abs(got - expected).max() > 0.1 * max(1.0, np.abs(expected).max())
 
 
 def roll_model():

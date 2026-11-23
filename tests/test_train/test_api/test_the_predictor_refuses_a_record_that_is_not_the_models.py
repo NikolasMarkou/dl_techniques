@@ -4,7 +4,7 @@ Review-iter-1 concern 17. Before: a ``task`` of another task, a real family or v
 than the model's, a wrong ``input_shape`` and a wrong ``channels`` were accepted or died with a
 Keras traceback at predict; a zip with no ``config.json`` raised ``KeyError`` and one with no
 weights ``ValueError``. Each is a ``ConfigError`` now, and a control in each test shows the same
-file loads once the record is right. The family and variant rule is checked on all six families:
+file loads once the record is right. The family and variant rule is checked on all eight families:
 the smallest variant of each loads with its own record (no false refusal) and is refused under
 another variant of its family and under another family.
 
@@ -33,6 +33,8 @@ SMALLEST = {
     "convnext_v2": ("atto", "femto"),
     "cliffordnet": ("nano", "lite"),
     "cliffordnet_hier": ("hier_345", None),
+    "beit": ("beit_tiny", "beit_small"),
+    "energy_transformer": ("et_tiny", "et_small"),
 }
 CLASSES = ["a", "b", "c"]
 SIDE = 32
@@ -105,7 +107,8 @@ def test_another_variant_of_the_same_family_is_refused_naming_the_variant(built,
     other = SMALLEST[family][1]
     if other is None:
         pytest.skip("this family has one variant; the unknown-variant test covers it")
-    with pytest.raises(ConfigError, match=rf"names the variant '{other}' but .* is not that variant"):
+    # A family checked by its layers (`observe`: beit, energy_transformer) names itself after the variant.
+    with pytest.raises(ConfigError, match=rf"names the variant '{other}' (of '{family}' )?but .* is not that variant"):
         load_model(place(built, family, tmp_path, variant=other))
 
 
@@ -121,6 +124,11 @@ def test_another_registered_family_is_refused_naming_both(built, tmp_path):
         load_model(place(built, "resnet", tmp_path, family="vit", variant="vit_pico"))
     with pytest.raises(ConfigError, match=r"names the family 'cliffordnet' \(CliffordNet\) but .* holds a HierarchicalCliffordNet"):
         load_model(place(built, "cliffordnet_hier", tmp_path, name="hier", family="cliffordnet", variant="nano"))
+    # beit and energy_transformer read module-level variant tables, so their rows read the backbone (`observe`).
+    for held, claimed, variant in (("energy_transformer", "beit", "beit_tiny"), ("beit", "energy_transformer", "et_tiny"),
+                                   ("vit", "beit", "beit_tiny")):
+        with pytest.raises(ConfigError, match=rf"names the family '{claimed}' but .* holds no layer of that family"):
+            load_model(place(built, held, tmp_path, name=f"{held}_as_{claimed}", family=claimed, variant=variant))
 
 
 def test_a_record_of_another_task_is_refused_naming_the_task(built, tmp_path):

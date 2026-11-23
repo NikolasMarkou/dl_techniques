@@ -18,6 +18,12 @@ one changed-geometry case per kind of change, every cross-task pair and every xl
 model's paths can lose the root a fresh build gives them (accunet's ``acc_u_net/``, the depth
 backbone's ``depth_anything/``), and xlstm's auto-named inner layers drift. The counts are derived
 here and logged as ``CENSUS`` lines.
+
+plan-2026-11-19T081214-5c6cc105 Step 5 adds the ``beit`` and ``energy_transformer`` classifiers and their
+pretrain sources (``beit_mim``, ``et_mim``, built at the pretrain geometry of CIFAR-10): a larger grid
+resamples every BEiT relative-bias table (and the absolute table where the option is on) and is refused
+by the Energy Transformer position rule, a class-token head resets on a change of classes, and a pooling
+mismatch is refused. A grid change must resample exactly the weights whose shape changed.
 """
 
 import dataclasses
@@ -32,7 +38,8 @@ from train.api import recipes, registry
 from train.api.args import AutoContext, OptimArgs
 from train.api.errors import ConfigError
 from train.api.forecast_models import FAMILIES as FORECAST_FAMILIES
-from train.api.init_from import check, plan_transfer
+from train.api.init_from import _by_path, check, plan_transfer
+from train.api.pretrain_args import BEIT as BEIT_MIM, ET as ET_MIM, GEOMETRY
 
 recipes.register_builtin_models()
 
@@ -47,7 +54,8 @@ VARIANT = {
     "cliffordnet_hier": "hier_345", "convunext": "tiny", "accunet": "base", "resnet_seg": "resnet18",
     "convnext_seg": "cifar10", "bfcnn": "tiny", "bfunet": "tiny", "bfconvunext": "tiny", "convunext_biased": "tiny",
     "scunet": "tiny", "nbeats": "tiny", "prism": "tiny", "tirex": "tiny", "xlstm": "tiny", "ets": "ANN",
-    "timestral": "5M", "mdn": "tiny", "depth_anything": "vit_s",
+    "timestral": "5M", "mdn": "tiny", "depth_anything": "vit_s", "beit": "beit_tiny", "energy_transformer": "et_tiny",
+    BEIT_MIM: "beit_tiny", ET_MIM: "et_tiny",
 }
 #: The geometry a source of each task is built at.
 SOURCE = {
@@ -56,6 +64,7 @@ SOURCE = {
     DENOISING: {"channels": 3},
     FORECASTING: {"lookback": 168, "horizon": 24, "channels": 1},
     DEPTH: {"image_size": 112, "channels": 3},
+    PRETRAIN: {"image_size": GEOMETRY["cifar10"][0], "channels": 3},
 }
 #: The changes the census makes, one key at a time: the key and its new value.
 CHANGES = {
@@ -72,7 +81,9 @@ HEAD_KEYS = {CLASSIFICATION: ("classes",), SEGMENTATION: ("classes",), DENOISING
 GROWN = {"vit": "vit_tiny", "resnet": "resnet34", "resnet_seg": "resnet34"}
 #: The dataset name a task's builds resolve their recipe for.
 DATASET = {CLASSIFICATION: "cifar10", SEGMENTATION: "folder", DENOISING: "folder", FORECASTING: "builtin",
-           DEPTH: "megadepth"}
+           DEPTH: "megadepth", PRETRAIN: "cifar10"}
+#: The tokenizer codebook a ``beit_mim`` source is built with; its decoder head is dropped by the classifier pair.
+VOCAB = 64
 #: ``model_args`` a row is built with: depth from scratch (no official weights read); a resnet classifier at
 #: 32 px resolves the cifar stem, which resnet_seg never builds, so its cross-task source asks for the other.
 MODEL_ARGS = {"depth_anything": {"pretrained": False}}
@@ -99,6 +110,8 @@ def build(family: str, variant: str, geometry: Mapping[str, Any],
                           image_size=size if task == CLASSIFICATION else None, defaults=spec.recipe(dataset, variant))
     args = {**MODEL_ARGS.get(family, {}), **(model_args or {})}
     kwargs = spec.load_resolver()(context, OptimArgs().resolve_auto(context), args)
+    if task == PRETRAIN:  # what the pretrain task adds (tasks/pretrain.py build_model): the data's patch, the codebook
+        kwargs = {**kwargs, "patch_size": GEOMETRY[dataset][1], **({"vocab_size": VOCAB} if family == BEIT_MIM else {})}
     if task == FORECASTING:
         kwargs = {**kwargs, "horizon": geometry["horizon"]}
         if FORECAST_FAMILIES[family].static_batch:
@@ -180,7 +193,9 @@ def test_a_row_that_declares_neither_or_both_is_found():
 
 def test_the_census_covers_every_row_and_measures_every_declaration():
     families = init_families()
-    assert sorted(VARIANT) == families and len(families) == 23
+    assert sorted(set(VARIANT) - {BEIT_MIM, ET_MIM}) == families
+    # 23 rows before plan 5c6cc105 Step 5, which adds the beit and energy_transformer classifiers.
+    assert len(families) == 25
     assert sorted(GROWN) == sorted(f for f in families if registry.MODELS[f].transfer.grow)
     assert sorted(f for f in families if registry.MODELS[f].transfer.positional) == ["xlstm"]
     built = set(changes())
@@ -195,7 +210,7 @@ def test_the_census_covers_every_row_and_measures_every_declaration():
 def test_a_pinned_argument_is_a_resolved_factory_argument():
     pinned = {f: registry.MODELS[f].transfer.pinned for f in init_families() if registry.MODELS[f].transfer.pinned}
     assert pinned == {"vit": ("patch_size",), "resnet": ("stem_type",), "convnext_v1": ("strides",),
-                      "convnext_v2": ("strides",)}
+                      "convnext_v2": ("strides",), "beit": ("patch_size",), "energy_transformer": ("patch_size",)}
     for family, keys in pinned.items():
         _, kwargs = source_of(family, SOURCE[task_of(family)])
         assert all(key in kwargs for key in keys), (family, sorted(kwargs))
@@ -225,19 +240,39 @@ def test_a_change_gives_the_verdict_the_spec_predicts(family, key):
     judge_change(family, key, source, target)
 
 
+#: The rules that refuse instead of resampling: a change of the grid they key is refused while planning, by name.
+REFUSING_RULES = ("et_pos_refused",)
+
+
+def reshaped(source: Any, target: keras.Model) -> List[str]:
+    """The target paths whose source weight has another shape: what a grid change must resample (derived, not declared)."""
+    theirs, ours = _by_path(source, "source"), _by_path(target, "target")
+    return sorted(path for path, var in ours.items() if path in theirs and tuple(var.shape) != tuple(theirs[path].shape))
+
+
 def judge_change(family: str, key: str, source: Any, target: keras.Model) -> None:
     """The verdict of one census change is the one the spec predicts, with its counts."""
     task, spec = task_of(family), registry.MODELS[family].transfer
     head_reset = key in HEAD_KEYS[task]
     got, plan, message = verdict(family, f"{key} {SOURCE[task][key]} to {CHANGES[task][key]}", source, target, spec,
                                  head_reset=head_reset)
-    want = "REFUSE" if key in spec.fixed else "PASS"
+    refused_by_rule = key == "image_size" and any(rule in REFUSING_RULES for rule in spec.resample.values())
+    want = "REFUSE" if key in spec.fixed or refused_by_rule else "PASS"
     assert got == want, f"{family} {key}: the spec predicts {want}, the engine says {got}: {message}"
-    if want == "REFUSE":
+    if want == "REFUSE" and key in spec.fixed:
         assert message.startswith("Invalid value for 'init': ") and "nothing was copied" in message
+    elif want == "REFUSE":  # refused while planning, so nothing was assigned; the sentence names both grids
+        assert plan is None and message.startswith("Invalid value for 'init': the Energy Transformer position table")
+        assert "(8x8 patches)" in message and "(16x16 patches)" in message and "train this run at the source's grid" in message
     else:
         assert len(plan.copied) + len(plan.resampled) + len(plan.reset) == plan.n_target
         assert len(plan.reset) == len(plan.dropped) and (len(plan.reset) > 0) == (head_reset and bool(spec.head))
+        # Every weight whose shape the change altered (outside a reset head) is resampled, by the rule its key names.
+        heads = spec.head if head_reset else ()
+        altered = [path for path in reshaped(source, target) if not any(path.startswith(h + "/") for h in heads)]
+        assert sorted(path for path, *_ in plan.resampled) == altered, (family, key)
+        logger.info(f"CENSUS {family} | {key} | reshaped {len(altered)} | resampled {len(plan.resampled)} by "
+                    f"{sorted({rule for _, rule, *_ in plan.resampled})}")
 
 
 @pytest.mark.parametrize("family", sorted(GROWN))
@@ -314,12 +349,15 @@ def archives(tmp_path_factory) -> Dict[Any, Any]:
 
 def loaded_beside(family: str, variant: str, geometry: Mapping[str, Any], model_args: Mapping[str, Any],
                   archives: Dict[Any, Any], source_family: Optional[str] = None,
-                  source_geometry: Optional[Mapping[str, Any]] = None) -> Tuple[keras.Model, keras.Model]:
+                  source_geometry: Optional[Mapping[str, Any]] = None,
+                  source_args: Optional[Mapping[str, Any]] = None) -> Tuple[keras.Model, keras.Model]:
     """``(loaded source, target)``: the target is built after ``clear_session``, as a run builds its model, then the
-    source's saved archive is loaded beside it, as ``init_from.transfer`` loads it (no ``clear_session`` between)."""
+    source's saved archive is loaded beside it, as ``init_from.transfer`` loads it (no ``clear_session`` between).
+    ``source_args`` are the source's ``model_args`` (default: none for its own family, ``CROSS_SOURCE_ARGS`` else)."""
     source_family = source_family or family
     source_geometry = source_geometry or SOURCE[task_of(source_family)]
-    source_args = CROSS_SOURCE_ARGS.get(source_family) if source_family != family else None
+    if source_args is None:
+        source_args = CROSS_SOURCE_ARGS.get(source_family) if source_family != family else None
     key = (source_family, tuple(sorted(source_geometry.items())), tuple(sorted((source_args or {}).items())))
     if key not in archives:
         archives[key] = archives["dir"] / f"{len(archives)}_{source_family}.keras"
@@ -347,7 +385,8 @@ def test_production_order_the_same_geometry_copies_every_weight_and_the_head_nam
 #: One changed-geometry case per kind of change the census makes, in the production order: a head (accunet and mdn,
 #: whose paths share a root other than the model's name), the image size, the channels and the lookback.
 PRODUCTION_CHANGES = [("accunet", "classes"), ("mdn", "horizon"), ("vit", "image_size"), ("timestral", "channels"),
-                      ("tirex", "lookback")]
+                      ("tirex", "lookback"), ("beit", "classes"), ("beit", "image_size"), ("energy_transformer", "classes"),
+                      ("energy_transformer", "image_size")]
 
 
 @pytest.mark.parametrize("family,key", PRODUCTION_CHANGES, ids=[f"{f}-{k}" for f, k in PRODUCTION_CHANGES])
@@ -368,3 +407,94 @@ def test_production_order_a_declared_cross_task_pair_fills_the_target(family, ta
     loaded, target = loaded_beside(family, VARIANT[family], SOURCE[task_of(family)], {}, archives, source_family,
                                    SOURCE[task])
     judge_cross(family, task, source_family, loaded, target)
+
+
+# --- the BEiT and Energy Transformer classifiers and their pretrain sources (plan 5c6cc105 Step 5) -------------------
+
+#: Each classifier row and the pretrain row that trains its trunk.
+MIM_SOURCE = {"beit": BEIT_MIM, "energy_transformer": ET_MIM}
+LARGER = {**SOURCE[CLASSIFICATION], "image_size": CHANGES[CLASSIFICATION]["image_size"]}
+
+
+def relative_tables(model: keras.Model) -> List[str]:
+    return [path for path in _by_path(model, "model") if path.endswith("/relative_position_bias_table")]
+
+
+def test_the_two_classifier_rows_take_exactly_their_pretrain_rows_trunk():
+    for family, source in MIM_SOURCE.items():
+        spec = registry.MODELS[family].transfer
+        assert sorted(spec.sources) == [(PRETRAIN, source)], family
+        assert spec.pinned == ("patch_size",) and spec.fixed == ("channels",), family
+
+
+def test_the_pretrain_geometry_is_the_classifier_patch_rule_on_both_datasets():
+    """A pretrain source and its classifier agree on the patch at the same dataset (the pair needs no pin)."""
+    for family in MIM_SOURCE:
+        spec = registry.MODELS[family]
+        for dataset, (side, patch) in GEOMETRY.items():
+            context = AutoContext(family=family, variant=VARIANT[family], dataset=dataset, num_classes=10,
+                                  image_size=side, defaults=spec.recipe(dataset, VARIANT[family]))
+            assert spec.load_resolver()(context, OptimArgs().resolve_auto(context), {})["patch_size"] == patch
+
+
+@pytest.mark.parametrize("family", sorted(MIM_SOURCE))
+def test_production_order_a_pretrain_source_at_a_larger_grid(family, archives):
+    """beit_mim 32/4 into beit 64/4 resamples every relative-bias table; et_mim into energy_transformer is refused."""
+    spec = registry.MODELS[family].transfer
+    # A cross-task source pins nothing, so the run asks for the source's patch itself: at 64 px the patch rule gives 16
+    # (a 4x4 grid, a SMALLER one, which the BEiT rule refuses while planning).
+    patch = {"patch_size": GEOMETRY["cifar10"][1]}
+    loaded, target = loaded_beside(family, VARIANT[family], LARGER, patch, archives, MIM_SOURCE[family], SOURCE[PRETRAIN])
+    relation = spec.sources[(PRETRAIN, MIM_SOURCE[family])]
+    got, plan, message = verdict(family, f"from {MIM_SOURCE[family]} at 64/4, production order", loaded, target, spec,
+                                 relation=relation)
+    if family == "energy_transformer":
+        assert got == "REFUSE" and plan is None and "(8x8 patches) cannot become (1, 256, 192) (16x16 patches)" in message
+        return
+    assert got == "PASS", message
+    tables = relative_tables(target)
+    assert len(tables) == target.backbone.num_layers and sorted(p for p, *_ in plan.resampled) == sorted(tables)
+    assert {rule for _, rule, *_ in plan.resampled} == {"beit_relpos_cubic"}
+    assert len(plan.copied) == plan.n_source - len(plan.dropped) - len(tables) and len(plan.reset) == len(plan.dropped)
+    logger.info(f"CENSUS {family} | from {MIM_SOURCE[family]} at 64/4 | tables {len(tables)} of "
+                f"{target.backbone.num_layers} layers")
+
+
+def test_production_order_a_class_token_beit_resets_its_classification_head(archives):
+    """``use_mean_pooling=False``: the head is ``classification_head``, the second name of the spec's head."""
+    pooling = {"use_mean_pooling": False}
+    spec = registry.MODELS["beit"].transfer
+    geometry = {**SOURCE[CLASSIFICATION], "classes": CHANGES[CLASSIFICATION]["classes"]}
+    loaded, target = loaded_beside("beit", VARIANT["beit"], geometry, {**pins_of("beit"), **pooling}, archives,
+                                   source_args=pooling)
+    got, plan, message = verdict("beit", "classes 10 to 100, class token, production order", loaded, target, spec,
+                                 head_reset=True)
+    assert got == "PASS", message
+    assert sorted(plan.reset) == ["classification_head/classifier/bias", "classification_head/classifier/kernel"]
+    assert sorted(plan.dropped) == sorted(plan.reset) and len(plan.copied) == plan.n_target - len(plan.reset)
+    assert "final_norm/gamma" in {path.rpartition("beit_backbone/")[2] for path in plan.copied}
+
+
+@pytest.mark.parametrize("source_family", ["beit", BEIT_MIM])
+def test_production_order_a_pooling_mismatch_is_refused(source_family, archives):
+    """A mean-pooled source has no ``final_norm`` for a class-token target: nothing is copied."""
+    spec = registry.MODELS["beit"].transfer
+    relation = spec.sources.get((task_of(source_family), source_family))
+    loaded, target = loaded_beside("beit", VARIANT["beit"], SOURCE[CLASSIFICATION], {"use_mean_pooling": False},
+                                   archives, source_family, SOURCE[task_of(source_family)])
+    got, _, message = verdict("beit", f"pooling mismatch from {source_family}", loaded, target, spec, relation=relation)
+    assert got == "REFUSE" and "nothing was copied" in message and "beit_backbone/final_norm/gamma" in message
+
+
+def test_production_order_the_absolute_beit_table_is_resampled_by_the_vit_rule(archives):
+    """D-007: ``use_absolute_position_embeddings`` reaches the factory, so its table is declared and measured here."""
+    absolute = {"use_absolute_position_embeddings": True}
+    spec = registry.MODELS["beit"].transfer
+    loaded, target = loaded_beside("beit", VARIANT["beit"], LARGER, {**pins_of("beit"), **absolute}, archives,
+                                   source_args=absolute)
+    got, plan, message = verdict("beit", "image_size 32 to 64, absolute table, production order", loaded, target, spec)
+    assert got == "PASS", message
+    rules = {path: rule for path, rule, *_ in plan.resampled}
+    assert rules.pop("beit_backbone/pos_embed/pos_embedding") == "vit_pos_bicubic"
+    assert sorted(rules) == sorted(relative_tables(target)) and set(rules.values()) == {"beit_relpos_cubic"}
+    assert sorted(path for path, *_ in plan.resampled) == reshaped(loaded, target)

@@ -1,7 +1,9 @@
 """The model families of image classification, as data, and their model-argument rules.
 
 Each :class:`~train.api.registry.ModelSpec` below carries the defaults of one
-legacy trainer (``vit``, ``resnet``, ``convnext``, ``cliffordnet``), so
+legacy trainer (``vit``, ``resnet``, ``convnext``, ``cliffordnet``; ``beit`` and
+``energy_transformer`` take their classification trainers' optimizer and the ``vit`` recipe's
+epochs, batch and overlays), so
 ``model=vit/vit_pico`` trains the way ``train.vit.train_vit`` does unless the
 caller says otherwise (D-003, D-013). A comment beside each value names the
 legacy line it was read from.
@@ -9,7 +11,7 @@ legacy line it was read from.
 Interface contract
 ------------------
 ``register_builtin_models()``
-    Register the six classification families, the four segmentation ones
+    Register the eight classification families, the four segmentation ones
     (:func:`train.api.segmentation_models.builtin_segmentation_models`) and the five denoising ones
     (:func:`train.api.denoising_models.builtin_denoising_models`) into
     :data:`train.api.registry.MODELS`. Idempotent: a family already registered is
@@ -29,8 +31,27 @@ Interface contract
     :raises UnresolvedAutoError: when ``optim_args`` still holds ``"auto"``.
     :raises ConfigError: when ``model_args`` names a key the library supplies
         (``variant``, ``num_classes``, ``input_shape``), or hands an AdamW run
-        a ``kernel_regularizer``; for the six classifiers, also a ``pretrained``
-        other than ``false`` (:func:`refuse_classifier_pretrained`).
+        a ``kernel_regularizer``; for the eight classifiers, also a ``pretrained``
+        other than ``false`` (:func:`refuse_classifier_pretrained`). ``resolve_mim_classifier_args`` (the
+        ``beit`` and ``energy_transformer`` rows, whose factories take no regularizer) also refuses an sgd
+        decay, a key of :data:`NOT_OFFERED` and, for ``energy_transformer``, a null global clip.
+
+``vit_patch_size(context)``
+    :return: the patch of a ViT-style classifier: 4 on 32 px images, 16 otherwise. On the two datasets of
+        ``train.api.pretrain_args.GEOMETRY`` it is the pretrain patch, so a pretrain source and its classifier agree.
+
+``require_global_clip(optim_args, family)``
+    :raises UnresolvedAutoError: when ``optim_args.global_clipnorm`` is still ``"auto"``.
+    :raises ConfigError: naming ``optim_args.global_clipnorm`` when it is null (a per-variable ``clipnorm``, which
+        nulls it, is named as the cause). Called for an Energy Transformer by both of its tasks.
+
+``recipe_notices_of(family, dataset)``
+    :return: the ``(level, text)`` lines the classification task logs about the numbers of ``family``'s recipe on
+        ``dataset`` that no run measured: one ``info`` line for ``beit`` and ``energy_transformer``, ``[]`` for the
+        six legacy families.
+
+``observe_beit(model)`` / ``observe_energy_transformer(model)``
+    The rows' ``ModelSpec.observe``: ``{"scale": ...}`` of the model's backbone layer, ``None`` without one.
 
 ``refuse_classifier_pretrained(model_args)``
     :raises ConfigError: when ``model_args`` holds a ``pretrained`` other than ``false``: a
@@ -69,13 +90,15 @@ Module scope imports only the standard library and ``train.api`` (D-012);
 ``keras`` is imported inside the resolvers.
 """
 
-from typing import Any, Dict, Mapping, Optional, Tuple
+import copy
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .args import ERASING_PRESET, AutoContext, OptimArgs
 from .config import AUTO
 from .errors import ConfigError, UnresolvedAutoError
 from . import registry
-from .registry import ModelSpec, TransferSpec
+from .pretrain_args import BEIT as BEIT_MIM, ET as ET_MIM, TASK as PRETRAIN
+from .registry import CrossTask, ModelSpec, TransferSpec
 
 # ---------------------------------------------------------------------
 
@@ -111,6 +134,10 @@ RECIPE_KEYS = (
 _SUPPLIED = ("variant", "num_classes", "input_shape")
 
 _MODELS = "dl_techniques.models.vision"
+
+#: The two classifier rows whose trunk a pretrain row trains (``beit_mim``, ``et_mim``).
+BEIT_CLASSIFIER = "beit"
+ET_CLASSIFIER = "energy_transformer"
 
 
 def optim_recipe(
@@ -385,6 +412,44 @@ def _cliffordnet_per_dataset(large_image_batch: int) -> Dict[str, Any]:
     }
 
 
+# beit/train_classification.py and energy_transformer/train_classification.py TrainingConfig: lr 5e-4 :113 and :109,
+# adamw :114/:110, cosine :115/:111, warmup 5 :116 and 2 :112, wd 0.05 :117/:113, a GLOBAL clip 1.0 :118/:117,
+# patience 15 :121/:120, monitor val_accuracy :405/:376, dropout 0.0 :104/:100, BEiT drop_path_rate 0.1 :103, ET
+# num_steps 12 :99. Their epochs (100) and batch (32), :112/:108 and :94/:90, are NOT taken: the plan gives these rows
+# the vit recipe's epochs, batch and overlays (D-028), and recipe_notices_of says what that leaves unmeasured.
+_LEGACY_EPOCHS, _LEGACY_BATCH = 100, 32
+
+
+def _mim_classifier_recipe(warmup_epochs: int, model_args: Dict[str, Any]) -> Dict[str, Any]:
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-028
+    # The optimizer is the legacy classification trainer's and everything else is the vit recipe's, its per-dataset
+    # overlays included: cifar_light on CIFAR (the legacy flip and REFLECT pad-crop has no preset; cifar_light is that
+    # plus a photometric jitter) and Imagenette's 200 epochs. Do NOT take vit's overlay optim_args (its Imagenette
+    # warmup of 20): the warmup is the legacy one. Do NOT copy the numbers: a change of vit's moves these with it.
+    per_dataset = {
+        name: {key: value for key, value in overlay.items() if key != "optim_args"}
+        for name, overlay in copy.deepcopy(VIT["per_dataset"]).items()
+    }
+    return _recipe(
+        epochs=VIT["epochs"],
+        batch_size=VIT["batch_size"],
+        optim_args=optim_recipe(
+            optimizer="adamw", lr=5e-4, weight_decay=0.05, warmup_epochs=warmup_epochs,
+            decay_over="total", global_clipnorm=1.0,
+        ),
+        watch_metric="val_accuracy",
+        patience=15,
+        model_args={**model_args, "dropout_rate": 0.0},
+        per_dataset=per_dataset,
+    )
+
+
+MIM_CLASSIFIER_RECIPES = {
+    BEIT_CLASSIFIER: _mim_classifier_recipe(5, {"drop_path_rate": 0.1}),
+    ET_CLASSIFIER: _mim_classifier_recipe(2, {"num_steps": 12}),
+}
+
+
 def _cliffordnet_recipe(
     stochastic_depth_rate: float, per_variant: Dict[str, Any], large_image_batch: int
 ) -> Dict[str, Any]:
@@ -553,6 +618,39 @@ def refuse_classifier_pretrained(model_args: Mapping[str, Any]) -> None:
         )
 
 
+def require_global_clip(optim_args: OptimArgs, family: str) -> None:
+    """Refuse a null global gradient clip for ``family``; see the module contract."""
+    clip = optim_args.global_clipnorm
+    if isinstance(clip, str) and clip == AUTO:
+        raise UnresolvedAutoError(
+            f"optim_args.global_clipnorm is still {AUTO!r}; resolve_auto must run before the model arguments "
+            "are resolved"
+        )
+    if clip is None:
+        # The energy descent is unrolled num_steps times, so the backward pass composes that many Jacobians and the
+        # gradient norm spikes: the paper reports the model fails to train at a learning rate above 1e-4 without the
+        # clip. A per-variable `clipnorm` is another clip and leaves the global norm unbounded, so it is refused too.
+        clipnorm = optim_args.clipnorm
+        cause = (
+            f"optim_args.clipnorm={clipnorm!r} was set, and a per-variable clipnorm replaced the global clip "
+            "(global_clipnorm resolves to null beside it) and leaves the global norm unbounded: "
+            "ET needs global_clipnorm; "
+            if clipnorm is not None and not (isinstance(clipnorm, str) and clipnorm == AUTO)
+            else ""
+        )
+        raise ConfigError(
+            f"Invalid value for 'optim_args.global_clipnorm': the {family!r} family needs the global gradient "
+            "clip (the energy descent is unrolled, and the paper reports the model fails to train at a learning rate "
+            f"above 1e-4 without it), got null; {cause}set it to a positive number or leave it "
+            "auto, and use global_clipnorm, not clipnorm"
+        )
+
+
+def vit_patch_size(context: AutoContext) -> int:
+    """Return the ViT-style patch for ``context.image_size``; see the module contract (train_vit.py:426-428)."""
+    return 4 if context.image_size == SMALL_IMAGE_SIZE else 16
+
+
 def resolve_vit_args(
     context: AutoContext, optim_args: OptimArgs, model_args: Mapping[str, Any]
 ) -> Dict[str, Any]:
@@ -562,12 +660,11 @@ def resolve_vit_args(
     ``kernel_regularizer`` is always passed, as the legacy trainer does.
     """
     refuse_classifier_pretrained(model_args)
-    patch = 4 if context.image_size == SMALL_IMAGE_SIZE else 16
     return merge_model_args(
         context,
         optim_args,
         model_args,
-        {"patch_size": patch, "kernel_regularizer": _weight_decay_regularizer(optim_args)},
+        {"patch_size": vit_patch_size(context), "kernel_regularizer": _weight_decay_regularizer(optim_args)},
         fixed=("scale",),
     )
 
@@ -617,6 +714,84 @@ def resolve_cliffordnet_args(
 ) -> Dict[str, Any]:
     """Return the cliffordnet keywords: the recipe's stochastic depth."""
     return _resolve_regularizer_on_request(context, optim_args, model_args)
+
+
+#: The ``model_args`` keys the ``beit`` and ``energy_transformer`` factories cannot take, and what each would do.
+NOT_OFFERED = {
+    "kernel_regularizer": "the library classifier builds no regularizer (adamw decays in the optimizer; sgd's decay "
+                          "is refused), and the factory would refuse the key after the run directory is claimed",
+    "include_top": "a classification run trains the head (beit's false builds a model with no head, which would "
+                   "train on its pooled features without a word)",
+    "name": "the factory names the model itself (the call fails with a TypeError after the run directory is claimed)",
+    "use_shared_relative_position_bias": "the library does not implement it (the BEiT constructor raises)",
+}
+
+
+def resolve_mim_classifier_args(
+    context: AutoContext, optim_args: OptimArgs, model_args: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Return the keywords of the row's library classifier factory; see the module contract."""
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-027
+    # The rows call the library factories directly: their keywords are build_model's (measured), so an adapter would
+    # only forward. Do NOT pass a kernel_regularizer, not even None (both factories raise on it), and do NOT let a
+    # NOT_OFFERED key reach the factory: it would be refused after the claim, crash it, or train a headless model.
+    refuse_classifier_pretrained(model_args)
+    refuse_dropped_sgd_decay(optim_args, TASK, context.family)
+    if context.family == ET_CLASSIFIER:
+        require_global_clip(optim_args, context.family)
+    for key in model_args:
+        if key in NOT_OFFERED:
+            raise ConfigError(
+                f"Invalid value for 'model_args.{key}': it is not offered for {context.family!r}: {NOT_OFFERED[key]}"
+            )
+    return merge_model_args(context, optim_args, model_args, {"patch_size": vit_patch_size(context)}, fixed=("scale",))
+
+
+def recipe_notices_of(family: str, dataset: str) -> List[Tuple[str, str]]:
+    """Return the lines naming what ``family``'s recipe on ``dataset`` carries unmeasured; see the module contract."""
+    recipe = MIM_CLASSIFIER_RECIPES.get(family)
+    if recipe is None:
+        return []
+    optim, batch = recipe["optim_args"], recipe["batch_size"]
+    epochs = recipe["per_dataset"].get(dataset, {}).get("epochs", recipe["epochs"])
+    text = (
+        f"{family}: the optimizer is the legacy classification trainer's (AdamW, lr {optim['lr']:g}, weight decay "
+        f"{optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epochs, a global gradient clip of "
+        f"{optim['global_clipnorm']:g}) with the vit recipe's epochs and batch: lr {optim['lr']:g} was set for a "
+        f"batch of {_LEGACY_BATCH} and is not scaled to the batch of {batch}, and {epochs} epochs are not the legacy "
+        f"{_LEGACY_EPOCHS}; the effect of both is unmeasured"
+    )
+    if dataset in ("cifar10", "cifar100"):
+        text += "; the augmentation is cifar_light, the legacy flip and REFLECT pad-crop with a photometric jitter added"
+    elif dataset in ("imagenet", "imagenette"):
+        text += f"; the batch of {batch} at 224 px is not measured to fit a 24 GB card"
+    if family == ET_CLASSIFIER:
+        text += (
+            "; the global clip is load-bearing (the paper reports the model fails to train at a learning rate above "
+            "1e-4 without it) and cannot be switched off"
+        )
+    return [("info", text)]
+
+
+def _scale_of(model: Any, backbone_class: str) -> Optional[Dict[str, Any]]:
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-029
+    # The two rows read MODULE-level variant tables, so the predictor has no class to check a file against and would
+    # load an ET file under a beit record. Do NOT copy the tables onto a class: read the backbone layer, as the
+    # segmentation rows do (plan 2faf890a D-088).
+    for layer in getattr(model, "layers", None) or []:
+        if type(layer).__name__ == backbone_class:
+            return {"scale": layer.get_config()["scale"]}
+    return None
+
+
+def observe_beit(model: Any) -> Optional[Dict[str, Any]]:
+    """Return the variant key the BEiT backbone shows, ``None`` for a model without one; see the module contract."""
+    return _scale_of(model, "BeitModel")
+
+
+def observe_energy_transformer(model: Any) -> Optional[Dict[str, Any]]:
+    """Return the variant key the ET backbone shows, ``None`` for a model without one; see the module contract."""
+    return _scale_of(model, "EnergyTransformerBackbone")
 
 
 def serialize_model_args(kwargs: Mapping[str, Any]) -> Dict[str, Any]:
@@ -689,10 +864,29 @@ RESNET_TRANSFER = TransferSpec(
 )
 CONVNEXT_TRANSFER = TransferSpec(head=_CLASSIFIER_HEAD, pinned=("strides",), fixed=("channels",))
 CLIFFORDNET_TRANSFER = TransferSpec(head=_CLASSIFIER_HEAD, fixed=("channels",))
+# DECISION plan-2026-11-19T081214-5c6cc105/D-031
+# BEiT's head is either name, by model_args.use_mean_pooling; a pooling mismatch is refused at the weight level
+# (final_norm has no source). use_absolute_position_embeddings reaches the factory (measured), so its table is declared
+# under the vit rule (D-007); use_shared_relative_position_bias is refused (NOT_OFFERED). The pretrain sources drop
+# their decoders. Do NOT pin use_mean_pooling: a same-pooling source of either kind is legitimate.
+BEIT_TRANSFER = TransferSpec(
+    head=("mean_pooling_classification_head", "classification_head"),
+    resample={
+        r"beit_backbone/encoder_layer_\d+/attention/relative_position_bias_table": "beit_relpos_cubic",
+        "beit_backbone/pos_embed/pos_embedding": "vit_pos_bicubic",
+    },
+    pinned=("patch_size",), fixed=("channels",),
+    sources={(PRETRAIN, BEIT_MIM): CrossTask(drop=("decoder_norm", "decoder_head"))},
+)
+ET_TRANSFER = TransferSpec(
+    head=("head_norm", "head_dense"), resample={"et_backbone/pos_embed/pos_embedding": "et_pos_refused"},
+    pinned=("patch_size",), fixed=("channels",),
+    sources={(PRETRAIN, ET_MIM): CrossTask(drop=("decoder_norm", "decoder_proj"))},
+)
 
 
 def builtin_models() -> Tuple[ModelSpec, ...]:
-    """Return the six classification family specs, freshly built.
+    """Return the eight classification family specs, freshly built.
 
     The cliffordnet family is two model classes with disjoint variant tables,
     so it is two families, as the legacy trainer routes them (D-003).
@@ -755,6 +949,26 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
             defaults=_cliffordnet_recipe(0.1, {}, 16),
             resolve_model_args=f"{_HERE}:resolve_cliffordnet_args",
             transfer=CLIFFORDNET_TRANSFER,
+        ),
+        ModelSpec(
+            family=BEIT_CLASSIFIER,
+            factory=f"{_MODELS}.beit.model:create_beit_classifier",
+            variants_attr=f"{_MODELS}.beit.model:MODEL_VARIANTS",
+            tasks=(TASK,),
+            defaults=MIM_CLASSIFIER_RECIPES[BEIT_CLASSIFIER],
+            resolve_model_args=f"{_HERE}:resolve_mim_classifier_args",
+            observe=f"{_HERE}:observe_beit",
+            transfer=BEIT_TRANSFER,
+        ),
+        ModelSpec(
+            family=ET_CLASSIFIER,
+            factory=f"{_MODELS}.energy_transformer.model:create_energy_transformer_classifier",
+            variants_attr=f"{_MODELS}.energy_transformer.model:MODEL_VARIANTS",
+            tasks=(TASK,),
+            defaults=MIM_CLASSIFIER_RECIPES[ET_CLASSIFIER],
+            resolve_model_args=f"{_HERE}:resolve_mim_classifier_args",
+            observe=f"{_HERE}:observe_energy_transformer",
+            transfer=ET_TRANSFER,
         ),
     )
 
