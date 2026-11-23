@@ -58,8 +58,9 @@ Interface contract
     :mod:`train.api.init_from`, whose docstring has the fields. Paths in it are relative to the model
     (without the model's root). Standard library only, so a row stays on the help path.
 
-    :raises ValueError: for a ``resample`` rule name that ``init_from.RULES`` does not hold, or a
-        ``positional`` entry that is not a regex of one top-level path component (it holds a ``/``).
+    :raises ValueError: for a ``resample`` rule name that ``init_from.RULES`` does not hold, a ``resample``
+        key that is not a regex (a key must match a whole weight path), or a ``positional`` entry that is
+        not a regex of one top-level path component (it holds a ``/``).
 
 ``load_attr(path)``
     :param path: ``"module:attr"`` or ``"module:Class.attr"``.
@@ -152,6 +153,12 @@ class TransferSpec:
             unknown = sorted(set(self.resample.values()) - set(RULES))
             if unknown:
                 raise ValueError(f"unknown resample rule(s) {unknown}; the rules are {sorted(RULES)}")
+            for key in self.resample:
+                try:
+                    re.compile(key)
+                except re.error as exc:
+                    raise ValueError(f"TransferSpec.resample key {key!r} is not a regex ({exc}); a key must match the "
+                                     "whole path of each weight its rule resamples") from exc
         if any(not name or "/" in name for name in self.positional):
             raise ValueError(f"TransferSpec.positional matches top-level path components, got {self.positional!r}")
 

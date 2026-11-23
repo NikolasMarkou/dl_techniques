@@ -19,16 +19,17 @@ TensorFlow, Keras or numpy. After the claim, :func:`transfer` loads the source m
 weights into the run's freshly built model, hashes the archive again and returns the ``init`` block
 of ``task.json``. A resume never reads the source: :func:`recorded_init` reads the run's own block.
 
-Nothing here imports TensorFlow, Keras, numpy or ``dl_techniques`` at module scope (a ``registry`` row
-that resamples imports this module, and ``python -m train help`` and a forecasting family refusal stay
-light); numpy, the logger and the DINOv2 bicubic matrix are imported inside the functions that use them.
+Nothing here imports TensorFlow, Keras, numpy, scipy or ``dl_techniques`` at module scope (a ``registry``
+row that resamples imports this module, and ``python -m train help`` and a forecasting family refusal stay
+light); numpy, scipy, the logger and the DINOv2 bicubic matrix are imported inside the functions that use them.
 
 Interface contract
 ------------------
 ``TransferSpec`` (declared in :mod:`train.api.registry`)
     One family's declaration; every path in it is relative to the model. ``head``: path prefixes
-    of the final layer, reset when the head is not reused; ``resample``: target path to rule name
-    (a key of :data:`RULES`); ``grow``: a regex matched at the start of a path, naming a
+    of the final layer, reset when the head is not reused; ``resample``: a regex, which must match a
+    whole target path (``re.fullmatch``), to a rule name (a key of :data:`RULES`); a path two keys
+    match is refused while planning; ``grow``: a regex matched at the start of a path, naming a
     depth-indexed block a deeper variant may add; ``pinned``: factory arguments the target takes
     from the source; ``fixed``: geometry keys the family cannot change (``channels``,
     ``lookback``, ``horizon``); ``sources``: ``(task, family)`` of another task to the
@@ -45,8 +46,9 @@ Interface contract
     :param head_reset: same task only: reset the target's head and drop the source's.
     :param name: what the refusal calls the target (``family/variant``).
     :return: a :class:`TransferPlan`. Nothing is assigned; values are read only to resample.
-    :raises ConfigError: a variable path held twice on one side, or a resample rule refusing the
-        shapes (a smaller or non-square grid).
+    :raises ConfigError: a variable path held twice on one side, a target path two ``resample`` keys
+        match, or a resample rule refusing the shapes (a smaller or non-square grid; any change of
+        the Energy Transformer position table).
 
 ``check(plan)``
     :raises ConfigError: when a target weight has no source weight of its shape and dtype and no
@@ -103,6 +105,20 @@ Interface contract
     :return: the class row unchanged and the grid resampled per axis with torch's bicubic kernel
         (``align_corners=False``, no antialiasing), in ``value``'s dtype.
     :raises ConfigError: a smaller grid, a non-square grid, or another batch or width.
+
+``beit_relpos_cubic(value, target_shape)``
+    :param value: a BEiT ``relative_position_bias_table`` ``(k * k + 3, heads)``: the row-major grid of the
+        ``k = 2 W - 1`` displacements of ``W x W`` patches, then 3 extra rows (class to token, token to class,
+        class to class).
+    :param target_shape: ``(n * n + 3, heads)`` with ``n > k`` (both odd, ``k`` at least 5: a cubic needs 4 points).
+    :return: unilm's resize (``beit/run_class_finetuning.py``): per head a cubic spline (``RectBivariateSpline``,
+        ``s=0``) through the source grid set at unilm's geometric positions, evaluated at the target's integer
+        displacements, then the 3 extra rows unchanged, in ``value``'s dtype.
+    :raises ConfigError: another rank or head count, a row count that is no such grid, or a grid that is not larger.
+
+``et_pos_refused(value, target_shape)``
+    :raises ConfigError: always, naming both shapes and grids: no reference rule resamples the Energy Transformer
+        position table, so ``init`` cannot change its grid.
 """
 
 import hashlib
@@ -166,6 +182,19 @@ def _block(pattern: Optional[str], path: str) -> Optional[str]:
     return match.group(0) if match else None
 
 
+def _rule_of(spec: TransferSpec, path: str) -> Optional[str]:
+    """The rule of the one ``resample`` key that matches the whole ``path``; ``None`` when no key does."""
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-005: a key is a regex the WHOLE path must match, so one BEiT key names
+    # the table of every encoder layer at any depth. Do NOT go back to the exact-path lookup (a deeper variant or a
+    # num_layers override would be refused after the claim, the defect 4g's review found for xlstm), do NOT use
+    # re.match or re.search (a key would also take longer paths), and do NOT let key order pick between two matches.
+    keys = [key for key in spec.resample if re.fullmatch(key, path)]
+    if len(keys) > 1:
+        raise ConfigError(f"Invalid value for 'init': {path} matches {len(keys)} resample keys of the family "
+                          f"({', '.join(keys)}); a weight takes one rule")
+    return spec.resample[keys[0]] if keys else None
+
+
 def _shape(variable: Any) -> Tuple[int, ...]:
     return tuple(int(n) for n in variable.shape)
 
@@ -212,7 +241,7 @@ def plan_transfer(source_model: Any, target_model: Any, spec: TransferSpec,
     used = set()
     for path, var in target.items():
         src = source.get(path, (None, None))[1]
-        rule = spec.resample.get(path)
+        rule = _rule_of(spec, path)
         if _under(path, reset_heads):
             reset.append(path)
         elif src is not None and _shape(src) == _shape(var) and src.dtype == var.dtype:
@@ -288,6 +317,80 @@ def vit_pos_bicubic(value: Any, target_shape: Tuple[int, ...]) -> Any:
     grid = value[:, 1:].astype(np.float64).reshape(value.shape[0], m, m, value.shape[2])
     grid = np.einsum("ai,bijd,cj->bacd", matrix, grid, matrix).reshape(value.shape[0], n * n, value.shape[2])
     return np.concatenate([value[:, :1], grid.astype(value.dtype)], axis=1)
+
+
+#: The rows a BEiT relative position bias table holds after its grid of displacements (class to token, token to
+#: class, class to class); unilm's rule copies them unchanged.
+BEIT_EXTRA_ROWS = 3
+
+
+def _beit_side(shape: Tuple[int, ...]) -> int:
+    """The side ``2 W - 1`` of the displacement grid of a BEiT table of ``W x W`` patches (``(2 W - 1)^2 + 3`` rows)."""
+    side = int(round(max(shape[0] - BEIT_EXTRA_ROWS, 0) ** 0.5))
+    if side * side + BEIT_EXTRA_ROWS != shape[0] or side % 2 == 0 or side < 5:
+        raise ConfigError(f"Invalid value for 'init': BEiT relative_position_bias_table {tuple(shape)}: {shape[0]} "
+                          "rows are not the (2W - 1)^2 + 3 of a square grid of W x W patches with W at least 3; only "
+                          "such a table is resampled")
+    return side
+
+
+def beit_relpos_cubic(value: Any, target_shape: Tuple[int, ...]) -> Any:
+    """Resample a BEiT relative position bias table to a larger square grid (contract in the module docstring)."""
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-004: unilm's own rule (beit/run_class_finetuning.py L351-411): per head
+    # a cubic spline through the source displacements set on a GEOMETRIC grid, evaluated at the integer target ones,
+    # the 3 extra rows copied. Do NOT use timm's default (linear on the same points, 0.29 to 0.45 off) or a bicubic on
+    # the index grid (vit_pos_bicubic's kernel, 0.73 to 1.02 off): neither is the rule BEiT was fine-tuned with.
+    # RectBivariateSpline(s=0) stands in for interp2d (gone in scipy 1.14); test_init_from_engine.py holds it to unilm's
+    # code run verbatim (tests/test_train/test_api/data/beit_relpos_reference.npz) at 1e-6.
+    import numpy as np
+    from scipy.interpolate import RectBivariateSpline
+
+    if len(value.shape) != 2 or len(target_shape) != 2 or value.shape[1] != target_shape[1]:
+        raise ConfigError(f"Invalid value for 'init': BEiT relative_position_bias_table {tuple(value.shape)} cannot "
+                          f"become {tuple(target_shape)}; only its number of rows (the grid of patches) may change")
+    src, dst = _beit_side(value.shape), _beit_side(target_shape)
+    if dst <= src:
+        raise ConfigError(f"Invalid value for 'init': BEiT relative_position_bias_table would resample a grid of "
+                          f"{(src + 1) // 2}x{(src + 1) // 2} patches to {(dst + 1) // 2}x{(dst + 1) // 2}; only a "
+                          "larger grid is resampled (unilm's rule grows a grid; for a smaller one its search for the "
+                          "ratio stops at its lower bound)")
+    left, right = 1.01, 1.5  # unilm's search for the ratio q whose src // 2 geometric steps reach dst // 2
+    while right - left > 1e-6:
+        q = (left + right) / 2.0
+        if (1.0 - q ** (src // 2)) / (1.0 - q) > dst // 2:
+            right = q
+        else:
+            left = q
+    steps, step = [], 1.0
+    for i in range(src // 2):
+        steps.append(step)
+        step += q ** (i + 1)
+    x = np.array([-s for s in reversed(steps)] + [0.0] + steps)
+    t = dst // 2.0
+    targets = np.arange(-t, t + 0.1, 1.0)
+    grid = np.asarray(value[:-BEIT_EXTRA_ROWS], dtype=np.float32)
+    heads = [RectBivariateSpline(x, x, grid[:, h].reshape(src, src), kx=3, ky=3, s=0)(targets, targets).reshape(-1)
+             for h in range(value.shape[1])]
+    return np.concatenate([np.stack(heads, axis=-1).astype(value.dtype), value[-BEIT_EXTRA_ROWS:]], axis=0)
+
+
+def _grid_of(shape: Tuple[int, ...]) -> str:
+    """``(1, 64, 192) (8x8 patches)``: a position table's shape and, when its rows are a square, its grid."""
+    rows = shape[1] if len(shape) == 3 else 0
+    side = int(round(rows ** 0.5))
+    return f"{tuple(shape)} ({side}x{side} patches)" if rows and side * side == rows else f"{tuple(shape)}"
+
+
+def et_pos_refused(value: Any, target_shape: Tuple[int, ...]) -> Any:
+    """Refuse a change of an Energy Transformer position table (contract in the module docstring)."""
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-006: a rule that never resamples. No reference resizes this table (the
+    # paper describes no fine-tuning at another resolution), so do NOT give it vit_pos_bicubic's kernel or a class-free
+    # bicubic: a convention is not a reference (U3). It is declared so the refusal names both grids and the reason;
+    # it runs while planning, so nothing is assigned.
+    raise ConfigError(f"Invalid value for 'init': the Energy Transformer position table {_grid_of(value.shape)} cannot "
+                      f"become {_grid_of(target_shape)}: no reference rule resamples it (the Energy Transformer paper "
+                      "describes no fine-tuning at another resolution); train this run at the source's grid (its "
+                      "image_size and patch_size)")
 
 
 # ---------------------------------------------------------------------
@@ -516,7 +619,8 @@ def recorded_init(run_dir: Path) -> Optional[Mapping[str, Any]]:
 
 
 #: Resample rules by the name a :class:`TransferSpec` declares.
-RULES: Dict[str, Callable[[Any, Tuple[int, ...]], Any]] = {"vit_pos_bicubic": vit_pos_bicubic}
+RULES: Dict[str, Callable[[Any, Tuple[int, ...]], Any]] = {
+    "vit_pos_bicubic": vit_pos_bicubic, "beit_relpos_cubic": beit_relpos_cubic, "et_pos_refused": et_pos_refused}
 
 
 # ---------------------------------------------------------------------
