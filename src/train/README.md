@@ -1436,14 +1436,17 @@ python -m train image_classification out=results/convnext_c10 model=convnext_v1/
 python -m train image_segmentation out=results/convnext_seg_pet model=convnext_seg/cifar10 data.dataset=oxford_pet \
     init=results/convnext_c10
 # a pretrain run's trunk into its classifier (the record's patch kept, the decoder dropped, the head fresh)
+python -m train pretrain out=results/beit_mim_c10 model=beit_mim/beit_tiny data.dataset=cifar10 \
+    model_args.tokenizer_checkpoint=/path/to/stage0_run/best_model.keras
 python -m train image_classification out=results/beit_c10 model=beit/beit_tiny data.dataset=cifar10 init=results/beit_mim_c10
 # forecasting at a longer lookback
 python -m train time_series_forecasting out=results/tirex_168 model=tirex/tiny data.format=builtin
 python -m train time_series_forecasting out=results/tirex_336 model=tirex/tiny data.format=builtin data.lookback=336 \
     init=results/tirex_168
 # depth at a higher resolution
-python -m train depth_estimation out=results/depth_364 model=depth_anything/vit_s transform_args.image_size=364 \
-    init=results/depth_252
+python -m train depth_estimation out=results/depth_252 model=depth_anything/vit_s data.format=builtin
+python -m train depth_estimation out=results/depth_364 model=depth_anything/vit_s data.format=builtin \
+    transform_args.image_size=364 init=results/depth_252
 ```
 
 What each kind moves, derived on the smallest variants by the engine on the real models: `vit_pico` from 32 px and 10 classes

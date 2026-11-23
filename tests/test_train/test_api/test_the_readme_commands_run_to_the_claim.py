@@ -75,6 +75,23 @@ def a_documented_source(name: str, root: Path) -> Path:
     return source
 
 
+#: Any task's command line, for the init check below.
+ANY_COMMAND = re.compile(r"python -m train [a-z_]+\b([^`\n]*)")
+
+
+def test_every_documented_init_names_a_documented_out():
+    """An ``init=results/<x>`` example of ANY task names the ``out`` of a documented command (the reader can run the source).
+
+    The forecasting, BEiT and depth examples of the ``init`` section each named a source no command trained (D-057).
+    """
+    tails = [m.group(1).split(" #")[0] for document in DOCUMENTS if document.is_file()
+             for m in ANY_COMMAND.finditer(re.sub(r"\\\n\s*", " ", document.read_text()))]
+    outs = {out.group(1) for tail in tails if (out := OUT.search(tail))}
+    inits = [init.group(1) for tail in tails if (init := INIT.search(tail)) and init.group(1).startswith("results/")]
+    assert len(inits) >= 5, f"the init section's examples were not found: {inits}"
+    assert [name for name in inits if name not in outs] == []
+
+
 def test_a_documented_init_names_a_documented_source():
     """Vacuity guard for the stand-in: the README holds a forecasting init command, and its source is documented."""
     names = [init.group(1) for _, tail in FOUND if (init := INIT.search(tail))]
