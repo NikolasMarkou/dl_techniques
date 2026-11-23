@@ -698,7 +698,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   not spread the options into `compile`. `depth_estimation` is its one user (the DPT head at 10x from a pretrained start).
 - **`init`: a run from an earlier run's weights** (plan 0fd54b91; the user-facing rules and the refusal messages are in
   [`README.md`](README.md)). The engine is `api/init_from.py`, which imports no TensorFlow, Keras or numpy at module scope:
-  `read_source` before the claim (files, record, task and family pair, `fixed` geometry, input scaling, pins, sha256), `transfer`
+  `read_source` before the claim (files, record, task and family pair, `fixed` geometry, input scaling, pins, a BEiT grid past
+  `init_from.beit_reach` of the source's, sha256; a cross-task patch pin other than the recipe's is logged, plan 5c6cc105 D-046),
+  `transfer`
   after it, in `run_sequence.build_model` on a fresh run only (`plan_transfer`, `check`, `apply`: complete-or-raise in both
   directions, nothing assigned before every check passed), and `recorded_init` on a resume, which reads the run's own `task.json`
   and never the source. Weights are keyed by their path relative to the model: one leading component is dropped when it is the

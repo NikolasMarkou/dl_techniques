@@ -73,9 +73,12 @@ Interface contract
         is missing; the record fails the predictor's record check or ``config.json`` is no JSON object; the
         source's task and family are neither this run's nor a declared cross-task pair; ``fixed`` keys of
         this family differ (every one named) or the input scaling does; a pinned argument of a same-task source is
-        not recorded in its ``config.json`` ``used.model_args`` (a cross-task source pins what its record holds). (A
-        request ``model_args`` value other than a pin is refused by
-        :func:`train.api.recipes.merge_model_args` when the task checks its model arguments, also before the claim.)
+        not recorded in its ``config.json`` ``used.model_args`` (a cross-task source pins what its record holds); a
+        target that resamples by ``beit_relpos_cubic`` would have a grid past :func:`beit_reach` of the source's (its
+        side over the pinned patch; the tokens and the largest side named). (A request ``model_args`` value other than a
+        pin is refused by :func:`train.api.recipes.merge_model_args` when the task checks its model arguments, also
+        before the claim.) A cross-task pin of ``patch_size`` other than the recipe's patch is logged in one info line
+        with the tokens it gives.
 
 ``transfer(source, model, task, family, variant, record)``
     :param source: the :class:`Source` :func:`read_source` returned before the claim.
@@ -116,7 +119,12 @@ Interface contract
     :return: unilm's resize (``beit/run_class_finetuning.py``): per head a cubic spline (``RectBivariateSpline``,
         ``s=0``) through the source grid set at unilm's geometric positions, evaluated at the target's integer
         displacements, then the 3 extra rows unchanged, in ``value``'s dtype.
-    :raises ConfigError: another rank or head count, a row count that is no such grid, or a grid that is not larger.
+    :raises ConfigError: another rank or head count, a row count that is no such grid, a grid that is not larger, or
+        one past :func:`beit_reach` of the source's (where unilm's search saturates and the spline extrapolates).
+
+``beit_reach(window)``
+    :return: the largest side of a grid of patches ``beit_relpos_cubic`` grows a ``window x window`` grid to
+        (``ceil(2 (1.5^(window - 1) - 1))``: 3 for 3, 5 for 4, 33 for 8).
 
 ``et_pos_refused(value, target_shape)``
     :raises ConfigError: always, naming both shapes and grids: no reference rule resamples the Energy Transformer
@@ -324,6 +332,30 @@ def vit_pos_bicubic(value: Any, target_shape: Tuple[int, ...]) -> Any:
 #: The rows a BEiT relative position bias table holds after its grid of displacements (class to token, token to
 #: class, class to class); unilm's rule copies them unchanged.
 BEIT_EXTRA_ROWS = 3
+#: The upper bound of unilm's search for the ratio of its geometric grid (``run_class_finetuning.py`` L376).
+BEIT_RATIO_BOUND = 1.5
+#: Why :func:`beit_relpos_cubic` grows no grid past :func:`beit_reach` (both refusals say it).
+BEYOND_REACH = ("beyond it the search for the ratio of the rule's geometric grid stops at its upper bound 1.5, so the "
+                "outer target displacements lie past the source's last one and the spline extrapolates them")
+
+
+def beit_reach(window: int) -> int:
+    """Return the largest side of a grid of patches :func:`beit_relpos_cubic` grows a ``window x window`` grid to.
+
+    Interface contract: ``window`` is an int of at least 3 (the rule's floor). unilm's search sets the source's
+    ``window - 1`` outer displacements on a geometric grid of ratio ``q <= 1.5``, the last at ``(1 - q^(window - 1)) /
+    (1 - q)``; a target whose outer displacement (its side minus 1) is not below that at ``q = 1.5`` saturates the
+    search. 3 reaches 3 (no growth), 4 reaches 5, 8 reaches 33. Pure; never raises for such a ``window``.
+    """
+    import math
+
+    return math.ceil((1.0 - BEIT_RATIO_BOUND ** (window - 1)) / (1.0 - BEIT_RATIO_BOUND))
+
+
+def _reach_words(window: int) -> str:
+    reach = beit_reach(window)
+    return (f"unilm's rule grows the relative position bias table of a grid of {window}x{window} patches to at most "
+            f"{reach}x{reach} ({BEYOND_REACH})")
 
 
 def _beit_side(shape: Tuple[int, ...]) -> int:
@@ -356,7 +388,15 @@ def beit_relpos_cubic(value: Any, target_shape: Tuple[int, ...]) -> Any:
                           f"{(src + 1) // 2}x{(src + 1) // 2} patches to {(dst + 1) // 2}x{(dst + 1) // 2}; only a "
                           "larger grid is resampled (unilm's rule grows a grid; for a smaller one its search for the "
                           "ratio stops at its lower bound)")
-    left, right = 1.01, 1.5  # unilm's search for the ratio q whose src // 2 geometric steps reach dst // 2
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-046
+    # Past beit_reach unilm's search stops at its upper bound and the spline EXTRAPOLATES the outer displacements (8 to
+    # 56 patches: the source's outer position 32.17 against the target's 55, scratch_step9_1/reach_probe.log). Do NOT
+    # resample it: refused here, and before the claim by read_source (_refuse_beyond_reach) for a run's own grids.
+    if (dst + 1) // 2 > beit_reach((src + 1) // 2):
+        raise ConfigError(f"Invalid value for 'init': BEiT relative_position_bias_table would resample a grid of "
+                          f"{(src + 1) // 2}x{(src + 1) // 2} patches to {(dst + 1) // 2}x{(dst + 1) // 2}; "
+                          f"{_reach_words((src + 1) // 2)}")
+    left, right = 1.01, BEIT_RATIO_BOUND  # unilm's search for the ratio q whose src // 2 geometric steps reach dst // 2
     while right - left > 1e-6:
         q = (left + right) / 2.0
         if (1.0 - q ** (src // 2)) / (1.0 - q) > dst // 2:
@@ -542,7 +582,41 @@ def read_source(init: Any, trainer: Any, config: Any, context: Any) -> Source:
     # same precedence as a same-task pin (recipes.merge_model_args). Do NOT read its used.model_args (another family's
     # factory keywords) and do NOT pin nothing: a 64 px beit would take patch 16 and be refused after the claim.
     pins = _pins(path, spec, used) if relation is None else {key: record[key] for key in spec.pinned if key in record}
+    _refuse_beyond_reach(spec, record, pins, context)
+    if relation is not None:
+        _log_moved_patch(pins, context)
     return Source(path, record, recorded, file_sha256(path / "best_model.keras"), relation, pins)
+
+
+def _refuse_beyond_reach(spec: TransferSpec, record: Mapping[str, Any], pins: Mapping[str, Any], context: Any) -> None:
+    """Refuse a BEiT target whose grid is past :func:`beit_reach` of the source's, naming the tokens (D-046)."""
+    if "beit_relpos_cubic" not in spec.resample.values() or "patch_size" not in pins:
+        return
+    if (context.model_args or {}).get("use_relative_position_bias") is False:
+        return  # the target has no table to resample
+    patch, side, size = pins["patch_size"], context.image_size, record.get("input_size") or record.get("input_shape")
+    if not isinstance(side, int) or not size or side % patch or size[0] % patch or size[0] // patch < 3:
+        return  # an untiled side and a grid below the rule's floor are refused by name elsewhere
+    theirs, ours = size[0] // patch, side // patch
+    if ours > beit_reach(theirs):
+        raise _refuse_init(f"the source's grid of {theirs}x{theirs} patches ({size[0]} px at patch_size {patch}, which "
+                           f"init keeps) would become {ours}x{ours} at {side} px, {ours * ours} tokens; "
+                           f"{_reach_words(theirs)}; ask for transform_args.image_size of at most "
+                           f"{beit_reach(theirs) * patch} px")
+
+
+def _log_moved_patch(pins: Mapping[str, Any], context: Any) -> None:
+    """Log the one line of a cross-task patch pin that is not the recipe's patch (D-046)."""
+    from dl_techniques.utils.logger import logger
+
+    from .recipes import vit_patch_size  # the patch rule of the rows a pretrain record pins (beit, energy_transformer)
+
+    patch, side, computed = pins.get("patch_size"), context.image_size, vit_patch_size(context)
+    if patch is None or not isinstance(side, int) or side % patch or patch == computed:
+        return
+    grid = side // patch
+    logger.info(f"init: the source's record pins patch_size {patch} (the recipe gives {computed} at {side} px), so this "
+                f"run cuts its {side} px input into {grid}x{grid} = {grid * grid} tokens")
 
 
 # ---------------------------------------------------------------------
@@ -557,10 +631,12 @@ HEAD_KEYS: Dict[str, Tuple[str, ...]] = {
     "image_denoising": ("channels",),
     "time_series_forecasting": ("horizon", "head", "quantile_levels", "channels"),
     "depth_estimation": (),
-    # DECISION plan-2026-11-19T081214-5c6cc105/D-008: a pretrain decoder answers in its tokenizer's codes (ET's, with no
-    # tokenizer, in pixels), so the tokenizer file's sha256 is the head's identity. Do NOT key it by the path: another
-    # file at the same path would keep a head whose outputs mean other codes.
-    "pretrain": ("tokenizer",),
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-008 (amended by D-048): a pretrain decoder answers in its tokenizer's
+    # codes (ET's, with no tokenizer, in pixels) of an input standardized with the record's mean and std, so the
+    # tokenizer file's sha256 and the two statistics are the head's identity. Do NOT key it by the path: another file at
+    # the same path would keep a head whose outputs mean other codes; do NOT drop the statistics: ET's decoder emits
+    # pixels in them, and a run at another dataset's statistics passes the geometry check.
+    "pretrain": ("tokenizer", "mean", "std"),
 }
 
 #: The source record's keys the ``init`` block keeps as its geometry (those its task's record has).

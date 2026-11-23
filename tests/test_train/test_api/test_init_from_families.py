@@ -22,8 +22,9 @@ here and logged as ``CENSUS`` lines.
 plan-2026-11-19T081214-5c6cc105 Step 5 adds the ``beit`` and ``energy_transformer`` classifiers and their
 pretrain sources (``beit_mim``, ``et_mim``, built at the pretrain geometry of CIFAR-10): a larger grid
 resamples every BEiT relative-bias table (and the absolute table where the option is on) and is refused
-by the Energy Transformer position rule, a class-token head resets on a change of classes, and a pooling
-mismatch is refused. A grid change must resample exactly the weights whose shape changed. Step 6 holds
+by the Energy Transformer position rule, a class-token head resets on a change of classes, a class-token pretrain
+source seeds a class-token classifier with the README's counts, and a pooling mismatch is refused in both directions
+(D-049). A grid change must resample exactly the weights whose shape changed. Step 6 holds
 the two pretrain rows (D-008): their own family only, the decoder their head, the size and the patch
 fixed; in the production order every weight is copied, another tokenizer resets exactly the decoder, and
 another image size is refused at the weight level, behind the refusal before the claim.
@@ -483,6 +484,36 @@ def test_production_order_a_pooling_mismatch_is_refused(source_family, archives)
                                    archives, source_family, SOURCE[task_of(source_family)])
     got, _, message = verdict("beit", f"pooling mismatch from {source_family}", loaded, target, spec, relation=relation)
     assert got == "REFUSE" and "nothing was copied" in message and "beit_backbone/final_norm/gamma" in message
+    if source_family == BEIT_MIM:  # the README's sentence for the pair
+        assert "2 of 224 weights of beit have no source weight of their shape and no declared rule" in message, message
+
+
+# plan 5c6cc105 D-049 (review R8): the cross-task class-token pair the README gives numbers for, and its other direction.
+def test_production_order_a_class_token_beit_mim_seeds_a_class_token_beit_with_the_readmes_counts(archives):
+    """``use_mean_pooling=false`` on both runs: the trunk and its ``final_norm`` copied, ``classification_head`` fresh,
+    the decoder dropped. The README states these counts: 222 copied, 2 reset, 4 dropped."""
+    pooling = {"use_mean_pooling": False}
+    spec = registry.MODELS["beit"].transfer
+    loaded, target = loaded_beside("beit", VARIANT["beit"], SOURCE[CLASSIFICATION], pooling, archives, BEIT_MIM,
+                                   SOURCE[PRETRAIN], source_args=pooling)
+    got, plan, message = verdict("beit", "from beit_mim, class token on both, production order", loaded, target, spec,
+                                 relation=spec.sources[(PRETRAIN, BEIT_MIM)])
+    assert got == "PASS", message
+    assert (len(plan.copied), len(plan.reset), len(plan.dropped), len(plan.resampled)) == (222, 2, 4, 0)
+    assert sorted(plan.reset) == ["classification_head/classifier/bias", "classification_head/classifier/kernel"]
+    assert {path.split("/")[0] for path in plan.dropped} == set(DECODER[BEIT_MIM])
+    assert "final_norm/gamma" in {path.rpartition("beit_backbone/")[2] for path in plan.copied}
+
+
+def test_production_order_a_class_token_beit_mim_into_a_mean_pooled_beit_is_refused(archives):
+    """The source's ``final_norm`` has no target weight: nothing is copied (D-031)."""
+    spec = registry.MODELS["beit"].transfer
+    loaded, target = loaded_beside("beit", VARIANT["beit"], SOURCE[CLASSIFICATION], {}, archives, BEIT_MIM,
+                                   SOURCE[PRETRAIN], source_args={"use_mean_pooling": False})
+    got, _, message = verdict("beit", "pooling mismatch, class-token beit_mim into mean pooling", loaded, target, spec,
+                              relation=spec.sources[(PRETRAIN, BEIT_MIM)])
+    assert got == "REFUSE" and "nothing was copied" in message and "beit_backbone/final_norm/gamma" in message, message
+    assert "2 of 226 weights of the source run are neither used nor dropped by a declared rule" in message, message
 
 
 def test_production_order_the_absolute_beit_table_is_resampled_by_the_vit_rule(archives):

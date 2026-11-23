@@ -17,7 +17,7 @@ Five things are pinned.
   it red and the table's justification is reopened.
 * The notice: no pair warns, and a dataset with no entry still does (the control). The ``beit`` and
   ``energy_transformer`` rows (plan 5c6cc105 Step 5) log one info line naming what their recipe carries
-  unmeasured.
+  unmeasured, without the clauses a typed value made untrue (D-044).
 * Every pair builds its smallest variant at 224 px and takes ONE optimizer step on fake data on CPU
   with the optimizer the recipe resolves to; the loss is finite and the step count moves by one.
 * The loss has no label smoothing (the task builds a plain sparse cross-entropy, every legacy value
@@ -242,6 +242,31 @@ def test_the_mim_classifier_notice_names_each_unmeasured_number(builtin, family,
     else:
         assert f"{IMAGE_SIZE} px is not measured to fit" in text and "cifar_light" not in text
     assert ("load-bearing" in text) == (family == "energy_transformer")
+
+
+@pytest.mark.parametrize("family", sorted(LEGACY))
+def test_the_mim_classifier_notice_drops_each_clause_the_request_overrode(builtin, family, tmp_path):
+    """plan 5c6cc105 D-044 (review R3): a typed batch and lr take the lr clause (and, at 224 px, the batch clause); typed
+    epochs and augmentation take theirs; the recipe's optimizer stays named as the recipe's."""
+    legacy = legacy_defaults(LEGACY[family])
+
+    def notice(dataset, side, **typed):
+        config = validate(ImageClassificationConfig, {"out": str(tmp_path / "run"), "model": f"{family}/{VARIANT[family]}",
+                                                      "data": {"dataset": dataset}, **typed})
+        (level, text), = ImageClassificationTrainer(config).recipe_notices(
+            DataFacts(dataset=dataset, num_classes=10, image_size=side), family)
+        assert level == "info" and text.startswith(f"{family}: the recipe's optimizer is the legacy"), text
+        assert ("load-bearing" in text) == (family == "energy_transformer")
+        return text
+
+    text = notice("cifar10", 32, batch_size=32, optim_args={"lr": 1e-4})
+    assert "not scaled" not in text and f"batch of {legacy['batch_size']}" not in text, text
+    assert f"not the legacy {legacy['epochs']}" in text and "cifar_light" in text
+    text = notice("imagenette", IMAGE_SIZE, batch_size=32)
+    assert "not scaled" not in text and "not measured to fit" not in text and "not the legacy" in text, text
+    text = notice("cifar10", 32, epochs=7, transform_args={"augment": "flip"})
+    assert "not the legacy" not in text and "cifar_light" not in text and "not scaled" in text, text
+    assert "not the legacy" not in notice("cifar10", 32, debug_args={"smoke": True})
 
 
 # ---------------------------------------------------------------------

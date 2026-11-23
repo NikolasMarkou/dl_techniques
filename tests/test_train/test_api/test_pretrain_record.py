@@ -9,7 +9,7 @@ one 32-wide layer on a 16-code toy tokenizer), CPU, written under ``tmp_path``:
 * **the record**: it passes ``record_problems``; its scaling is the word, mean and std image_classification records for
   the same dataset (Pre-Mortem 4); its tokenizer is the sha256 of the tokenizer file (``null`` for ET); a record missing
   any key is refused; a resume compares the geometry, the scaling, the patch and the tokenizer (``DATA_KEYS``);
-  ``load_model`` refuses a record whose size or patch is not the model's;
+  ``load_model`` refuses a record whose size or patch is not the model's, or that names another family or variant;
 * **the input** (D-023): the predictor's model input of raw rows is the CIFAR selection stream's batch bit for bit, and
   of Imagenette files the Imagenette evaluation stream's;
 * **predict**: one ``.npy`` per image equal to the test's own ``model.backbone`` call on its own standardized input
@@ -186,6 +186,30 @@ def test_load_model_refuses_a_record_whose_geometry_is_not_the_models(runs, tmp_
     (copy / "task.json").write_text(json.dumps({**record_of(runs["et_mim"]), **change}))
     with pytest.raises(ConfigError, match=fragment):
         load_model(copy)
+
+
+@pytest.mark.parametrize(
+    "file_of, named, fragment",
+    [("et_mim", "et_mim/et_small", "is not that variant (scale is \"tiny\" in the model, \"small\" in 'et_small')"),
+     ("et_mim", "beit_mim/beit_tiny", "holds no layer of that family (its own layers: EnergyTransformerBackbone)"),
+     ("beit_mim", "et_mim/et_tiny", "holds no layer of that family (its own layers: BeitModel)")],
+    ids=["et_tiny_under_et_small", "et_mim_under_beit_mim", "beit_mim_under_et_mim"],
+)
+def test_load_model_refuses_a_record_naming_another_family_or_variant(runs, tmp_path, file_of, named, fragment):
+    """plan 5c6cc105 D-042 (review R1): the rows' variant tables are module-level, so only ``observe`` reads the file."""
+    from train.api.predictor import load_model
+
+    family, variant = named.split("/")
+    copy = tmp_path / "run"
+    copy.mkdir()
+    (copy / "best_model.keras").write_bytes((runs[file_of].run / "best_model.keras").read_bytes())
+    record = {**record_of(runs[file_of]), "model": named, "family": family, "variant": variant,
+              "tokenizer": None if family == "et_mim" else "ab" * 32}
+    (copy / "task.json").write_text(json.dumps(record))
+    with pytest.raises(ConfigError) as caught:
+        load_model(copy)
+    assert f"names the {'variant' if family == file_of else 'family'} " in str(caught.value), str(caught.value)
+    assert fragment in str(caught.value) and "the file and the model are not from one run" in str(caught.value)
 
 
 # ---------------------------------------------------------------------

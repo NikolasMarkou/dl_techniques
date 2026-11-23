@@ -47,6 +47,11 @@ Interface contract
     arrays and no ``index.json``: the index is the mark of a complete answer.
     :raises ConfigError: for two files with one stem (naming both), or any error of ``predict``.
 
+``write_array(path, array)``
+    Write ``array`` (anything ``numpy.save`` takes) to the new file ``path``, opened ``"xb"``: an existing file raises
+    ``FileExistsError`` where ``numpy.save(path)`` would truncate it. Returns ``None``. The pretrain predictor's writer
+    calls it too (plan 5c6cc105 D-043), so a fix to the write lands in both.
+
 ``check_export(record, format, shape)`` / ``export_note(record)``
     The ``EXPORT_RULES`` row (its ``shape_of`` is the record's ``(height, width, channels)``). Every format exports at the
     trained size: ``keras``, ``saved_model``, ``tflite`` and ``onnx`` each give the Keras map within a band measured
@@ -187,7 +192,8 @@ class DepthPredictor:
 # ---------------------------------------------------------------------
 
 
-def _write_array(path: Path, array: Any) -> None:
+def write_array(path: Path, array: Any) -> None:
+    """Write ``array`` to the NEW file ``path`` with ``numpy.save``; see the module contract."""
     import numpy as np
 
     # "xb" creates the file and fails if it exists; numpy.save(path) would truncate one.
@@ -205,7 +211,7 @@ def write_predictions(predictor: DepthPredictor, files: Sequence[Path], out: Pat
         chunk = files[start : start + CHUNK]
         answers = predictor.predict([str(f) for f in chunk])["disparity"]
         for file, name, one in zip(chunk, names[start : start + CHUNK], answers):
-            _write_array(out / name, one)
+            write_array(out / name, one)
             entries.append({"path": str(file), "file": name, "size": [int(one.shape[0]), int(one.shape[1])]})
     with open(out / INDEX_NAME, "x") as handle:
         json.dump({"output": DEPTH_OUTPUTS[0], "note": OUTPUT_NOTE, "disparity": entries}, handle, indent=2)

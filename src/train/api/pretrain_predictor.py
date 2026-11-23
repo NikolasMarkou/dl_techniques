@@ -69,7 +69,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .depth_predictor import ARRAY_SUFFIX
+from .depth_predictor import ARRAY_SUFFIX, write_array
 from .errors import ConfigError
 from .exporting import check_free
 from .predictor import HOPFIELD_TFLITE_CAUSE, PRETRAIN, PRETRAIN_OUTPUTS, check_record, refuse_export_cell
@@ -235,12 +235,11 @@ class PretrainPredictor:
 
 def write_predictions(predictor: PretrainPredictor, files: Sequence[Path], out: Path) -> None:
     """Write one ``.npy`` per file and ``index.json`` into the new directory ``out``; see the module contract."""
-    # DECISION plan-2026-11-19T081214-5c6cc105/D-025
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-025 (amended by D-043)
     # A writer of its own beside depth's, sharing what the two share (mask_names, check_free, INDEX_NAME, the .npy
-    # suffix). Do NOT generalize depth's write_predictions for it: depth's is bound to its answer (the "disparity" key,
-    # the map's size, its output word and note), and the two answers need not move together.
-    import numpy as np
-
+    # suffix and the no-truncate write_array). Do NOT generalize depth's write_predictions for it: depth's is bound to
+    # its answer (the "disparity" key, the map's size, its output word and note), and the two answers need not move
+    # together; do NOT copy write_array back here.
     names = mask_names(files, ARRAY_SUFFIX)
     check_free(out, "out", "predict")
     out.mkdir(parents=True)
@@ -249,9 +248,7 @@ def write_predictions(predictor: PretrainPredictor, files: Sequence[Path], out: 
         chunk = files[start : start + CHUNK]
         answers = predictor.predict([str(f) for f in chunk])["embeddings"]
         for file, name, one in zip(chunk, names[start : start + CHUNK], answers):
-            # "xb" creates the file and fails if it exists; numpy.save(path) would truncate one.
-            with open(out / name, "xb") as handle:
-                np.save(handle, one)
+            write_array(out / name, one)
             entries.append({"path": str(file), "file": name, "shape": [int(side) for side in one.shape]})
     with open(out / INDEX_NAME, "x") as handle:
         json.dump({"output": PRETRAIN_OUTPUTS[0], "note": OUTPUT_NOTE, "embeddings": entries}, handle, indent=2)

@@ -21,8 +21,8 @@ Interface contract
 
 ``DECODERS``
     ``{family: layer names}``: each family's decoder, the library's layers after the backbone. It is the pretrain row's
-    ``init`` head (reset when the tokenizer differs), and a classifier row drops it from a pretrain source
-    (:mod:`train.api.recipes`).
+    ``init`` head (reset when the tokenizer or the input statistics differ), and a classifier row drops it from a
+    pretrain source (:mod:`train.api.recipes`).
 
 ``DATASETS`` / ``GEOMETRY``
     The datasets the shared streams serve (``train.common.image_streams.SUPPORTED_DATASETS``, held equal by a test) and,

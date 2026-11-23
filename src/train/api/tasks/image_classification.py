@@ -432,8 +432,9 @@ class ImageClassificationTrainer(TaskTrainer):
         return getattr(data, "image_files", None)
 
     def recipe_notices(self, facts: DataFacts, family: str) -> List[Tuple[str, str]]:
-        # What a family's recipe carries unmeasured (beit and energy_transformer, plan 5c6cc105 D-028), then the data's.
-        notices: List[Tuple[str, str]] = recipes.recipe_notices_of(family, facts.dataset)
+        # What a family's recipe carries unmeasured (beit and energy_transformer, plan 5c6cc105 D-028), without the
+        # clauses the request's typed values make untrue (D-044), then the data's.
+        notices: List[Tuple[str, str]] = recipes.recipe_notices_of(family, facts.dataset, self.config)
         if facts.dataset in registry.FILE_DATASETS:
             notices.append(
                 (

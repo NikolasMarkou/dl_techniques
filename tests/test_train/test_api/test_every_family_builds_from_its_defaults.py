@@ -15,7 +15,8 @@ Four things are pinned:
 The literals were read from the legacy trainers (the comments in
 ``train/api/recipes.py`` cite the lines), not from the recipes under test. The ``beit`` and
 ``energy_transformer`` rows (plan 5c6cc105 Step 5) take the legacy classification trainers' optimizer
-and the ``vit`` recipe's epochs, batch and per-dataset overlays.
+and the ``vit`` recipe's epochs, batch and per-dataset overlays. The three ViT-style rows share one patch rule, and a
+patch that does not tile the side is refused before the claim naming both (D-047).
 """
 
 import dataclasses
@@ -539,6 +540,15 @@ def test_the_decay_is_in_exactly_one_place(builtin):
                 assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(0.03 / 2)
 
 
+#: What each row's refusal says of the two keys the factories treat differently (plan 5c6cc105 D-045, review R4); the
+#: build loop of the test below measures each.
+OWN_REASON = {
+    "beit": {"include_top": "builds a BEiT with no head", "use_shared_relative_position_bias": "the BEiT constructor raises"},
+    "energy_transformer": {"include_top": "the Energy Transformer constructor does not take the key",
+                           "use_shared_relative_position_bias": "the Energy Transformer has no relative position bias"},
+}
+
+
 @pytest.mark.parametrize("family", MIM_CLASSIFIERS)
 def test_the_mim_classifiers_refuse_what_their_factory_would_drop_or_crash_on_before_the_claim(family, builtin):
     """sgd's decay has no regularizer to become, and three keys would be refused after the claim (a ValueError for
@@ -549,8 +559,12 @@ def test_the_mim_classifiers_refuse_what_their_factory_would_drop_or_crash_on_be
     assert "optim_args.weight_decay" in str(caught.value) and f"builds none for {family!r}" in str(caught.value)
     for key, value in (("kernel_regularizer", None), ("kernel_regularizer", {"class_name": "L2"}),
                        ("include_top", False), ("name", "x"), ("use_shared_relative_position_bias", True)):
-        with pytest.raises(ConfigError, match=rf"Invalid value for 'model_args.{key}': it is not offered for '{family}'"):
+        with pytest.raises(ConfigError, match=rf"Invalid value for 'model_args.{key}': it is not offered for '{family}'") \
+                as refused:
             resolved(family, variant, user={key: value})
+        message = str(refused.value)
+        assert OWN_REASON[family].get(key, "") in message, message
+        assert family == "beit" or "beit" not in message.lower(), message  # the Energy Transformer's reasons name no BEiT
     # Each reason is still true of the library (a factory that took one would make its row a dead refusal).
     spec = builtin[family]
     built = []
@@ -707,11 +721,36 @@ def test_an_unknown_model_args_key_is_a_config_error(builtin):
 
 
 def test_an_input_the_family_cannot_take_is_a_config_error(builtin):
-    """vit at 28 px with the 16-pixel patch of a non-32 image: the factory refuses."""
+    """vit at 28 px with a 16-pixel patch: the factory refuses (the resolver refuses it first, the test below)."""
     kwargs, _ = resolved("vit", "vit_pico", dataset="mnist", image_size=28)
-    assert kwargs["patch_size"] == 16
+    assert kwargs["patch_size"] == 4
     with pytest.raises(ConfigError, match="vit"):
-        recipes.build_model(builtin["vit"], "vit_pico", 10, (28, 28, 1), kwargs)
+        recipes.build_model(builtin["vit"], "vit_pico", 10, (28, 28, 1), {**kwargs, "patch_size": 16})
+
+
+#: ``side: the patch the rule gives`` (plan 5c6cc105 D-047, review R6): 4 at a side of at most 32 px that 4 divides
+#: (CIFAR 32, MNIST 28), 16 otherwise; before, 4 at exactly 32 px only, so MNIST took 16 and failed after the claim.
+PATCH_RULE = {32: 4, 28: 4, 16: 4, 8: 4, 64: 16, 224: 16, 30: 16, 36: 16}
+
+
+@pytest.mark.parametrize("family", ["vit", *MIM_CLASSIFIERS])
+def test_the_patch_divides_the_side_or_the_request_is_refused_before_the_claim_naming_both(family, builtin):
+    variant = FIRST_VARIANT[family]
+    for side, patch in PATCH_RULE.items():
+        if side % patch:
+            with pytest.raises(ConfigError) as refused:
+                resolved(family, variant, image_size=side)
+            assert str(refused.value) == (
+                f"Invalid value for 'model_args.patch_size': {family!r} cuts its input into square patches of "
+                f"{patch} px (model_args.patch_size), which do not tile the image side of {side} px "
+                f"(transform_args.image_size); ask for a patch that divides the side, or a side it divides")
+        else:
+            assert resolved(family, variant, image_size=side)[0]["patch_size"] == patch, side
+    with pytest.raises(ConfigError, match=r"square patches of 16 px \(model_args.patch_size\), which do not tile the "
+                                          r"image side of 28 px"):
+        resolved(family, variant, dataset="mnist", image_size=28, user={"patch_size": 16})
+    model = recipes.build_model(builtin[family], variant, 10, (28, 28, 1), resolved(family, variant, image_size=28)[0])
+    assert tuple(model(np.zeros((1, 28, 28, 1), "float32")).shape) == (1, 10)  # MNIST builds now
 
 
 def test_only_value_errors_are_translated(builtin):

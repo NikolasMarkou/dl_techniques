@@ -42,12 +42,13 @@ Interface contract
     initialization is given (``unjudged_note`` says why); a non-finite loss is refused.
 
     ``init`` (plan-2026-11-19T081214-5c6cc105 D-008, D-012). A run starts from an earlier run of its OWN family (the
-    row's transfer: the decoder is the head, reset when the tokenizer's sha256 differs). ``init_identity`` gives the
-    channels, the scaling, the size and the patch this run's record will hold, so another geometry is refused before the
-    claim; ``init_overlap`` counts the source's seeded train rows among this run's selection rows. Epoch zero is then
-    the LOADED weights' ``val_loss`` (``initial_loss_ratio`` and ``init_scale_warning`` are null, and the sequence's
-    note says why), so the threshold is ``min(baseline, loaded)``, still strictly below; ``Evaluation.loaded`` stays
-    ``None``, since the other tasks' higher-is-better comparison with the loaded value would judge a loss backwards.
+    row's transfer: the decoder is the head, reset when the tokenizer's sha256 or the input's mean and std differ, D-048).
+    ``init_identity`` gives the channels, the scaling, the size and the patch this run's record will hold, so another
+    geometry is refused before the claim; ``init_overlap`` counts the source's seeded train rows among this run's
+    selection rows. Epoch zero is then the LOADED weights' ``val_loss`` (``initial_loss_ratio`` and
+    ``init_scale_warning`` are null, and the sequence's note says why), so the threshold is ``min(baseline, loaded)``,
+    still strictly below; ``Evaluation.loaded`` stays ``None``, since the other tasks' higher-is-better comparison with
+    the loaded value would judge a loss backwards.
 
     Reporting. ``evaluate_and_report`` follows the denoiser's order: the best checkpoint reloaded and scored on the TEST
     split, the data-free analysis (``run_analysis``: the weights and spectral analyses; the stock analysis reads class

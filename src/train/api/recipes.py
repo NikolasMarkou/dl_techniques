@@ -34,24 +34,34 @@ Interface contract
         a ``kernel_regularizer``; for the eight classifiers, also a ``pretrained``
         other than ``false`` (:func:`refuse_classifier_pretrained`). ``resolve_mim_classifier_args`` (the
         ``beit`` and ``energy_transformer`` rows, whose factories take no regularizer) also refuses an sgd
-        decay, a key of :data:`NOT_OFFERED` and, for ``energy_transformer``, a null global clip.
+        decay, a key of the row's :data:`NOT_OFFERED` and, for ``energy_transformer``, a null global clip. Both
+        ViT-style resolvers refuse a patch that does not tile the image side (:func:`refuse_patch_not_tiling`).
 
 ``vit_patch_size(context)``
-    :return: the patch of a ViT-style classifier: 4 on 32 px images, 16 otherwise. On the two datasets of
-        ``train.api.pretrain_args.GEOMETRY`` it is the pretrain patch, so a pretrain source and its classifier agree.
+    :return: the patch of a ViT-style classifier: 4 on images of a side of at most 32 px that 4 divides (CIFAR's 32,
+        MNIST's 28), 16 otherwise. On the two datasets of ``train.api.pretrain_args.GEOMETRY`` it is the pretrain patch,
+        so a pretrain source and its classifier agree.
+
+``refuse_patch_not_tiling(context, kwargs)``
+    :raises ConfigError: naming ``model_args.patch_size`` and ``transform_args.image_size`` when ``kwargs["patch_size"]``
+        (computed, pinned by ``init`` or typed) does not divide ``context.image_size``, which the factory would refuse
+        after the run directory is claimed. Nothing for a missing patch or size.
 
 ``require_global_clip(optim_args, family)``
     :raises UnresolvedAutoError: when ``optim_args.global_clipnorm`` is still ``"auto"``.
     :raises ConfigError: naming ``optim_args.global_clipnorm`` when it is null (a per-variable ``clipnorm``, which
         nulls it, is named as the cause). Called for an Energy Transformer by both of its tasks.
 
-``recipe_notices_of(family, dataset)``
+``recipe_notices_of(family, dataset, request=None)``
     :return: the ``(level, text)`` lines the classification task logs about the numbers of ``family``'s recipe on
         ``dataset`` that no run measured: one ``info`` line for ``beit`` and ``energy_transformer``, ``[]`` for the
-        six legacy families.
+        six legacy families. ``request`` is the run's unresolved config: a clause about a number the request typed
+        (``batch_size``, ``epochs`` or a smoke run, ``optim_args.optimizer`` or ``lr``, ``transform_args.augment``) is
+        left out, since the recipe's number is not the run's.
 
 ``observe_beit(model)`` / ``observe_energy_transformer(model)``
-    The rows' ``ModelSpec.observe``: ``{"scale": ...}`` of the model's backbone layer, ``None`` without one.
+    The ``ModelSpec.observe`` of the two classifier rows and of their pretrain rows (``beit_mim``, ``et_mim``):
+    ``{"scale": ...}`` of the model's backbone layer, ``None`` without one.
 
 ``refuse_classifier_pretrained(model_args)``
     :raises ConfigError: when ``model_args`` holds a ``pretrained`` other than ``false``: a
@@ -91,9 +101,9 @@ Module scope imports only the standard library and ``train.api`` (D-012);
 """
 
 import copy
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
-from .args import ERASING_PRESET, AutoContext, OptimArgs
+from .args import ERASING_PRESET, AutoContext, OptimArgs, _is_auto, is_count
 from .config import AUTO
 from .errors import ConfigError, UnresolvedAutoError
 from . import registry
@@ -104,7 +114,7 @@ from .registry import CrossTask, ModelSpec, TransferSpec
 
 TASK = "image_classification"
 
-#: Side of the CIFAR images. The vit patch and the resnet stem change here.
+#: Side of the CIFAR images: the resnet stem changes here, the vit patch above it (D-047).
 SMALL_IMAGE_SIZE = 32
 
 #: Keys a recipe may hold. ``model_args`` is the data half of the model-argument
@@ -648,7 +658,23 @@ def require_global_clip(optim_args: OptimArgs, family: str) -> None:
 
 def vit_patch_size(context: AutoContext) -> int:
     """Return the ViT-style patch for ``context.image_size``; see the module contract (train_vit.py:426-428)."""
-    return 4 if context.image_size == SMALL_IMAGE_SIZE else 16
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-047
+    # 4 at a side of at most 32 px that 4 divides, 16 otherwise. Do NOT go back to 4 at exactly 32 px: MNIST's 28 px then
+    # took 16 and failed in the factory after the claim, for vit, beit and energy_transformer alike. A 16 px run takes 4
+    # now (a 4x4 grid, where patch 16 gave it one patch); 32 px and every side above it are unchanged.
+    side = context.image_size
+    return 4 if is_count(side) and side <= SMALL_IMAGE_SIZE and side % 4 == 0 else 16
+
+
+def refuse_patch_not_tiling(context: AutoContext, kwargs: Mapping[str, Any]) -> None:
+    """Refuse a patch that does not divide the image side, before the claim; see the module contract."""
+    side, patch = context.image_size, kwargs.get("patch_size")
+    if is_count(side) and is_count(patch) and side % patch:
+        raise ConfigError(
+            f"Invalid value for 'model_args.patch_size': {context.family!r} cuts its input into square patches of "
+            f"{patch} px (model_args.patch_size), which do not tile the image side of {side} px "
+            "(transform_args.image_size); ask for a patch that divides the side, or a side it divides"
+        )
 
 
 def resolve_vit_args(
@@ -656,17 +682,19 @@ def resolve_vit_args(
 ) -> Dict[str, Any]:
     """Return the ``create_vit`` keywords; see the module contract.
 
-    ``patch_size`` is 4 on 32 px images and 16 otherwise (train_vit.py:426-428, by dataset there).
-    ``kernel_regularizer`` is always passed, as the legacy trainer does.
+    ``patch_size`` is :func:`vit_patch_size` (train_vit.py:426-428 gives 4 on CIFAR and 16 otherwise, by dataset there),
+    and a patch that does not tile the side is refused. ``kernel_regularizer`` is always passed, as the legacy trainer does.
     """
     refuse_classifier_pretrained(model_args)
-    return merge_model_args(
+    kwargs = merge_model_args(
         context,
         optim_args,
         model_args,
         {"patch_size": vit_patch_size(context), "kernel_regularizer": _weight_decay_regularizer(optim_args)},
         fixed=("scale",),
     )
+    refuse_patch_not_tiling(context, kwargs)
+    return kwargs
 
 
 def resolve_resnet_args(
@@ -716,14 +744,32 @@ def resolve_cliffordnet_args(
     return _resolve_regularizer_on_request(context, optim_args, model_args)
 
 
-#: The ``model_args`` keys the ``beit`` and ``energy_transformer`` factories cannot take, and what each would do.
-NOT_OFFERED = {
-    "kernel_regularizer": "the library classifier builds no regularizer (adamw decays in the optimizer; sgd's decay "
-                          "is refused), and the factory would refuse the key after the run directory is claimed",
-    "include_top": "a classification run trains the head (beit's false builds a model with no head, which would "
-                   "train on its pooled features without a word)",
-    "name": "the factory names the model itself (the call fails with a TypeError after the run directory is claimed)",
-    "use_shared_relative_position_bias": "the library does not implement it (the BEiT constructor raises)",
+_NO_REGULARIZER = ("the library classifier builds no regularizer (adamw decays in the optimizer; sgd's decay is "
+                   "refused), and the factory would refuse the key after the run directory is claimed")
+_NAMED_BY_FACTORY = "the factory names the model itself (the call fails with a TypeError after the run directory is claimed)"
+_ET_TAKES_NO = ("the Energy Transformer constructor does not take the key (it would be refused after the run directory "
+                "is claimed)")
+
+# DECISION plan-2026-11-19T081214-5c6cc105/D-045
+# Keyed by family: the two constructors treat include_top and use_shared_relative_position_bias differently (measured,
+# scratch_step9_1/not_offered_probe.log). Do NOT share one reason per key: energy_transformer was told "the BEiT
+# constructor raises" and "beit's false builds a model with no head".
+#: ``{family: {key: why}}``: the ``model_args`` keys the ``beit`` and ``energy_transformer`` factories cannot take, and
+#: what each would do to that row.
+NOT_OFFERED: Dict[str, Dict[str, str]] = {
+    BEIT_CLASSIFIER: {
+        "kernel_regularizer": _NO_REGULARIZER,
+        "include_top": "a classification run trains the head (false builds a BEiT with no head, which would train on "
+                       "its pooled features without a word)",
+        "name": _NAMED_BY_FACTORY,
+        "use_shared_relative_position_bias": "the library does not implement it (the BEiT constructor raises)",
+    },
+    ET_CLASSIFIER: {
+        "kernel_regularizer": _NO_REGULARIZER,
+        "include_top": f"a classification run trains the head, and {_ET_TAKES_NO}",
+        "name": _NAMED_BY_FACTORY,
+        "use_shared_relative_position_bias": f"the Energy Transformer has no relative position bias, and {_ET_TAKES_NO}",
+    },
 }
 
 
@@ -739,38 +785,61 @@ def resolve_mim_classifier_args(
     refuse_dropped_sgd_decay(optim_args, TASK, context.family)
     if context.family == ET_CLASSIFIER:
         require_global_clip(optim_args, context.family)
+    refused = NOT_OFFERED[context.family]
     for key in model_args:
-        if key in NOT_OFFERED:
+        if key in refused:
             raise ConfigError(
-                f"Invalid value for 'model_args.{key}': it is not offered for {context.family!r}: {NOT_OFFERED[key]}"
+                f"Invalid value for 'model_args.{key}': it is not offered for {context.family!r}: {refused[key]}"
             )
-    return merge_model_args(context, optim_args, model_args, {"patch_size": vit_patch_size(context)}, fixed=("scale",))
+    kwargs = merge_model_args(context, optim_args, model_args, {"patch_size": vit_patch_size(context)}, fixed=("scale",))
+    refuse_patch_not_tiling(context, kwargs)
+    return kwargs
 
 
-def recipe_notices_of(family: str, dataset: str) -> List[Tuple[str, str]]:
+def _typed_fields(request: Any) -> Set[str]:
+    """The request fields a notice clause states that ``request`` typed (not ``"auto"``); a smoke run types its epochs."""
+    if request is None:
+        return set()
+    fields = {"batch_size": request.batch_size, "epochs": request.epochs, "optim_args.optimizer":
+              request.optim_args.optimizer, "optim_args.lr": request.optim_args.lr,
+              "transform_args.augment": request.transform_args.augment}
+    typed = {name for name, value in fields.items() if not _is_auto(value)}
+    return (typed | {"epochs"}) if request.debug_args.smoke else typed
+
+
+def recipe_notices_of(family: str, dataset: str, request: Any = None) -> List[Tuple[str, str]]:
     """Return the lines naming what ``family``'s recipe on ``dataset`` carries unmeasured; see the module contract."""
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-044
+    # A clause stating a recipe number is left out when the request typed that field. Do NOT state the recipe's number
+    # as the run's: with batch_size=32 and lr 1e-4 the line said "lr 0.0005 was set for a batch of 32 and is not scaled
+    # to the batch of 128", both numbers false for that run. The opening clause names the recipe's optimizer AS the
+    # recipe's, true whatever the request typed.
     recipe = MIM_CLASSIFIER_RECIPES.get(family)
     if recipe is None:
         return []
+    typed = _typed_fields(request)
     optim, batch = recipe["optim_args"], recipe["batch_size"]
     epochs = recipe["per_dataset"].get(dataset, {}).get("epochs", recipe["epochs"])
-    text = (
-        f"{family}: the optimizer is the legacy classification trainer's (AdamW, lr {optim['lr']:g}, weight decay "
-        f"{optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epochs, a global gradient clip of "
-        f"{optim['global_clipnorm']:g}) with the vit recipe's epochs and batch: lr {optim['lr']:g} was set for a "
-        f"batch of {_LEGACY_BATCH} and is not scaled to the batch of {batch}, and {epochs} epochs are not the legacy "
-        f"{_LEGACY_EPOCHS}; the effect of both is unmeasured"
-    )
+    clauses = [
+        f"{family}: the recipe's optimizer is the legacy classification trainer's (AdamW, lr {optim['lr']:g}, weight "
+        f"decay {optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epochs, a global gradient clip of "
+        f"{optim['global_clipnorm']:g}) with the vit recipe's epochs and batch"
+    ]
+    if not typed & {"batch_size", "optim_args.optimizer", "optim_args.lr"}:
+        clauses.append(f"lr {optim['lr']:g} was set for a batch of {_LEGACY_BATCH} and is not scaled to the batch of "
+                       f"{batch}, an effect that is unmeasured")
+    if "epochs" not in typed:
+        clauses.append(f"{epochs} epochs are not the legacy {_LEGACY_EPOCHS}, an effect that is unmeasured")
     if dataset in ("cifar10", "cifar100"):
-        text += "; the augmentation is cifar_light, the legacy flip and REFLECT pad-crop with a photometric jitter added"
-    elif dataset in ("imagenet", "imagenette"):
-        text += f"; the batch of {batch} at 224 px is not measured to fit a 24 GB card"
+        if "transform_args.augment" not in typed:
+            clauses.append("the augmentation is cifar_light, the legacy flip and REFLECT pad-crop with a photometric "
+                           "jitter added")
+    elif dataset in ("imagenet", "imagenette") and "batch_size" not in typed:
+        clauses.append(f"the batch of {batch} at 224 px is not measured to fit a 24 GB card")
     if family == ET_CLASSIFIER:
-        text += (
-            "; the global clip is load-bearing (the paper reports the model fails to train at a learning rate above "
-            "1e-4 without it) and cannot be switched off"
-        )
-    return [("info", text)]
+        clauses.append("the global clip is load-bearing (the paper reports the model fails to train at a learning rate "
+                       "above 1e-4 without it) and cannot be switched off")
+    return [("info", "; ".join(clauses))]
 
 
 def _scale_of(model: Any, backbone_class: str) -> Optional[Dict[str, Any]]:

@@ -786,7 +786,10 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   the sixth record kind) with `schema_version`, `task`, `model`, `family`, `variant`, `input_size` (`[height, width]`), `channels`
   (3), `normalize` (`standardize`), `mean` and `std` (what the streams standardize with: CIFAR-10's own statistics, ImageNet's for
   Imagenette), `patch_size`, `tokenizer` (the sha256 of the tokenizer file for `beit_mim`, null for `et_mim`) and `output`
-  (`patch_embeddings`); a resume compares the seven from `input_size` to `tokenizer`. `predict model=<run dir or .keras>
+  (`patch_embeddings`); a resume compares the seven from `input_size` to `tokenizer`. `load_model` refuses a record that names
+  another family or variant than the file's backbone (the classifier rows' observers, D-042), for example `Invalid task.json
+  <run>/task.json: it names the variant 'et_small' of 'et_mim' but <run>/best_model.keras is not that variant (scale is "tiny"
+  in the model, "small" in 'et_small'); the file and the model are not from one run`. `predict model=<run dir or .keras>
   data=<image or directory> out=<new directory>` answers the BACKBONE's patch-token embeddings, not what the run optimized (no
   reconstructed pixels for ET, no code logits for BEiT): per image `<stem>.npy`, float32 `(N, D)`, one row per patch in row-major
   order, BEiT's class-token row dropped (N = 64 at 32 px and patch 4, 196 at 224 px and patch 16; D = 192 for `et_tiny` and
@@ -1462,7 +1465,12 @@ of 140 weights differ), are refused.
 `decoder_head` or `decoder_proj`) and the classifier head is fresh: 220 copied, 4 reset and 4 dropped on `beit_tiny` at 32 px and
 patch 4, and 9, 4 and 4 on `et_tiny`. The classifier takes the source record's `patch_size` as a pin (D-036); a typed
 `model_args.patch_size` must repeat it. So a 64 px `beit` from a 32 px source keeps patch 4, has a 16x16 grid and resamples the
-relative position bias table of each of its 12 layers from (228, 3) to (964, 3) (208 copied). `model_args.use_mean_pooling=false`
+relative position bias table of each of its 12 layers from (228, 3) to (964, 3) (208 copied); such a pin is logged before the
+claim (`init: the source's record pins patch_size 4 (the recipe gives 16 at 64 px), so this run cuts its 64 px input into 16x16 =
+256 tokens`). unilm's rule grows a grid of W x W patches to at most `ceil(2 (1.5^(W - 1) - 1))` (3 cannot grow, 4 reaches 5, 8
+reaches 33, D-046): past it unilm's search for its ratio stops at its upper bound and the spline extrapolates, so a larger grid
+is refused, before the claim from the two runs' sizes (a CIFAR trunk at 32 px and patch 4 into a 224 px `beit`: 3136 tokens)
+and by the rule itself after it. `model_args.use_mean_pooling=false`
 adds a trunk `beit_backbone/final_norm`: set on both runs the pair transfers (222 copied, 2 reset, 4 dropped); set on one only, the
 weight check refuses it (`2 of 224 weights of beit have no source weight of their shape and no declared rule: ...` on the
 classifier only, `2 of 226 weights of the source run are neither used nor dropped by a declared rule: ...` on the source only, D-031).
@@ -1475,7 +1483,8 @@ geometric grid and reads it at the integer target displacements, the 3 class-tok
 it at 1e-6 on 5 cases (measured 0.0, the 3 rows bit-equal). No reference resizes the Energy Transformer's position table, so an
 `energy_transformer` on another grid is refused (after the claim, below). `et_mim` and `beit_mim` take a run of their own family
 only, at the same `transform_args.image_size`, `data.patch_size` and channels (checked before the claim); their decoder is
-their head, copied when the two records' `tokenizer` agree (always for `et_mim`, whose `tokenizer` is null) and fresh otherwise
+their head, copied when the two records' `tokenizer`, `mean` and `std` agree (for `et_mim`, whose `tokenizer` is null, the
+statistics alone, D-048) and fresh otherwise
 (`beit_tiny` with another tokenizer: 220 copied, 4 reset).
 
 **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed):
@@ -1490,6 +1499,7 @@ their head, copied when the two records' `tokenizer` agree (always for `et_mim`,
 | a pair not declared | `Invalid value for 'init': <family> (<task>) cannot seed <family> (<task>); <family> takes weights from <its declared sources>`, for example `beit (image_classification) cannot seed beit_mim (pretrain); beit_mim takes weights from beit_mim (pretrain)` |
 | a geometry the family sizes its weights by | `Invalid value for 'init': nbeats sizes its weights by data.lookback; the source trained at 168, this run asks for 336 (families of time_series_forecasting that keep every weight across a data.lookback change: ets, timestral, tirex, xlstm)`; every key that differs is named: `et_mim sizes its weights by transform_args.image_size and data.patch_size; the source trained at [32, 32] and 4, this run asks for [224, 224] and 16` |
 | another input scaling | `Invalid value for 'init': the source standardizes its input and this run takes its input in [0, 1] (transform_args.normalize)` |
+| a BEiT grid past its rule's reach | `Invalid value for 'init': the source's grid of 8x8 patches (32 px at patch_size 4, which init keeps) would become 56x56 at 224 px, 3136 tokens; unilm's rule grows the relative position bias table of a grid of 8x8 patches to at most 33x33 (beyond it the search for the ratio of the rule's geometric grid stops at its upper bound 1.5, so the outer target displacements lie past the source's last one and the spline extrapolates them); ask for transform_args.image_size of at most 132 px` |
 | a pinned argument changed | `Invalid value for 'model_args.patch_size': the source was built with patch_size=4 and init keeps the source's architecture` |
 | a classifier `model_args.pretrained` other than false | `Invalid value for 'model_args.pretrained': only false is offered, got True; a classifier is built with fresh weights (a path is not offered, and no official weights are read); init takes a run directory` |
 | depth `model_args.pretrained` under `init` | `Invalid value for 'model_args.pretrained': init replaces every weight, so the official weights would be read and overwritten` (for `false`: `so no official weights are read and the run keeps the warm-start rate with the head at 10x; remove model_args.pretrained`) |
@@ -1500,7 +1510,11 @@ both shapes> (+<k> more); nothing was copied (paths without the model's root)`, 
 of the source run are neither used nor dropped by a declared rule`); a smaller ViT grid, `vit pos_embed would shrink its grid
 from 16x16 to 8x8; only a larger grid is resampled (bicubic, no antialiasing)`; a smaller BEiT grid, `BEiT
 relative_position_bias_table would resample a grid of 16x16 patches to 8x8; only a larger grid is resampled (unilm's rule grows a
-grid; for a smaller one its search for the ratio stops at its lower bound)`; a BEiT source below 3x3 patches, `BEiT
+grid; for a smaller one its search for the ratio stops at its lower bound)`; a BEiT grid past the rule's reach, `BEiT
+relative_position_bias_table would resample a grid of 4x4 patches to 8x8; unilm's rule grows the relative position bias table of
+a grid of 4x4 patches to at most 5x5 (beyond it the search for the ratio of the rule's geometric grid stops at its upper bound
+1.5, so the outer target displacements lie past the source's last one and the spline extrapolates them)`; a BEiT source below
+3x3 patches, `BEiT
 relative_position_bias_table (12, 3): 12 rows are not the (2W - 1)^2 + 3 of a square grid of W x W patches with W at least 3;
 only such a table is resampled`; other heads, `BEiT relative_position_bias_table (228, 3) cannot become (964, 4); only its number
 of rows (the grid of patches) may change`; an Energy Transformer grid, `the Energy Transformer position table (1, 64, 192) (8x8
@@ -1511,7 +1525,7 @@ after the copy, and a run whose `best_model.keras` changed in between stops befo
 
 **The head** is copied only when the two `task.json` records say it means the same thing: classification and segmentation
 `class_names` equal as ordered lists (the same names in another order reset it), denoising `channels`, forecasting `horizon`,
-`head`, `quantile_levels` and `channels`, pretrain `tokenizer`; depth always copies (one output). Otherwise the family's declared head is fresh and
+`head`, `quantile_levels` and `channels`, pretrain `tokenizer`, `mean` and `std`; depth always copies (one output). Otherwise the family's declared head is fresh and
 the source's is dropped; across tasks the head is always fresh. A channel change of the input is a stem change and refused,
 except for `timestral`, whose weights do not depend on it.
 
@@ -1805,7 +1819,12 @@ refuses for Imagenette). "Smoothing" is the label smoothing of the loss, 0 every
 cross-entropy, `vit` has no smoothing (`vit/train_vit.py:290`; its `label_smoothing` field, which only refused a nonzero value, is deleted with its flag), the `label_smoothing` field of `resnet/train_resnet.py`
 (default 0.1, never read by its loss) is deleted with its flag, and the other two trainers default to 0. "Image size" is the dataset's own 224 (`transform_args.image_size`
 can change it). Other values of the recipes: ViT uses patch 16 at 224 with dropout 0.1 and attention dropout 0.1
-(`vit/train_vit.py:79-80,426-428`); the sgd weight decay of `resnet` is an L2 penalty on the model, of strength `wd / 2`
+(`vit/train_vit.py:79-80,426-428`); the patch of `vit`, `beit` and `energy_transformer` is 4 at a side of at most 32 px that 4
+divides (CIFAR's 32, MNIST's 28; a 16 px run went from one patch of 16 to 16 patches of 4, D-047) and 16 otherwise, and a patch
+that does not tile the side is refused before the claim (`Invalid value for 'model_args.patch_size': 'vit' cuts its input into
+square patches of 16 px (model_args.patch_size), which do not tile the image side of 30 px (transform_args.image_size); ask for a
+patch that divides the side, or a side it divides`); the sgd weight decay of `resnet` is an L2 penalty on the model, of strength
+`wd / 2`
 because Keras' `L2(l)` has the gradient `2 * l * w` and He et al.'s SGD weight decay `wd` adds `wd * w` to it (before step 10e of plan 98b866fb
 the penalty was `L2(wd)`, twice the paper's decay), and it reaches convolution and dense kernels only, where torchvision's reference
 trainer decays every parameter by default (BatchNorm scale and shift and the dense bias, 0.09 percent of `resnet18`'s parameters, get none: Goyal et al. 2017, arXiv 1706.02677 section 4.2, apply no decay to the BatchNorm coefficients, and the "no bias decay" rule of Bag of Tricks, He et al. 2019, arXiv 1812.01187, decays only the weights of convolution and fully connected layers, which is this rule);
@@ -1813,7 +1832,8 @@ trainer decays every parameter by default (BatchNorm scale and shift and the den
 reference trainer clips); adamw decays in the optimizer (the legacy `resnet` trainer under `--optimizer adamw` builds no penalty and hands the optimizer the typed `--weight-decay`, since step 13.2 of plan 98b866fb; before it built the `wd / 2` penalty as well and left the optimizer its own default 0.004); `convnext_v1` and `convnext_v2` use strides 4, drop path 0.1 and dropout 0 on both datasets; stochastic
 depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`; `beit` and `energy_transformer` use patch 16 at
 224, dropout 0, a global clip of 1.0 and drop path 0.1 (`beit`) or 12 energy steps (`energy_transformer`), and log one notice naming
-what no run measured (`recipes.recipe_notices_of`). The cliffordnet batches are measured, not
+what no run measured (`recipes.recipe_notices_of`), without the clauses about a number the request typed (`batch_size`, `epochs`
+or a smoke run, `optim_args.optimizer` or `lr`, `transform_args.augment`; D-044). The cliffordnet batches are measured, not
 legacy (Memory fit, below). The table is pinned, value by value, by
 `tests/test_train/test_api/test_the_imagenet_and_imagenette_recipes.py`, which also reads the legacy trainers'
 own defaults and compares.

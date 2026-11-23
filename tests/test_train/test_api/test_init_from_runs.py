@@ -33,8 +33,10 @@ weights' value its bar compared; it predicts and exports with its source gone; e
 The ``pretrain`` tests (plan-2026-11-19T081214-5c6cc105 Step 6, U4, D-008, D-012, D-035): an ``et_mim`` or ``beit_mim``
 run seeds its own family and its classifier (``energy_transformer``, ``beit``, whose patch the source's record pins), on
 the identity fake of CIFAR-10 (row ``i`` has the mean colour ``4i``, so the rows a stream holds read back); any other
-pair and another dataset geometry are refused before the claim; the pretrain bar under ``init`` stays strictly below
-the loaded weights' ``val_loss`` and the higher-is-better rule never judges it.
+pair, another dataset geometry and a BEiT grid past the reach of its resample rule are refused before the claim (D-046),
+and a pin that moves the patch off the recipe's is logged; the decoder is reset when the tokenizer or the input statistics
+differ (D-048); the pretrain bar under ``init`` stays strictly below the loaded weights' ``val_loss`` and the
+higher-is-better rule never judges it.
 """
 
 import builtins
@@ -45,6 +47,7 @@ import hashlib
 import inspect
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -275,7 +278,7 @@ BEIT_MIM_TARGET = {**PRETRAIN_TARGET, "model": "beit_mim/beit_tiny", "model_args
 BEIT_TARGET = {**CLASSIFIER, "model": "beit/beit_tiny"}
 
 #: ``name: (the source record, the task function, the request, the message pattern)``: a pair no row declares, another
-#: scaling and another dataset geometry (U4, D-008), each refused before the claim.
+#: scaling, another dataset geometry (U4, D-008) and a BEiT grid past its rule's reach (D-046), each refused before the claim.
 PRETRAIN_REFUSALS = {
     "classifier_into_pretrain": (lambda: classification_record("beit/beit_tiny"), train_pretrain, BEIT_MIM_TARGET,
                                  r"beit \(image_classification\) cannot seed beit_mim \(pretrain\); beit_mim takes "
@@ -296,6 +299,15 @@ PRETRAIN_REFUSALS = {
     "other_patch": (pretrain_record, train_pretrain,
                     {**PRETRAIN_TARGET, "data": {"dataset": "cifar10", "patch_size": 8}},
                     r"et_mim sizes its weights by data\.patch_size; the source trained at 4, this run asks for 8$"),
+    # D-046 (review R5): a CIFAR trunk pins patch 4 into a 224 px classifier, a grid past the reach of the BEiT rule.
+    "beit_beyond_reach": (lambda: pretrain_record("beit_mim/beit_tiny"), train_image_classification,
+                          {**BEIT_TARGET, "data": {"dataset": "imagenette"}}, re.escape(
+                              "the source's grid of 8x8 patches (32 px at patch_size 4, which init keeps) would become "
+                              "56x56 at 224 px, 3136 tokens; unilm's rule grows the relative position bias table of a grid "
+                              "of 8x8 patches to at most 33x33 (beyond it the search for the ratio of the rule's geometric "
+                              "grid stops at its upper bound 1.5, so the outer target displacements lie past the source's "
+                              "last one and the spline extrapolates them); ask for transform_args.image_size of at most "
+                              "132 px") + "$"),
 }
 
 
@@ -320,11 +332,20 @@ def test_preclaim_pretrain_a_source_of_the_same_family_is_taken_with_no_pin(worl
     assert not (tmp_path / "run").exists()
 
 
+#: The one info line before the claim when a cross-task pin moves the patch off the recipe's (D-046, review R5).
+PIN_LINE = ("init: the source's record pins patch_size 4 (the recipe gives 16 at 64 px), so this run cuts its 64 px input "
+            "into 16x16 = 256 tokens")
+
+
 def test_preclaim_pretrain_a_classifier_takes_its_patch_from_the_source_record_and_a_typed_one_must_repeat_it(
-        world, trees, tmp_path):
+        world, trees, tmp_path, caplog):
     """D-035: a 64 px beit from a 32/4 beit_mim keeps patch 4 (grid 16; its patch rule gives 16, a 4x4 grid). The pin is
-    read from the source's record: its ``config.json`` records no ``used.model_args`` here."""
+    read from the source's record: its ``config.json`` records no ``used.model_args`` here. The pin is logged once."""
+    caplog.set_level(logging.INFO, logger="dl")
     source = write_source(tmp_path / "source", pretrain_record("beit_mim/beit_tiny"), {})
+
+    def pin_lines():
+        return [record.getMessage() for record in caplog.records if "pins patch_size" in record.getMessage()]
 
     def resolved(**changes: Any) -> Any:
         config = validate(ImageClassificationConfig, classify(str(tmp_path / "run"), trees["ten"], 64,
@@ -333,11 +354,14 @@ def test_preclaim_pretrain_a_classifier_takes_its_patch_from_the_source_record_a
         return trainer, context, trainer._model_kwargs(final, context)["patch_size"]
 
     for typed in ({}, {"model_args": {"patch_size": 4}}):
+        caplog.clear()
         trainer, context, patch = resolved(init=str(source), **typed)
         assert trainer._init_source.pins == context.pinned == {"patch_size": 4} and patch == 4
         assert trainer._init_source.relation == registry.MODELS["beit"].transfer.sources[("pretrain", "beit_mim")]
+        assert pin_lines() == [PIN_LINE]
+    caplog.clear()
     _, context, patch = resolved()
-    assert (context.pinned, patch) == ({}, 16)
+    assert (context.pinned, patch, pin_lines()) == ({}, 16, [])
     with pytest.raises(ConfigError, match=r"Invalid value for 'model_args\.patch_size': the source was built with "
                                           r"patch_size=4 and init keeps the source's architecture"):
         resolved(init=str(source), model_args={"patch_size": 16})
@@ -350,6 +374,17 @@ def test_preclaim_pretrain_the_decoder_head_is_keyed_by_the_tokenizers_sha256():
     assert init_from.head_differs("pretrain", record, dict(record)) is False
     assert init_from.head_differs("pretrain", record, {**record, "tokenizer": "b" * 64}) is True
     assert init_from.head_differs("pretrain", pretrain_record(), pretrain_record()) is False
+
+
+@pytest.mark.parametrize("model", ["et_mim/et_tiny", "beit_mim/beit_tiny"])
+def test_preclaim_pretrain_the_decoder_head_is_reset_when_the_input_statistics_differ(model):
+    """D-048 (review R7): an imagenette run overridden to CIFAR's 32 px and patch 4 passes the identity check against a
+    cifar10 source, but its input is standardized with other statistics, which ET's pixel decoder emits."""
+    record = pretrain_record(model)
+    assert init_from.HEAD_KEYS["pretrain"] == ("tokenizer", "mean", "std")
+    for key in ("mean", "std"):
+        assert init_from.head_differs("pretrain", record, {**record, key: [0.45, 0.44, 0.41]}) is True, key
+    assert init_from.head_differs("pretrain", record, {**record, "mean": list(record["mean"])}) is False
 
 
 def test_preclaim_a_row_with_no_transfer_is_refused_by_name(world, tmp_path, monkeypatch):

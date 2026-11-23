@@ -14,7 +14,8 @@ dtypes all agree.
 A ``resample`` key is a regex that must match the whole path, so one key covers a table in every
 encoder layer at any depth; a path two keys match is refused (plan-2026-11-19T081214-5c6cc105 D-005).
 The BEiT relative position bias rule is held to unilm's own resize, run verbatim and frozen into
-``data/beit_relpos_reference.npz`` by ``data/generate_beit_relpos_reference.py`` (D-004); the Energy
+``data/beit_relpos_reference.npz`` by ``data/generate_beit_relpos_reference.py`` (D-004), and refuses a growth past
+the reach of unilm's search for its ratio, where the spline would extrapolate (the fixture's 4 to 8 case, D-046); the Energy
 Transformer position table has no reference rule, so its grid change is refused by name (D-006).
 
 ``model.weights`` holds no ``SeedGenerator`` state in Keras 3.8 (it is in ``model.variables``),
@@ -444,6 +445,8 @@ def test_an_unknown_rule_name_is_a_spec_error():
 #: with torch and scipy 1.13.1); case ``<S>_<D>_<heads>``: a table of ``S x S`` patches resized to ``D x D``.
 REFERENCE = Path(__file__).parent / "data" / "beit_relpos_reference.npz"
 REFERENCE_CASES = ("8_14_3", "8_16_3", "4_8_3", "14_28_3", "8_16_12")
+#: The case where unilm's search for the ratio saturates at its upper bound: refused since plan 5c6cc105 D-046.
+SATURATED = "4_8_3"
 #: The one key that names the table of every BEiT encoder layer.
 BEIT_TABLE = r"beit_backbone/encoder_layer_\d+/attention/relative_position_bias_table"
 ET_TABLE = "et_backbone/pos_embed/pos_embedding"
@@ -490,7 +493,7 @@ def beit_spec(extra: Optional[Mapping[str, str]] = None) -> TransferSpec:
     return TransferSpec(head=("head",), resample={BEIT_TABLE: "beit_relpos_cubic", **(extra or {})})
 
 
-@pytest.mark.parametrize("case", REFERENCE_CASES)
+@pytest.mark.parametrize("case", [case for case in REFERENCE_CASES if case != SATURATED])
 def test_the_beit_rule_equals_unilms_own_resize_and_copies_the_extra_rows(case, unilm):
     table, want = unilm[f"{case}__table"], unilm[f"{case}__resized"]
     got = init_from.beit_relpos_cubic(table, want.shape)
@@ -509,6 +512,43 @@ def test_the_reference_holds_the_case_where_unilms_search_saturates(unilm):
     q = {case: float(unilm[f"{case}__q"]) for case in REFERENCE_CASES}
     assert 1.5 - 1e-6 <= q.pop("4_8_3") < 1.5
     assert all(1.01 < value < 1.4 for value in q.values()), q
+
+
+# plan 5c6cc105 D-046 (review R5): a growth past the reach of unilm's search is refused, by the rule and before the claim.
+#: ``source side: the largest side unilm's rule grows it to`` (``ceil(2 (1.5^(W - 1) - 1))``: past it, ``W - 1`` steps at
+#: the ratio's upper bound 1.5 fall short of the target's outer displacement; scratch_step9_1/reach_probe.log runs
+#: unilm's search verbatim on each side of every boundary).
+REACH = {3: 3, 4: 5, 5: 9, 6: 14, 7: 21, 8: 33, 14: 388}
+
+
+def test_the_reach_is_where_unilms_search_saturates_in_every_reference_case(unilm):
+    assert {side: init_from.beit_reach(side) for side in REACH} == REACH
+    for case in REFERENCE_CASES:
+        src, dst, _ = (int(part) for part in case.split("_"))
+        assert (float(unilm[f"{case}__q"]) >= 1.5 - 1e-6) == (dst > init_from.beit_reach(src)), case
+
+
+@pytest.mark.parametrize("src,dst", [(4, 8), (8, 34), (3, 4), (8, 56)])
+def test_a_growth_past_the_reach_is_refused_naming_both_grids_and_the_reach(src, dst, unilm):
+    rows = (beit_rows(src), beit_rows(dst))
+    message = refuse(beit_layers(2, rows[0], seed=1, first=unilm["4_8_3__table"] if src == 4 else None),
+                     beit_layers(2, rows[1], seed=2), beit_spec())
+    reach = REACH[src]
+    assert message == (
+        f"Invalid value for 'init': BEiT relative_position_bias_table would resample a grid of {src}x{src} patches to "
+        f"{dst}x{dst}; unilm's rule grows the relative position bias table of a grid of {src}x{src} patches to at most "
+        f"{reach}x{reach} (beyond it the search for the ratio of the rule's geometric grid stops at its upper bound 1.5, "
+        "so the outer target displacements lie past the source's last one and the spline extrapolates them)")
+
+
+@pytest.mark.parametrize("src,dst", [(8, 33), (4, 5), (24, 25)], ids=["reach_of_8", "reach_of_4", "lower_bound"])
+def test_a_growth_within_the_reach_is_resampled(src, dst):
+    """The reach itself, and unilm's other saturation (24 to 25: q stops at its LOWER bound 1.01, the targets inside the
+    source's positions), are resampled."""
+    table = np.random.default_rng(src).standard_normal((beit_rows(src), 2)).astype("float32")
+    got = init_from.beit_relpos_cubic(table, (beit_rows(dst), 2))
+    assert got.shape == (beit_rows(dst), 2) and np.isfinite(got).all()
+    np.testing.assert_array_equal(got[-3:], table[-3:])
 
 
 @pytest.mark.parametrize("layers", [12, 24])

@@ -62,7 +62,9 @@ Interface contract
     :return: ``[(level, text)]``, the recipe's doubts the task's ``recipe_notices`` hook prints (D-012).
 
 ``builtin_pretrain_models()``
-    :return: the two :class:`~train.api.registry.ModelSpec` rows, freshly built, each with its ``init`` transfer.
+    :return: the two :class:`~train.api.registry.ModelSpec` rows, freshly built, each with its ``init`` transfer and the
+        observer of its classifier row (``recipes.observe_energy_transformer``, ``recipes.observe_beit``), so a loaded
+        file of another family or variant than its record names is refused (D-042).
 
 Recipes
 -------
@@ -392,16 +394,20 @@ def recipe_notices_of(family: str) -> List[Tuple[str, str]]:
 
 def _pretrain_transfer(family: str) -> TransferSpec:
     """Return what ``init`` moves between two runs of the pretrain ``family`` (paths relative to the model)."""
-    # DECISION plan-2026-11-19T081214-5c6cc105/D-008
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-008 (amended by D-048)
     # The family's OWN runs only (no `sources`: U4 rules out a classifier source, and no other family shares a decoder);
-    # the decoder is the head, reset when the tokenizer differs (init_from.HEAD_KEYS); size and patch are fixed, so
-    # another geometry is refused before the claim. Do NOT add a source or drop a fixed key: no rule resizes the patch
-    # kernel or a position table of these models.
+    # the decoder is the head, reset when the tokenizer or the input statistics differ (init_from.HEAD_KEYS); size and
+    # patch are fixed, so another geometry is refused before the claim. Do NOT add a source or drop a fixed key: no rule
+    # resizes the patch kernel or a position table of these models.
     return TransferSpec(head=DECODERS[family], fixed=("channels", "input_size", "patch_size"))
 
 
 def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
     """Return the two pretrain family specs, freshly built; see the module contract."""
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-042
+    # Each row reads its classifier row's observer (the backbone layer's `scale`, measured on both MIM files). Do NOT
+    # drop `observe`: the variant tables are module-level, so without it `load_model` checks neither family nor variant
+    # (an et_tiny file under a record naming et_small or beit_mim loaded, and export wrote that record beside it).
     return (
         ModelSpec(
             family=ET,
@@ -410,6 +416,7 @@ def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=ET_RECIPE,
             resolve_model_args=f"{_HERE}:resolve_pretrain_args",
+            observe=f"{recipes.__name__}:observe_energy_transformer",
             transfer=_pretrain_transfer(ET),
         ),
         ModelSpec(
@@ -419,6 +426,7 @@ def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=BEIT_RECIPE,
             resolve_model_args=f"{_HERE}:resolve_pretrain_args",
+            observe=f"{recipes.__name__}:observe_beit",
             transfer=_pretrain_transfer(BEIT),
         ),
     )
