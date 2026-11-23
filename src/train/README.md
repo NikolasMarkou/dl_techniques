@@ -858,8 +858,8 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
 * **Follow-up plans**: starting a run from an earlier run's weights is in the code and its GPU gate has run (Phase 4g,
   `init`, "Starting from an earlier run" below, with the gate under "Measured: the `init` gate"; design and decisions in
   `research/roadmap/20261117_train_api_init_from.md`). The pretrain record with `predict` and `export`, and the `beit` and
-  `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code (Phase 4h, plan 5c6cc105); their GPU gate
-  goes under "Measured: the Phase 4h gate" below. Named and not started: the language tasks (the
+  `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code and their GPU gate has run (Phase 4h,
+  plan 5c6cc105, with the gate under "Measured: the Phase 4h gate" below). Named and not started: the language tasks (the
   next user of `fit_kwargs` and `resume_stream`, after `time_series_forecasting` and `depth_estimation` below), DINO, the BEiT
   tokenizer as a method of its own (`beit_tokenizer`), and the Phase 5 wrappers (the repo map entry among them).
 
@@ -1608,7 +1608,77 @@ gate added only `p4g_gate_*` run directories to `results/`: 76 entries before, 8
 
 <!-- pretrain-gate:begin -->
 **Measured: the Phase 4h gate** (plan 5c6cc105: the pretrain sources, the two classifiers from them and from scratch, pretrain
-from pretrain, the Energy Transformer refusal, `predict` and `export`). Not run yet: the numbers of the GPU gate on the final code go here.
+from pretrain, the Energy Transformer refusal, `predict` and `export`). Run on the code HEAD `14f3ef3a6` of the branch
+`train-api/phase-4h` (the commits after it change no file under `src/` but this README, and under `tests/` only the README
+command test), one job at a time, at the recipes' learning rates and seed 42: the GPU runs on an NVIDIA GeForce RTX 4090
+(`CUDA_VISIBLE_DEVICES=0`, no `--gpu`), the refusal and `predict` and `export` on the CPU. Each log names the HEAD and the
+worktree `src` as the origin of `dl_techniques` and `train`; the two sources' `best_model.keras` and the tokenizer kept their
+sha256 through every job. With none of the new rows used nothing changed: three CPU reference runs (API classification, the
+legacy convnext trainer, API segmentation) reproduce the runs recorded before Phase 4g exactly (`GOLDEN: EXACT for api,
+convnext, seg`), the `checkpoint` key that Phase 4g renamed `init` aside. Before those, the same night ran this work's targeted
+tests on the CPU at that HEAD: 67 pytest commands, 5,937 tests run, 1 failed and 4 skipped (the failure, in
+`test_the_readme_commands_run_to_the_claim.py`: this README's forecasting `init` example named a run that no command trained,
+wrong since Phase 4g wrote the `init` section; the example now trains its source first), and 73 of 73 planted mutants made their
+tests fail (1 stale spec, not run). Every one of the gate's 84 claims holds; the predictions below are reported apart. Every
+number is read by script from the runs' own files and the night's logs. Step is the median epoch after the first over its steps,
+peak memory TensorFlow's GPU allocator peak.
+
+| Arm | Run | Copied, resampled, reset, dropped | Relation, split | Bar | Loaded weights at epoch zero | Best (epoch of) | Verdict | Step | Peak memory | Wall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `et_source` | `et_mim/et_tiny`, cifar10 at 32 px, patch 4, 12 epochs | - | - | `val_loss` below min(zero patches 1.0041, untrained 2.3379) | - | 0.1751 (12 of 12) | met, exit 0 | 11.4 ms | 1,027.9 MiB | 363 s |
+| `beit_source` | `beit_mim/beit_tiny`, cifar10 at 32 px, patch 4, tokenizer `p4d_tokenizer_cifar10_e5`, 12 epochs | - | - | `val_loss` below min(unigram codes 5.8716, untrained 6.2661) | - | 3.7778 (12 of 12) | met, exit 0 | 57.9 ms | 1,308.2 MiB | 1,293 s |
+| `et_cls_init` | `energy_transformer/et_tiny`, cifar10, 20 epochs, from `et_source` | 9, 0, 4, 4 | `cross_task`, `same_split` | `val_accuracy` above 0.2 and above the loaded weights | 0.1022 | 0.5598 (19 of 20) | met, exit 0 | 20.0 ms | 1,738.2 MiB | 352 s |
+| `et_cls_scratch` | `energy_transformer/et_tiny`, cifar10, 20 epochs | - | - | `val_accuracy` above 0.2 | - | 0.5988 (20 of 20) | met, exit 0 | 19.6 ms | 1,738.1 MiB | 374 s |
+| `beit_cls_init` | `beit/beit_tiny`, cifar10, 20 epochs, from `beit_source` | 220, 0, 4, 4 | `cross_task`, `same_split` | `val_accuracy` above 0.2 and above the loaded weights | 0.0724 | 0.8660 (19 of 20) | met, exit 0 | 49.1 ms | 2,297.3 MiB | 969 s |
+| `beit_cls_scratch` | `beit/beit_tiny`, cifar10, 20 epochs | - | - | `val_accuracy` above 0.2 | - | 0.7220 (19 of 20) | met, exit 0 | 45.7 ms | 2,297.4 MiB | 948 s |
+| `beit_cls_64_init` | `beit/beit_tiny`, imagenette, 32 to 64 px, patch 4 from the source's record, 10 epochs, from `beit_source` | 208, 12, 4, 4 | `cross_task`, `different_data` | `val_accuracy` above 0.2 and above the loaded weights | 0.1533 | 0.7791 (10 of 10) | met, exit 0 | 176.4 ms | 6,546.2 MiB | 790 s |
+| `beit_cls_64_scratch` | `beit/beit_tiny`, imagenette at 64 px, `model_args.patch_size=4`, 10 epochs | - | - | `val_accuracy` above 0.2 | - | 0.6575 (10 of 10) | met, exit 0 | 165.1 ms | 6,545.7 MiB | 745 s |
+| `et_mim_from_et_mim` | `et_mim/et_tiny`, cifar10, 4 epochs, from `et_source` | 13, 0, 0, 0 | `same_task`, `same_split` | `val_loss` below min(zero patches 1.0041, loaded) | 0.1751, binds | 0.1783 (4 of 4) | missed, exit 1 | 10.0 ms | 1,027.6 MiB | 181 s |
+| `beit_mim_from_beit_mim` | `beit_mim/beit_tiny`, cifar10, the source's tokenizer, 4 epochs, from `beit_source` | 224, 0, 0, 0 | `same_task`, `same_split` | `val_loss` below min(unigram codes 5.8716, loaded) | 3.7778, binds | 3.6336 (2 of 4) | met, exit 0 | 62.4 ms | 1,300.8 MiB | 690 s |
+
+Each `init` arm's copied, resampled, reset and dropped counts are the ones the production-order census of
+`test_init_from_families.py` derives in the same night's tests, and its `task.json` and summary hold the same `init` block.
+`beit_cls_64_init` kept the source record's `patch_size` 4 where the recipe gives 16 at 64 px, so it cut its input into 16 x 16
+= 256 tokens (a notice in its `run.log`), and resampled the relative position bias table of each of its 12 layers from (228, 3)
+to (964, 3) with `beit_relpos_cubic`; its split is `different_data`, since the source trained on cifar10.
+
+**Predictions** (written before the runs; reported, not counted among the claims). `beit` from its MIM source beat its scratch
+control: best `val_accuracy` 0.8660 against 0.7220 on cifar10 (test accuracy 0.8595 against 0.7272), and 0.7791 against 0.6575
+at 64 px on Imagenette (test 0.7743 against 0.6685; no prediction was written for this pair). `energy_transformer` from its MIM
+source did not: 0.5598 against 0.5988 (test 0.5670 against 0.5987), a missed prediction, reported as measured; nothing was tuned
+or run again.
+
+**Pretrain from pretrain.** Both arms copied every weight of their source (13 and 224), the decoder included, since each pair of
+records agrees on `tokenizer`, `mean` and `std`, and at epoch zero the loaded weights scored the source's best `val_loss` to the
+last bit, 0.17507707 and 3.7777965 (the selection masks are fixed by seed, split and row, so the value depends on the weights
+alone); that value is the term of the bar that binds. `beit_mim` went below it, 3.6336 at its epoch 2, exit 0. `et_mim` did not:
+its `val_loss` was 0.1891 after the first epoch and 0.1783 after the last, above the loaded 0.1751, so it exited 1, a missed
+prediction. The bar under `init` exists to fail a fine-tune that does not improve on its source, so that exit is the rule
+working, not a fault. Both arms kept their source's optimizer settings, so each ran its schedule again from the warmup (a rate
+here is the one at an epoch's first step): `et_mim` was back at its lr 5e-4 after 2 epochs, where `et_source` had begun its last
+epoch at 7.75e-5; the 10 warmup epochs of `beit_mim` outlast the run (its `run.log` warns that the rate never reaches 1.5e-3),
+so it began its last epoch at 4.50e-4, where `beit_source` had begun its last at 1.47e-3. The gate did not test whether this
+difference decided the two outcomes.
+
+**The refusal.** `energy_transformer/et_tiny` at 64 px on Imagenette from `et_source` exited 2 after 11 s on the CPU, before the
+claim: no run directory was created and no weight was copied. The error names the source's grid of 8 x 8 patches (32 px at
+`patch_size` 4, which `init` keeps) and the 16 x 16 grid of 256 tokens it would become, then says `the Energy Transformer
+position table cannot change its grid: no reference rule resamples it (the Energy Transformer paper describes no fine-tuning at
+another resolution); train this run at the source's grid (its image_size and patch_size)`.
+
+**`predict` and `export`** of both sources, on the CPU: 20 checks, all holding. `predict` on 8 cifar10 test images wrote, for
+each source, one float32 `.npy` of shape (64, 192) per image, a row per patch of the 8 x 8 grid, and `index.json` last. `export`
+wrote 7 cells, each with a `<out>.task.json` equal to its run's `task.json`, and each answered the same images within the
+check's bound, 1e-4 times the largest absolute value in `predict`'s arrays (56.89 for `et_mim`, 6.383 for `beit_mim`). The
+largest absolute difference from those arrays, in the order `keras`, `saved_model`, `tflite`, `onnx`: 0.0, 3.1e-5, refused,
+3.1e-5 for `et_mim` and 0.0, 1.9e-6, 6.0e-6, 2.9e-6 for `beit_mim`. The refused cell, `tflite` of `et_mim`, exited 2 and wrote
+nothing (the pretrain section above gives its reason).
+
+Both `energy_transformer` runs end with the status `ok_reload_unverified`: their `final_model.keras` reloaded with outputs up to
+1.2e-3 and 9.9e-4 apart, where their `run.log` allows 1e-5 (TF32 on). Their `best_model.keras`, which the test accuracies above
+are read from, scored the test split as the in-memory best weights did (largest gap 0.0 and 0.0); every other run ends `ok`, and
+no claim of the gate reads the status. The gate added only `p4h_gate_<arm>_14f3ef3a` run directories to `results/`: 85 entries
+before, 95 after.
 <!-- pretrain-gate:end -->
 
 **Figures, analysis and TensorBoard**: five keys decide what is written besides the models and the

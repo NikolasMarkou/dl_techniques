@@ -227,8 +227,10 @@ score, and the forecasting and depth bars' epoch-zero term is the loaded weights
 supersedes item 8 of Section 1 and the `checkpoint` row of Section 4. Design, decisions and what changed on the way:
 `research/roadmap/20261117_train_api_init_from.md`; user-facing rules: `src/train/README.md`, "Starting from an earlier run".
 
-**Phase 4h: the pretrain record. Code done, GPU gate pending** (branch `train-api/phase-4h`, plan 5c6cc105; the gate's numbers
-go into `src/train/README.md`, "Measured: the Phase 4h gate"). Straight after 4g and before the language tasks (user,
+**Phase 4h: the pretrain record. Code done, GPU gate run** (branch `train-api/phase-4h`, plan 5c6cc105; the gate's numbers
+are in `src/train/README.md`, "Measured: the Phase 4h gate": every claim held, and two predictions missed, reported with
+their numbers: the `energy_transformer` classifier from its MIM source scored below its scratch control, and the `et_mim`
+run from its source did not improve on it, the bar under `init` failing it). Straight after 4g and before the language tasks (user,
 2026-11-17). The pretrain rows are renamed `et_mim` and `beit_mim`, with no alias; a pretrain run writes a schema-v2 `task.json`
 (the sixth record kind), and `predict` and `export` give the backbone's patch-token embeddings (`et_mim` tflite refused:
 TensorFlow 2.18's converter mistranslates the Hopfield update). image_classification gains `beit` and `energy_transformer`, the
