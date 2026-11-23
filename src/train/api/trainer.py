@@ -305,10 +305,11 @@ Hooks (override in a task)
     resolved config before the run directory is claimed. Default: nothing is checked.
 ``init_identity(config, context)``
     What this run's ``task.json`` will say about its input, before the claim and without TensorFlow: a
-    mapping of record keys (``channels``, ``lookback``, ``horizon``, ``normalize``, ``data_range``; only those
-    the task's record has). An ``init`` source's record is compared with it (the family's ``fixed`` keys and
-    the input scaling, :func:`train.api.init_from.read_source`). Called only when ``init`` is set and the run
-    is not a resume. Default: refuses ``init``, naming the task (pretrain keeps it).
+    mapping of record keys (``channels``, ``lookback``, ``horizon``, ``input_size``, ``patch_size``,
+    ``normalize``, ``data_range``; only those the task's record has). An ``init`` source's record is compared
+    with it (the family's ``fixed`` keys and the input scaling, :func:`train.api.init_from.read_source`). Called
+    only when ``init`` is set and the run is not a resume. Default: refuses ``init``, naming the task (every
+    built-in task overrides it).
 ``init_overlap(source, config, data)``
     The ``split`` of the ``init`` block (:func:`train.api.init_from.split_block`): the source's training data
     (``source`` is the :class:`~train.api.init_from.Source` read before the claim) against this run's selection and

@@ -97,7 +97,7 @@ from .args import ERASING_PRESET, AutoContext, OptimArgs
 from .config import AUTO
 from .errors import ConfigError, UnresolvedAutoError
 from . import registry
-from .pretrain_args import BEIT as BEIT_MIM, ET as ET_MIM, TASK as PRETRAIN
+from .pretrain_args import BEIT as BEIT_MIM, DECODERS, ET as ET_MIM, TASK as PRETRAIN
 from .registry import CrossTask, ModelSpec, TransferSpec
 
 # ---------------------------------------------------------------------
@@ -876,12 +876,12 @@ BEIT_TRANSFER = TransferSpec(
         "beit_backbone/pos_embed/pos_embedding": "vit_pos_bicubic",
     },
     pinned=("patch_size",), fixed=("channels",),
-    sources={(PRETRAIN, BEIT_MIM): CrossTask(drop=("decoder_norm", "decoder_head"))},
+    sources={(PRETRAIN, BEIT_MIM): CrossTask(drop=DECODERS[BEIT_MIM])},
 )
 ET_TRANSFER = TransferSpec(
     head=("head_norm", "head_dense"), resample={"et_backbone/pos_embed/pos_embedding": "et_pos_refused"},
     pinned=("patch_size",), fixed=("channels",),
-    sources={(PRETRAIN, ET_MIM): CrossTask(drop=("decoder_norm", "decoder_proj"))},
+    sources={(PRETRAIN, ET_MIM): CrossTask(drop=DECODERS[ET_MIM])},
 )
 
 

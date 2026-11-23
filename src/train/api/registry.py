@@ -198,9 +198,8 @@ class ModelSpec:
         drawn from :data:`KNOWN_PROPERTIES` (a tuple of distinct names). ``()`` (the default):
         none, and no task reads anything here. Nothing in the shared sequence switches on it.
     :param transfer: how ``init`` moves an earlier run's weights into this family
-        (:class:`TransferSpec`); ``None`` (the default) when the family takes none.
-    :param transfer_reason: why ``transfer`` is ``None``; ``init`` names it in its refusal. A
-        built-in row declares one of the two (the census in ``test_init_from_families.py``).
+        (:class:`TransferSpec`). Every built-in row declares one (the census in
+        ``test_init_from_families.py``); ``None`` (the default) is refused by ``init`` by name.
     """
 
     family: str
@@ -213,7 +212,6 @@ class ModelSpec:
     observe: Optional[str] = None
     properties: Tuple[str, ...] = ()
     transfer: Optional[TransferSpec] = None
-    transfer_reason: str = ""
 
     def __post_init__(self) -> None:
         if not self.family or "/" in self.family:

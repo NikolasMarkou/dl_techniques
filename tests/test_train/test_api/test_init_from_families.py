@@ -1,8 +1,8 @@
 """The census of ``init``: every family row's ``TransferSpec`` held against its real model.
 
-plan-2026-11-18T072904-0fd54b91 Step 3 (D-007, D-030, D-031, D-033). Every registered row of a task
-that takes ``init`` declares a :class:`~train.api.registry.TransferSpec`; a pretrain row declares
-none and gives a reason. Each row's variant below is built through the real resolver path (the
+plan-2026-11-18T072904-0fd54b91 Step 3 (D-007, D-030, D-031, D-033). Every registered row declares a
+:class:`~train.api.registry.TransferSpec` (the two pretrain rows since plan 5c6cc105 Step 6, at the
+end of this file). The variant of each row of the other tasks is built through the real resolver path (the
 recipe, ``OptimArgs.resolve_auto``, the family resolver, ``recipes.build_model``) at its task's
 source geometry, then at each change the census names, one key at a time: the head (classes; a
 forecasting horizon or channel count), the image size, the channels, the lookback, a deeper variant
@@ -23,7 +23,10 @@ plan-2026-11-19T081214-5c6cc105 Step 5 adds the ``beit`` and ``energy_transforme
 pretrain sources (``beit_mim``, ``et_mim``, built at the pretrain geometry of CIFAR-10): a larger grid
 resamples every BEiT relative-bias table (and the absolute table where the option is on) and is refused
 by the Energy Transformer position rule, a class-token head resets on a change of classes, and a pooling
-mismatch is refused. A grid change must resample exactly the weights whose shape changed.
+mismatch is refused. A grid change must resample exactly the weights whose shape changed. Step 6 holds
+the two pretrain rows (D-008): their own family only, the decoder their head, the size and the patch
+fixed; in the production order every weight is copied, another tokenizer resets exactly the decoder, and
+another image size is refused at the weight level, behind the refusal before the claim.
 """
 
 import dataclasses
@@ -167,28 +170,24 @@ def changes() -> List[Tuple[str, str]]:
 
 
 def undeclared(specs: Mapping[str, registry.ModelSpec]) -> List[str]:
-    """The rows that declare neither a spec nor a reason, or both."""
-    return sorted(name for name, spec in specs.items() if (spec.transfer is None) == (not spec.transfer_reason))
+    """The rows that declare no spec (``init`` refuses such a row with one generic sentence, D-011)."""
+    return sorted(name for name, spec in specs.items() if spec.transfer is None)
 
 
 # --- declarations --------------------------------------------------------------------------------
 
 
-def test_every_row_declares_a_spec_or_a_reason():
+def test_every_row_declares_a_spec():
     assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN}
     assert all(len(spec.tasks) == 1 for spec in registry.MODELS.values())
     assert undeclared(registry.MODELS) == []
-    for family, spec in registry.MODELS.items():
-        assert (spec.transfer is None) == (task_of(family) == PRETRAIN), family
-    pretrain = [spec for spec in registry.MODELS.values() if spec.tasks[0] == PRETRAIN]
-    assert len(pretrain) == 2 and all("pretrain does not start from earlier weights" in spec.transfer_reason
-                                      for spec in pretrain)
+    assert sum(task_of(family) == PRETRAIN for family in registry.MODELS) == 2
 
 
-def test_a_row_that_declares_neither_or_both_is_found():
+def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():
     plain = registry.ModelSpec(family="plain", factory="m:f", variants_attr="m:V", tasks=(CLASSIFICATION,))
-    both = dataclasses.replace(plain, family="both", transfer=registry.TransferSpec(), transfer_reason="why")
-    assert undeclared({"plain": plain, "both": both, "vit": registry.MODELS["vit"]}) == ["both", "plain"]
+    assert undeclared({"plain": plain, "vit": registry.MODELS["vit"]}) == ["plain"]
+    assert "transfer_reason" not in {field.name for field in dataclasses.fields(registry.ModelSpec)}  # D-011
 
 
 def test_the_census_covers_every_row_and_measures_every_declaration():
@@ -441,8 +440,8 @@ def test_the_pretrain_geometry_is_the_classifier_patch_rule_on_both_datasets():
 def test_production_order_a_pretrain_source_at_a_larger_grid(family, archives):
     """beit_mim 32/4 into beit 64/4 resamples every relative-bias table; et_mim into energy_transformer is refused."""
     spec = registry.MODELS[family].transfer
-    # A cross-task source pins nothing, so the run asks for the source's patch itself: at 64 px the patch rule gives 16
-    # (a 4x4 grid, a SMALLER one, which the BEiT rule refuses while planning).
+    # A run takes the source record's patch as a pin (D-035); a build here passes it itself. Without it the patch rule
+    # gives 16 at 64 px (a 4x4 grid, a SMALLER one, which the BEiT rule refuses while planning).
     patch = {"patch_size": GEOMETRY["cifar10"][1]}
     loaded, target = loaded_beside(family, VARIANT[family], LARGER, patch, archives, MIM_SOURCE[family], SOURCE[PRETRAIN])
     relation = spec.sources[(PRETRAIN, MIM_SOURCE[family])]
@@ -498,3 +497,42 @@ def test_production_order_the_absolute_beit_table_is_resampled_by_the_vit_rule(a
     assert rules.pop("beit_backbone/pos_embed/pos_embedding") == "vit_pos_bicubic"
     assert sorted(rules) == sorted(relative_tables(target)) and set(rules.values()) == {"beit_relpos_cubic"}
     assert sorted(path for path, *_ in plan.resampled) == reshaped(loaded, target)
+
+
+# --- the pretrain rows (plan 5c6cc105 Step 6, D-008): their own family only, the decoder their head ------------------
+
+#: Each pretrain row's decoder: the head a pretrain source on another tokenizer resets, and what a classifier drops.
+DECODER = {ET_MIM: ("decoder_norm", "decoder_proj"), BEIT_MIM: ("decoder_norm", "decoder_head")}
+
+
+def test_the_pretrain_rows_take_their_own_family_only_with_the_size_and_the_patch_fixed():
+    for family, decoder in DECODER.items():
+        spec = registry.MODELS[family].transfer
+        assert (spec.head, spec.fixed, dict(spec.sources), spec.pinned) == (
+            decoder, ("channels", "input_size", "patch_size"), {}, ()), family
+        assert not spec.resample and spec.grow is None, family
+        classifier = next(name for name, source in MIM_SOURCE.items() if source == family)
+        assert registry.MODELS[classifier].transfer.sources[(PRETRAIN, family)].drop == decoder, family
+
+
+@pytest.mark.parametrize("family", sorted(DECODER))
+def test_production_order_a_pretrain_row_copies_every_weight_and_resets_exactly_its_decoder(family, archives):
+    spec = registry.MODELS[family].transfer
+    loaded, target = loaded_beside(family, VARIANT[family], SOURCE[PRETRAIN], {}, archives)
+    got, plan, message = verdict(family, "same, production order", loaded, target, spec)
+    assert got == "PASS" and len(plan.copied) == plan.n_source == plan.n_target > 0, message
+    decoder = sorted(path for path in plan.copied if path.startswith(tuple(f"{name}/" for name in spec.head)))
+    # Each declared head names a weight: a name that matched none would reset nothing on another tokenizer.
+    assert all(any(path.startswith(f"{name}/") for path in decoder) for name in spec.head), decoder
+    got, plan, message = verdict(family, "another tokenizer, production order", loaded, target, spec, head_reset=True)
+    assert got == "PASS" and sorted(plan.reset) == sorted(plan.dropped) == decoder, message
+    assert len(plan.copied) == plan.n_target - len(decoder)
+
+
+@pytest.mark.parametrize("family", sorted(DECODER))
+def test_production_order_a_pretrain_row_at_another_size_is_refused_at_the_weight_level(family, archives):
+    """Behind the refusal before the claim (``fixed``): no rule resizes a pretrain row's tables; nothing is copied."""
+    spec = registry.MODELS[family].transfer
+    loaded, target = loaded_beside(family, VARIANT[family], {**SOURCE[PRETRAIN], "image_size": 64}, {}, archives)
+    got, plan, message = verdict(family, "image_size 32 to 64, production order", loaded, target, spec)
+    assert got == "REFUSE" and "nothing was copied" in message and plan.missing, message

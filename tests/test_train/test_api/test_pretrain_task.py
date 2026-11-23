@@ -146,6 +146,8 @@ OPTIONAL_HOOKS = (
     "epoch_line_metrics",    # the epoch line prints loss and val_loss only
     "unjudged_note",         # why init_scale_warning is null
     "task_record",           # the pretrain record (test_pretrain_record.py)
+    "init_identity",         # the size, the patch, the channels and the scaling an init source must share
+    "init_overlap",          # the source's seeded train rows among this run's selection rows
 )
 
 

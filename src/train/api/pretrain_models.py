@@ -62,7 +62,7 @@ Interface contract
     :return: ``[(level, text)]``, the recipe's doubts the task's ``recipe_notices`` hook prints (D-012).
 
 ``builtin_pretrain_models()``
-    :return: the two :class:`~train.api.registry.ModelSpec` rows, freshly built.
+    :return: the two :class:`~train.api.registry.ModelSpec` rows, freshly built, each with its ``init`` transfer.
 
 Recipes
 -------
@@ -84,8 +84,8 @@ from .args import AutoContext, OptimArgs, is_count
 from .config import unknown_key_message
 from .denoising_models import named_parameters
 from .errors import ConfigValidationError
-from .pretrain_args import BEIT, ET, GEOMETRY, TASK, WATCH_METRIC
-from .registry import ModelSpec
+from .pretrain_args import BEIT, DECODERS, ET, GEOMETRY, TASK, WATCH_METRIC
+from .registry import ModelSpec, TransferSpec
 
 # ---------------------------------------------------------------------
 
@@ -390,11 +390,14 @@ def recipe_notices_of(family: str) -> List[Tuple[str, str]]:
 
 
 
-#: Why the pretrain rows declare no ``TransferSpec``; ``init`` names it in its refusal.
-NO_TRANSFER = (
-    "pretrain does not start from earlier weights: it writes no record, and no family of another task shares the BEiT "
-    "or Energy Transformer trunk (follow-up: the pretrain record)"
-)
+def _pretrain_transfer(family: str) -> TransferSpec:
+    """Return what ``init`` moves between two runs of the pretrain ``family`` (paths relative to the model)."""
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-008
+    # The family's OWN runs only (no `sources`: U4 rules out a classifier source, and no other family shares a decoder);
+    # the decoder is the head, reset when the tokenizer differs (init_from.HEAD_KEYS); size and patch are fixed, so
+    # another geometry is refused before the claim. Do NOT add a source or drop a fixed key: no rule resizes the patch
+    # kernel or a position table of these models.
+    return TransferSpec(head=DECODERS[family], fixed=("channels", "input_size", "patch_size"))
 
 
 def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
@@ -407,7 +410,7 @@ def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=ET_RECIPE,
             resolve_model_args=f"{_HERE}:resolve_pretrain_args",
-            transfer_reason=NO_TRANSFER,
+            transfer=_pretrain_transfer(ET),
         ),
         ModelSpec(
             family=BEIT,
@@ -416,6 +419,6 @@ def builtin_pretrain_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=BEIT_RECIPE,
             resolve_model_args=f"{_HERE}:resolve_pretrain_args",
-            transfer_reason=NO_TRANSFER,
+            transfer=_pretrain_transfer(BEIT),
         ),
     )

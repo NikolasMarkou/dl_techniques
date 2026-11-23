@@ -41,6 +41,14 @@ Interface contract
     The epoch-0 check is the untrained model's loss over the baseline's (``initial_loss_ratio``); no verdict on the
     initialization is given (``unjudged_note`` says why); a non-finite loss is refused.
 
+    ``init`` (plan-2026-11-19T081214-5c6cc105 D-008, D-012). A run starts from an earlier run of its OWN family (the
+    row's transfer: the decoder is the head, reset when the tokenizer's sha256 differs). ``init_identity`` gives the
+    channels, the scaling, the size and the patch this run's record will hold, so another geometry is refused before the
+    claim; ``init_overlap`` counts the source's seeded train rows among this run's selection rows. Epoch zero is then
+    the LOADED weights' ``val_loss`` (``initial_loss_ratio`` and ``init_scale_warning`` are null, and the sequence's
+    note says why), so the threshold is ``min(baseline, loaded)``, still strictly below; ``Evaluation.loaded`` stays
+    ``None``, since the other tasks' higher-is-better comparison with the loaded value would judge a loss backwards.
+
     Reporting. ``evaluate_and_report`` follows the denoiser's order: the best checkpoint reloaded and scored on the TEST
     split, the data-free analysis (``run_analysis``: the weights and spectral analyses; the stock analysis reads class
     probabilities, which a masked-patch output is not), the last epoch's weights scored, saved and reloaded through
@@ -70,8 +78,8 @@ Interface contract
         a YAML file holding one.
     :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` /
         ``init`` / ``model_args`` and the groups: as in
-        :func:`~train.api.tasks.image_classification.train_image_classification`; a non-null ``init`` is refused by
-        name before the claim (no other task's family shares its trunk).
+        :func:`~train.api.tasks.image_classification.train_image_classification`; ``init`` is the directory of an
+        earlier run of the same family, at the same size and patch (see ``init`` above).
     :return: the :class:`~train.api.trainer.TrainResult`.
     :raises ConfigValidationError: for every bad key, listed together.
     :raises ConfigError: for a request that cannot be honoured; see :meth:`~train.api.trainer.TaskTrainer.run`. A family
@@ -116,7 +124,7 @@ from ..config import (
 from ..data_args import DataFacts
 from ..errors import ConfigError
 from ..init_from import file_sha256
-from ..predictor import build_pretrain_record, overrides_of_variant
+from ..predictor import PRETRAIN_CHANNELS, PRETRAIN_NORMALIZE, build_pretrain_record, overrides_of_variant
 from ..pretrain_args import (
     BEIT,
     ET,
@@ -213,7 +221,8 @@ class PretrainTrainer(TaskTrainer):
         #: The constant predictor's ``val_loss`` on the select stream, set by ``build_data`` (a resume builds the data
         #: again, so it is there before the summary or the verdict).
         self._baseline: Optional[Any] = None
-        #: The untrained model's ``val_loss``, read from the fit sidecar by ``evaluate_and_report`` and by nothing else.
+        #: The epoch-zero ``val_loss`` (the untrained model's; under ``init`` the loaded weights'), read from the fit
+        #: sidecar by ``evaluate_and_report`` and by nothing else.
         self._epoch_zero: Optional[float] = None
         #: The BEiT codebook size, set by ``build_data`` from the tokenizer (``None`` for et_mim).
         self._vocab_size: Optional[int] = None
@@ -403,6 +412,25 @@ class PretrainTrainer(TaskTrainer):
                 "python -m train.beit.train_tokenizer and give the path of its .keras"
             )
 
+    def init_identity(self, config: PretrainConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the channels, scaling, size and patch this run's record will hold, for an ``init`` source."""
+        # DECISION plan-2026-11-19T081214-5c6cc105/D-037
+        # The RESOLVED size and patch, as `task_record` writes them (the size a list, the record's JSON form), never
+        # GEOMETRY[dataset]: an overridden transform_args.image_size or data.patch_size is what the record will hold,
+        # and a source at another one would pass this check and be refused only after the claim, by its weights.
+        size = config.transform_args.image_size
+        return {"channels": PRETRAIN_CHANNELS, "normalize": PRETRAIN_NORMALIZE, "input_size": [size, size],
+                "patch_size": config.data.patch_size}
+
+    def init_overlap(self, source: Any, config: PretrainConfig, data: Any) -> Dict[str, Any]:
+        """The source's seeded train cut against this run's selection rows (``init_from.seeded_rows_split``): the
+        streams cut a dataset's rows as classification does, and the dataset's train size backs a capped run."""
+        from dl_techniques.datasets.vision.classification import get_spec
+
+        from .. import init_from
+
+        return init_from.seeded_rows_split(source, config, data, get_spec(config.data.dataset).train_size)
+
     def input_check(self, facts: DataFacts, data: Any) -> None:
         check_holds_no_classes(self, facts, data)
 
@@ -547,16 +575,20 @@ class PretrainTrainer(TaskTrainer):
             else "the mean over examples of the per-example masked-token cross-entropy (sample weight N / n_masked: the "
             "reference's scale, not the legacy trainer's, which is that mean times the mask fraction)"
         )
+        # DECISION plan-2026-11-19T081214-5c6cc105/D-012
+        # Under init the ratio is None (epoch zero is the loaded weights': no ratio is computed), so its line is left
+        # out, as depth leaves it out. Do NOT format it unguarded: `{None:.3g}` raises after the run has trained.
+        zero = "the untrained model's" if config.init is None else "the loaded weights' (under `init`)"
         notes = [
-            f"initial loss {baseline['loss']:.6g} is {ratio:.3g}x the constant predictor's val_loss "
-            f"({constant.val_loss:.6g}, {constant.kind}) on the "
-            f"{data.n_select} fixed selection images: a plain evaluate in inference mode; see the `init_scale_warning` note",
+            *([f"initial loss {baseline['loss']:.6g} is {ratio:.3g}x the constant predictor's val_loss "
+               f"({constant.val_loss:.6g}, {constant.kind}) on the {data.n_select} fixed selection images: a plain "
+               "evaluate in inference mode; see the `init_scale_warning` note"] if ratio is not None else []),
             *classification_run.RUN_NOTES[:2],
             f"`val_loss` is {loss}; the selection and test masks are fixed by (seed, split, row position), so it is a "
             "function of the weights alone (equal across passes, epochs and a resume)",
             "`success_value` is the lowest `val_loss` of the selection window; `success_threshold` is "
-            "min(`baseline.val_loss`, `epoch_zero.val_loss`): the constant predictor's loss on the same stream and the "
-            "untrained model's, read from the fit sidecar; the bar is STRICTLY below, compared in float32",
+            "min(`baseline.val_loss`, `epoch_zero.val_loss`): the constant predictor's loss on the same stream and "
+            f"{zero}, read from the fit sidecar; the bar is STRICTLY below, compared in float32",
             "`test_metrics_best` is the reloaded best_model.keras and `test_metrics_final` the last epoch's weights, on the "
             "test split, whose masks are fixed too; the test split never influenced selection",
         ]
@@ -684,6 +716,10 @@ class PretrainTrainer(TaskTrainer):
             "selection": selection_block(start, fit.epochs_run, best),
             "tokenizer": self._tokenizer_block(),
         }
+        # DECISION plan-2026-11-19T081214-5c6cc105/D-012
+        # No `loaded=`: under init the sidecar's epoch zero IS the loaded weights' val_loss, so the threshold is
+        # already min(baseline, loaded), strictly below. Do NOT set Evaluation.loaded: init_from.beats_loaded is
+        # higher-is-better and would judge this loss backwards (and this task's bar_is_met takes no fourth argument).
         return Evaluation(
             test_metrics_best=test_best,
             best_load_error=load_error,

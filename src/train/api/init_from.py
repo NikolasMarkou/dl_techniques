@@ -31,8 +31,9 @@ Interface contract
     whole target path (``re.fullmatch``), to a rule name (a key of :data:`RULES`); a path two keys
     match is refused while planning; ``grow``: a regex matched at the start of a path, naming a
     depth-indexed block a deeper variant may add; ``pinned``: factory arguments the target takes
-    from the source; ``fixed``: geometry keys the family cannot change (``channels``,
-    ``lookback``, ``horizon``); ``sources``: ``(task, family)`` of another task to the
+    from the source (a cross-task source pins those its record holds); ``fixed``: geometry keys the
+    family cannot change (``channels``, ``lookback``, ``horizon``, ``input_size``, ``patch_size``);
+    ``sources``: ``(task, family)`` of another task to the
     :class:`~train.api.registry.CrossTask` that maps its paths; ``positional``: regexes, each
     matching whole top-level path components, inside which weights whose paths differ pair by
     order, when both sides hold the same count and every pair has equal shape and dtype.
@@ -67,12 +68,13 @@ Interface contract
     :param context: the ``AutoContext`` of this run (``family``).
     :return: a :class:`Source`. Nothing is written; ``best_model.keras`` is hashed, not opened as a model.
     :raises ConfigError: naming ``init`` (or the ``model_args`` key a pin refuses), in this order: the row
-        declares no transfer (its ``transfer_reason``); the trainer's ``init_identity`` refuses (the default
-        does); the directory is missing or is a file; ``task.json``, ``config.json`` or ``best_model.keras``
+        declares no transfer; the trainer's ``init_identity`` refuses (the default does); the directory is
+        missing or is a file; ``task.json``, ``config.json`` or ``best_model.keras``
         is missing; the record fails the predictor's record check or ``config.json`` is no JSON object; the
-        source's task and family are neither this run's nor a declared cross-task pair; a ``fixed`` key of
-        this family or the input scaling differs; a pinned argument is not recorded in the source's
-        ``config.json`` ``used.model_args``. (A request ``model_args`` value other than a pin is refused by
+        source's task and family are neither this run's nor a declared cross-task pair; ``fixed`` keys of
+        this family differ (every one named) or the input scaling does; a pinned argument of a same-task source is
+        not recorded in its ``config.json`` ``used.model_args`` (a cross-task source pins what its record holds). (A
+        request ``model_args`` value other than a pin is refused by
         :func:`train.api.recipes.merge_model_args` when the task checks its model arguments, also before the claim.)
 
 ``transfer(source, model, task, family, variant, record)``
@@ -401,7 +403,8 @@ def et_pos_refused(value: Any, target_shape: Tuple[int, ...]) -> Any:
 SOURCE_FILES = ("task.json", "config.json", "best_model.keras")
 
 #: How a refusal names a geometry key of the records.
-GEOMETRY_NAMES = {"channels": "the input channels", "lookback": "data.lookback", "horizon": "data.horizon"}
+GEOMETRY_NAMES = {"channels": "the input channels", "lookback": "data.lookback", "horizon": "data.horizon",
+                  "input_size": "transform_args.image_size", "patch_size": "data.patch_size"}
 
 #: How a refusal describes an input scaling, by the value :func:`_scaling` gives it.
 SCALING_WORDS = {"standardize": "standardizes its input", "unit": "takes its input in [0, 1]",
@@ -446,8 +449,8 @@ def _source_dir(init: Any) -> Path:
                            "config.json and best_model.keras)")
     task_file, config_file, model_file = (path / name for name in SOURCE_FILES)
     if not task_file.is_file():
-        raise _refuse_init(f"{task_file} does not exist; a source is a python -m train run of a task that writes "
-                           "a record (pretrain runs and legacy trainer runs write none)")
+        raise _refuse_init(f"{task_file} does not exist; a source is a python -m train run, which writes it before its "
+                           "first epoch (legacy trainer runs and runs made before their task wrote one have none)")
     if not config_file.is_file():
         raise _refuse_init(f"{config_file} does not exist; a source is a python -m train run directory")
     if not model_file.is_file():
@@ -468,14 +471,16 @@ def _declared_sources(task: str, family: str, spec: TransferSpec) -> str:
 
 def _check_identity(family: str, task: str, spec: TransferSpec, source: Mapping[str, Any],
                     target: Mapping[str, Any]) -> None:
-    for key in spec.fixed:
-        if key in source and key in target and source[key] != target[key]:
-            keeping = sorted(name for name, row in registry.MODELS.items()
-                             if task in row.tasks and row.transfer is not None and key not in row.transfer.fixed)
-            kept = f" (families of {task} that keep every weight across a {GEOMETRY_NAMES[key]} change: " \
-                   f"{', '.join(keeping)})" if keeping else ""
-            raise _refuse_init(f"{family} sizes its weights by {GEOMETRY_NAMES[key]}; the source trained at "
-                               f"{source[key]}, this run asks for {target[key]}{kept}")
+    moved = [key for key in spec.fixed if key in source and key in target and source[key] != target[key]]
+    if moved:  # every differing key at once: a dataset change moves a pretrain run's size and patch together
+        names = " and ".join(GEOMETRY_NAMES[key] for key in moved)
+        keeping = sorted(name for name, row in registry.MODELS.items()
+                         if task in row.tasks and row.transfer is not None and not set(moved) & set(row.transfer.fixed))
+        kept = f" (families of {task} that keep every weight across a {names} change: {', '.join(keeping)})" \
+            if keeping else ""
+        raise _refuse_init(f"{family} sizes its weights by {names}; the source trained at "
+                           f"{' and '.join(str(source[key]) for key in moved)}, this run asks for "
+                           f"{' and '.join(str(target[key]) for key in moved)}{kept}")
     theirs, ours = _scaling(source), _scaling(target)
     if theirs is not None and ours is not None and theirs != ours:
         raise _refuse_init(f"the source {SCALING_WORDS.get(theirs, f'has {theirs}')} and this run "
@@ -511,8 +516,7 @@ def read_source(init: Any, trainer: Any, config: Any, context: Any) -> Source:
     family, task = context.family, trainer.task
     row = registry.MODELS[family]
     if row.transfer is None:
-        raise _refuse_init(row.transfer_reason or f"the family {family!r} declares no transfer, so it takes no "
-                                                   "earlier run's weights")
+        raise _refuse_init(f"the family {family!r} declares no transfer, so it takes no earlier run's weights")
     spec = row.transfer
     identity = trainer.init_identity(config, context)
     path = _source_dir(init)
@@ -533,7 +537,11 @@ def read_source(init: Any, trainer: Any, config: Any, context: Any) -> Source:
                            f"weights from {_declared_sources(task, family, spec)}")
     _check_identity(family, task, spec, record, identity)
     used = (recorded.get("used") or {}).get("model_args") or {}
-    pins = _pins(path, spec, used) if relation is None else {}
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-036
+    # A cross-task source pins the keys of `spec.pinned` its RECORD holds (a pretrain record's patch_size), under the
+    # same precedence as a same-task pin (recipes.merge_model_args). Do NOT read its used.model_args (another family's
+    # factory keywords) and do NOT pin nothing: a 64 px beit would take patch 16 and be refused after the claim.
+    pins = _pins(path, spec, used) if relation is None else {key: record[key] for key in spec.pinned if key in record}
     return Source(path, record, recorded, file_sha256(path / "best_model.keras"), relation, pins)
 
 
@@ -549,10 +557,14 @@ HEAD_KEYS: Dict[str, Tuple[str, ...]] = {
     "image_denoising": ("channels",),
     "time_series_forecasting": ("horizon", "head", "quantile_levels", "channels"),
     "depth_estimation": (),
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-008: a pretrain decoder answers in its tokenizer's codes (ET's, with no
+    # tokenizer, in pixels), so the tokenizer file's sha256 is the head's identity. Do NOT key it by the path: another
+    # file at the same path would keep a head whose outputs mean other codes.
+    "pretrain": ("tokenizer",),
 }
 
 #: The source record's keys the ``init`` block keeps as its geometry (those its task's record has).
-GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon")
+GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon", "patch_size")
 
 
 def head_differs(task: str, source_record: Mapping[str, Any], target_record: Mapping[str, Any]) -> bool:

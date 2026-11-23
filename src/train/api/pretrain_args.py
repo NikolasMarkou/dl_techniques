@@ -19,6 +19,11 @@ Interface contract
     ``"et_mim"`` and ``"beit_mim"``, the names of the task's two families: :mod:`train.api.pretrain_models` registers its
     rows under them, and the help of the mask keys names them.
 
+``DECODERS``
+    ``{family: layer names}``: each family's decoder, the library's layers after the backbone. It is the pretrain row's
+    ``init`` head (reset when the tokenizer differs), and a classifier row drops it from a pretrain source
+    (:mod:`train.api.recipes`).
+
 ``DATASETS`` / ``GEOMETRY``
     The datasets the shared streams serve (``train.common.image_streams.SUPPORTED_DATASETS``, held equal by a test) and,
     per dataset, ``(image_size, patch_size)``: cifar10 32 px at patch 4 (an 8 x 8 grid), imagenette 224 px at patch 16
@@ -94,6 +99,10 @@ TASK = "pretrain"
 # way round is a cycle). Do NOT define them again there or type them into a help text or a message: a rename then misses
 # the typed copy, as the help of these four keys would have.
 ET, BEIT = "et_mim", "beit_mim"
+
+#: The decoder of each family's model (contract above): one table for the pretrain rows' ``init`` head and the
+#: classifier rows' dropped source layers, so the two cannot name different layers.
+DECODERS: Dict[str, Tuple[str, ...]] = {ET: ("decoder_norm", "decoder_proj"), BEIT: ("decoder_norm", "decoder_head")}
 
 #: The datasets of the shared image streams; ``test_pretrain_families`` holds it equal to
 #: ``train.common.image_streams.SUPPORTED_DATASETS``.

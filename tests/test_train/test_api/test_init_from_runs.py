@@ -29,6 +29,12 @@ and runs at a 1e-30 learning rate (no float32 weight moves) miss the bar their a
 
 The ``record`` tests (D-014): the summary of a fine-tuned run holds its ``task.json`` block, the flags and the loaded
 weights' value its bar compared; it predicts and exports with its source gone; each record kind takes the block.
+
+The ``pretrain`` tests (plan-2026-11-19T081214-5c6cc105 Step 6, U4, D-008, D-012, D-035): an ``et_mim`` or ``beit_mim``
+run seeds its own family and its classifier (``energy_transformer``, ``beit``, whose patch the source's record pins), on
+the identity fake of CIFAR-10 (row ``i`` has the mean colour ``4i``, so the rows a stream holds read back); any other
+pair and another dataset geometry are refused before the claim; the pretrain bar under ``init`` stays strictly below
+the loaded weights' ``val_loss`` and the higher-is-better rule never judges it.
 """
 
 import builtins
@@ -55,12 +61,11 @@ import pytest
 from PIL import Image
 
 from dl_techniques.utils.logger import logger
-from train.api import cli, init_from, predictor, recipes, registry, resume_decisions
+from train.api import cli, data_args, init_from, predictor, recipes, registry, resume_decisions
 from train.api.args import AutoContext
 from train.api.config import validate
 from train.api.depth_args import PRETRAINED_LR
 from train.api.errors import ConfigError, ConfigValidationError
-from train.api.pretrain_models import NO_TRANSFER
 from train.api.tasks.depth_estimation import DepthEstimationConfig, DepthEstimationTrainer, train_depth_estimation
 from train.api.tasks.image_classification import (
     ImageClassificationConfig,
@@ -69,7 +74,7 @@ from train.api.tasks.image_classification import (
 )
 from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoisingTrainer, train_image_denoising
 from train.api.tasks.image_segmentation import ImageSegmentationTrainer, train_image_segmentation
-from train.api.tasks.pretrain import train_pretrain
+from train.api.tasks.pretrain import TOKENIZER_KEY, PretrainConfig, PretrainTrainer, train_pretrain
 from train.api.tasks.time_series_forecasting import (
     TimeSeriesForecastingConfig,
     TimeSeriesForecastingTrainer,
@@ -121,6 +126,14 @@ def depth_record(side: int = 28) -> Dict[str, Any]:
         model="depth_anything/vit_s", family="depth_anything", variant="vit_s", input_size=[side, side], channels=3)
 
 
+def pretrain_record(model: str = "et_mim/et_tiny", side: int = 32, patch: int = 4) -> Dict[str, Any]:
+    """A pretrain record at CIFAR-10's pretrain geometry; a ``beit_mim`` one names a tokenizer by a sha256."""
+    family, variant = model.split("/")
+    return predictor.build_pretrain_record(
+        model=model, family=family, variant=variant, input_size=[side, side], channels=3, mean=[0.5] * 3,
+        std=[0.25] * 3, patch_size=patch, tokenizer=None if family == "et_mim" else "a" * 64)
+
+
 def write_source(root: Path, record: Optional[Dict[str, Any]], used: Optional[Dict[str, Any]] = None, *,
                  config: bool = True, best: bool = True) -> Path:
     """A fake run directory: ``task.json`` (``record``; ``None`` writes none), ``config.json`` and a placeholder archive."""
@@ -152,8 +165,8 @@ CLASSIFIER_CASES = {
     "a_file": (as_file, {}, r"Invalid value for 'init': .*best_model\.keras is a file; give the run directory that "
                             r"holds it \(init reads task\.json, config\.json and best_model\.keras\)"),
     "no_record": (lambda root: write_source(root, None, VIT_USED), {},
-                  r"task\.json does not exist; a source is a python -m train run of a task that writes a record "
-                  r"\(pretrain runs and legacy trainer runs write none\)"),
+                  r"task\.json does not exist; a source is a python -m train run, which writes it before its first "
+                  r"epoch \(legacy trainer runs and runs made before their task wrote one have none\)"),
     "no_config": (lambda root: write_source(root, classification_record(), config=False), {},
                   r"config\.json does not exist; a source is a python -m train run directory"),
     "no_best_model": (lambda root: write_source(root, classification_record(), VIT_USED, best=False), {},
@@ -254,18 +267,96 @@ def test_preclaim_a_lookback_the_family_sizes_its_weights_by_is_refused(world, t
     assert not out.exists()
 
 
-def test_preclaim_pretrain_refuses_init_by_its_rows_reason(world, tmp_path):
+#: The pretrain target of the pre-claim cases (nothing is loaded before the claim; the tokenizer is checked after the
+#: source, so a beit_mim refusal needs no file).
+PRETRAIN_TARGET = {"model": "et_mim/et_tiny", "data": {"dataset": "cifar10"}, "batch_size": 4,
+                   "model_args": {"num_steps": 2}}
+BEIT_MIM_TARGET = {**PRETRAIN_TARGET, "model": "beit_mim/beit_tiny", "model_args": {TOKENIZER_KEY: "t.keras"}}
+BEIT_TARGET = {**CLASSIFIER, "model": "beit/beit_tiny"}
+
+#: ``name: (the source record, the task function, the request, the message pattern)``: a pair no row declares, another
+#: scaling and another dataset geometry (U4, D-008), each refused before the claim.
+PRETRAIN_REFUSALS = {
+    "classifier_into_pretrain": (lambda: classification_record("beit/beit_tiny"), train_pretrain, BEIT_MIM_TARGET,
+                                 r"beit \(image_classification\) cannot seed beit_mim \(pretrain\); beit_mim takes "
+                                 r"weights from beit_mim \(pretrain\)$"),
+    "other_family_into_pretrain": (pretrain_record, train_pretrain, BEIT_MIM_TARGET,
+                                   r"et_mim \(pretrain\) cannot seed beit_mim \(pretrain\); beit_mim takes weights "
+                                   r"from beit_mim \(pretrain\)$"),
+    "other_family_into_classifier": (pretrain_record, train_image_classification, BEIT_TARGET,
+                                     r"et_mim \(pretrain\) cannot seed beit \(image_classification\); beit takes "
+                                     r"weights from beit \(image_classification\) or beit_mim \(pretrain\)$"),
+    "unit_classifier": (lambda: pretrain_record("beit_mim/beit_tiny"), train_image_classification,
+                        {**BEIT_TARGET, "transform_args": {"normalize": "unit"}},
+                        r"the source standardizes its input and this run takes its input in \[0, 1\] "
+                        r"\(transform_args\.normalize\)$"),
+    "other_dataset": (pretrain_record, train_pretrain, {**PRETRAIN_TARGET, "data": {"dataset": "imagenette"}},
+                      r"et_mim sizes its weights by transform_args\.image_size and data\.patch_size; the source "
+                      r"trained at \[32, 32\] and 4, this run asks for \[224, 224\] and 16$"),
+    "other_patch": (pretrain_record, train_pretrain,
+                    {**PRETRAIN_TARGET, "data": {"dataset": "cifar10", "patch_size": 8}},
+                    r"et_mim sizes its weights by data\.patch_size; the source trained at 4, this run asks for 8$"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(PRETRAIN_REFUSALS))
+def test_preclaim_pretrain_a_pair_no_row_declares_or_another_geometry_is_refused(world, tmp_path, monkeypatch, case):
+    make, function, request, pattern = PRETRAIN_REFUSALS[case]
+    # The Imagenette records are looked for when the data is described, before the source is read: no file is needed.
+    monkeypatch.setattr(data_args, "_check_imagenette_records", lambda: None)
+    source = write_source(tmp_path / "source", make(), {})
     out = tmp_path / "run"
-    with pytest.raises(ConfigError, match="Invalid value for 'init': " + NO_TRANSFER.replace("(", r"\(").replace(")", r"\)")):
-        train_pretrain(out=out, model="et_mim/et_tiny", data={"dataset": "cifar10"}, batch_size=4,
-                       model_args={"num_steps": 2}, init=tmp_path / "any_source")
-    assert not out.exists()
+    with pytest.raises(ConfigError, match="Invalid value for 'init': " + pattern):
+        function(out=out, init=source, **request)
+    assert not out.exists(), "a pre-claim refusal claimed the run directory"
+
+
+def test_preclaim_pretrain_a_source_of_the_same_family_is_taken_with_no_pin(world, tmp_path):
+    source = write_source(tmp_path / "source", pretrain_record(), {"num_steps": 2})
+    config = validate(PretrainConfig, {"out": str(tmp_path / "run"), "init": str(source), **PRETRAIN_TARGET})
+    trainer, _, context = prepared(config, PretrainTrainer)
+    taken = trainer._init_source
+    assert (taken.relation, taken.pins, context.pinned, taken.record) == (None, {}, {}, pretrain_record())
+    assert not (tmp_path / "run").exists()
+
+
+def test_preclaim_pretrain_a_classifier_takes_its_patch_from_the_source_record_and_a_typed_one_must_repeat_it(
+        world, trees, tmp_path):
+    """D-035: a 64 px beit from a 32/4 beit_mim keeps patch 4 (grid 16; its patch rule gives 16, a 4x4 grid). The pin is
+    read from the source's record: its ``config.json`` records no ``used.model_args`` here."""
+    source = write_source(tmp_path / "source", pretrain_record("beit_mim/beit_tiny"), {})
+
+    def resolved(**changes: Any) -> Any:
+        config = validate(ImageClassificationConfig, classify(str(tmp_path / "run"), trees["ten"], 64,
+                                                              model="beit/beit_tiny", **changes))
+        trainer, final, context = prepared(config, ImageClassificationTrainer)
+        return trainer, context, trainer._model_kwargs(final, context)["patch_size"]
+
+    for typed in ({}, {"model_args": {"patch_size": 4}}):
+        trainer, context, patch = resolved(init=str(source), **typed)
+        assert trainer._init_source.pins == context.pinned == {"patch_size": 4} and patch == 4
+        assert trainer._init_source.relation == registry.MODELS["beit"].transfer.sources[("pretrain", "beit_mim")]
+    _, context, patch = resolved()
+    assert (context.pinned, patch) == ({}, 16)
+    with pytest.raises(ConfigError, match=r"Invalid value for 'model_args\.patch_size': the source was built with "
+                                          r"patch_size=4 and init keeps the source's architecture"):
+        resolved(init=str(source), model_args={"patch_size": 16})
+    assert not (tmp_path / "run").exists()
+
+
+def test_preclaim_pretrain_the_decoder_head_is_keyed_by_the_tokenizers_sha256():
+    """D-008: the same tokenizer bytes at any path keep the decoder; another file resets it; et_mim has none."""
+    record = pretrain_record("beit_mim/beit_tiny")
+    assert init_from.head_differs("pretrain", record, dict(record)) is False
+    assert init_from.head_differs("pretrain", record, {**record, "tokenizer": "b" * 64}) is True
+    assert init_from.head_differs("pretrain", pretrain_record(), pretrain_record()) is False
 
 
 def test_preclaim_a_row_with_no_transfer_is_refused_by_name(world, tmp_path, monkeypatch):
     spec = registry.MODELS["vit"]
-    monkeypatch.setitem(registry.MODELS, "vit", dataclasses.replace(spec, transfer=None, transfer_reason=""))
-    with pytest.raises(ConfigError, match=r"'init': the family 'vit' declares no transfer"):
+    monkeypatch.setitem(registry.MODELS, "vit", dataclasses.replace(spec, transfer=None))
+    with pytest.raises(ConfigError, match=r"'init': the family 'vit' declares no transfer, so it takes no earlier "
+                                          r"run's weights$"):
         prepared(classifier_config(tmp_path / "run", init=str(tmp_path / "src")), ImageClassificationTrainer)
 
 
@@ -868,6 +959,22 @@ def depth_request(out: Path, root: Path, side: int, **changes: Any) -> Dict[str,
 # ---------------------------------------------------------------------
 
 
+def watch_opens(monkeypatch: Any, prefix: str) -> list:
+    """Spy on ``open`` (builtins, io, os); return the list of the paths opened under ``prefix``, filled as it goes."""
+    opened: list = []
+
+    def spied(real):
+        def spy(file, *arguments, **keywords):
+            if isinstance(file, (str, os.PathLike)) and os.fspath(file).startswith(prefix):
+                opened.append(os.fspath(file))
+            return real(file, *arguments, **keywords)
+        return spy
+
+    for owner in (builtins, io, os):
+        monkeypatch.setattr(owner, "open", spied(owner.open))
+    return opened
+
+
 def test_resume_an_init_run_with_its_source_renamed_away_rebuilds_its_architecture_and_opens_no_source_file(
         vit_64, tmp_path, monkeypatch):
     run_dir = tmp_path / "run"
@@ -875,16 +982,7 @@ def test_resume_an_init_run_with_its_source_renamed_away_rebuilds_its_architectu
     (run_dir / "results_summary.json").unlink()  # a run whose reporting died: resumed to report
     moved = vit_64.source.with_name("moved_away")
     vit_64.source.rename(moved)
-    opened, rebuilt = [], {}
-    gone = str(vit_64.source)
-
-    def spied(real):
-        def spy(file, *arguments, **keywords):
-            if isinstance(file, (str, os.PathLike)) and os.fspath(file).startswith(gone):
-                opened.append(os.fspath(file))
-            return real(file, *arguments, **keywords)
-        return spy
-
+    rebuilt = {}
     real_restore = resume_decisions.restore_finished_fit
 
     def restore(model, *arguments):
@@ -892,9 +990,7 @@ def test_resume_an_init_run_with_its_source_renamed_away_rebuilds_its_architectu
         return real_restore(model, *arguments)
 
     try:
-        monkeypatch.setattr(builtins, "open", spied(builtins.open))
-        monkeypatch.setattr(io, "open", spied(io.open))
-        monkeypatch.setattr(os, "open", spied(os.open))
+        opened = watch_opens(monkeypatch, str(vit_64.source))
         monkeypatch.setattr(resume_decisions, "restore_finished_fit", restore)
         keras.backend.clear_session()
         train_image_classification(**{**vit_64.request, "out": str(run_dir), "resume_interrupted": True})
@@ -1372,7 +1468,7 @@ def test_record_a_fine_tuned_run_loads_predicts_and_exports_at_its_size_with_its
     np.testing.assert_allclose(again["scores"], answer["scores"], atol=1e-5)
 
 
-#: One record of each of the five kinds, built by the predictor's own builders.
+#: One record of each of the six kinds, built by the predictor's own builders.
 RECORD_KINDS = {
     "image_classification": classification_record,
     "image_segmentation": segmentation_record,
@@ -1380,6 +1476,7 @@ RECORD_KINDS = {
         model="bfunet/tiny", family="bfunet", variant="tiny", channels=3, size_multiple=8),
     "time_series_forecasting": forecast_record,
     "depth_estimation": depth_record,
+    "pretrain": pretrain_record,
 }
 
 
@@ -1400,3 +1497,235 @@ def test_record_every_kind_takes_a_well_formed_init_block_and_refuses_an_unknown
             part = part[name]
         part["extra"] = 1
         assert any(f"{where!r} has unknown key(s) 'extra'" in line for line in predictor.record_problems(broken)), where
+
+
+def test_record_the_kinds_are_the_tasks_of_the_record_tables():
+    assert sorted(RECORD_KINDS) == sorted(predictor.RECORD_KEYS)
+
+
+# ---------------------------------------------------------------------
+# pretrain: an et_mim or beit_mim run as a source and as a target (plan-2026-11-19T081214-5c6cc105 Step 6, U4)
+# ---------------------------------------------------------------------
+
+#: A beit_mim trunk the CPU trains in seconds: 2 layers (2 relative-bias tables), 32 wide. A beit classifier asks for
+#: the same keys, since the weights must fit.
+MIM_SMALL = {"num_layers": 2, "hidden_size": 32, "num_heads": 2, "intermediate_size": 64}
+MIM_MODELS = {"et_mim": "et_mim/et_tiny", "beit_mim": "beit_mim/beit_tiny"}
+#: The train rows of the identity fake of CIFAR-10 (row ``i`` has the mean colour ``4i``).
+IDENTITY_ROWS = 60
+
+
+def mim_world(patch: Any) -> None:
+    """The identity fake of CIFAR-10 and the toy tokenizer's usage floor, on ``patch`` (a ``MonkeyPatch``)."""
+    from tests.classification_fakes import use_identity_cifar10
+    from train.common import pretrain_run
+
+    from .test_pretrain_task import LOW_FLOOR
+
+    use_identity_cifar10(patch, n_train=IDENTITY_ROWS)
+    patch.setattr(pretrain_run, "MIN_TOKENIZER_PERPLEXITY", LOW_FLOOR)
+
+
+def mim_request(out: Path, family: str, tokenizer: Optional[str] = None, **changes: Any) -> Dict[str, Any]:
+    """One epoch of ``family`` at batch 4: et_mim at ``num_steps`` 2, beit_mim ``MIM_SMALL`` on ``tokenizer``."""
+    args = {"num_steps": 2} if family == "et_mim" else {TOKENIZER_KEY: tokenizer, **MIM_SMALL}
+    return {"out": str(out), "model": MIM_MODELS[family], "data": {"dataset": "cifar10"}, "epochs": 1, "batch_size": 4,
+            "model_args": args, "analysis_args": {"model_analysis": False, "figures": False}, **changes}
+
+
+def mim_source(family: str, root: Path, tokenizer: Optional[str] = None) -> Path:
+    """Train one source of ``family`` (seed 42) on the fake, in a fresh Keras session; return its run directory."""
+    with pytest.MonkeyPatch.context() as patch:
+        mim_world(patch)
+        keras.backend.clear_session()
+        train_pretrain(**mim_request(root / "run", family, tokenizer))
+    return root / "run"
+
+
+@pytest.fixture(scope="module")
+def mim_tokenizer(tmp_path_factory) -> str:
+    from .test_pretrain_task import make_tokenizer
+
+    return make_tokenizer(tmp_path_factory.mktemp("tokenizer") / "tokenizer.keras")
+
+
+@pytest.fixture(scope="module")
+def et_source(world, tmp_path_factory) -> Path:
+    return mim_source("et_mim", tmp_path_factory.mktemp("et_source"))
+
+
+@pytest.fixture(scope="module")
+def beit_source(world, mim_tokenizer, tmp_path_factory) -> Path:
+    return mim_source("beit_mim", tmp_path_factory.mktemp("beit_source"), mim_tokenizer)
+
+
+@pytest.fixture(scope="module")
+def et_pair(world, et_source, tmp_path_factory):
+    """et_mim from a copy of ``et_source`` (the resume test renames the copy away) at a rate that moves no float32
+    weight (``STILL``): the fine-tune scores what the loaded weights scored at epoch zero."""
+    root = tmp_path_factory.mktemp("et_pair")
+    source = root / "source"
+    shutil.copytree(et_source, source)
+    request = mim_request(root / "run", "et_mim", init=str(source), optim_args=STILL)
+    with pytest.MonkeyPatch.context() as patch:
+        mim_world(patch)
+        start = started(PretrainTrainer, train_pretrain, **request)
+    return SimpleNamespace(source=source, out=root / "run", request=request, start=start)
+
+
+def test_pretrain_et_mim_seeds_et_mim_with_every_weight_and_its_bar_is_strictly_below_the_loaded_val_loss(et_pair):
+    out, source = et_pair.out, archive_weights(et_pair.source)
+    record, summary = record_of(out), summary_of(out)
+    block = record["init"]
+    assert (block["task"], block["family"], block["relation"], block["pinned"]) == (
+        "pretrain", "et_mim", "same_task", {})
+    geometry = ("input_size", "channels", "patch_size")
+    assert block["geometry"] == {key: record_of(et_pair.source)[key] for key in geometry}
+    # No tokenizer on either side, so the decoder means the same: every weight is copied.
+    assert block["transfer"]["copied"] == len(source) == len(et_pair.start)
+    assert all(not block["transfer"][key] for key in ("reset", "grown", "dropped", "resampled"))
+    check_copied(block, et_pair.start, source)
+    assert block["split"]["relation"] == "same_split" and predictor.record_problems(record) == []
+    assert (summary["init"], summary["epoch_zero_of"]) == (block, "init") and not any(init_from.bias_of(block).values())
+    # Epoch zero is the loaded weights' val_loss on the same fixed selection masks: the source's best (D-012).
+    loaded = json.loads((out / "checkpoints" / "fit_state.json").read_text())["initial"]["metrics"]["loss"]
+    assert loaded == pytest.approx(summary_of(et_pair.source)["success_value"], rel=1e-5)
+    assert summary["epoch_zero"]["val_loss"] == summary["initial_loss_sanity_eval"]["loss"] == loaded
+    assert summary["success_threshold"] == min(summary["baseline"]["val_loss"], loaded)
+    # Strictly below, in float32: a fine-tune that only holds its loaded weights misses. Evaluation.loaded stays None,
+    # so the higher-is-better rule of the other tasks never judges this loss and the summary has no loaded_success_value.
+    assert summary["success_value"] == pytest.approx(loaded, rel=1e-6) and summary["success"] is False
+    assert "loaded_success_value" not in summary
+    assert (summary["initial_loss_ratio"], summary["init_scale_warning"]) == (None, None)
+    assert init_from.NOT_JUDGED_UNDER_INIT in summary["notes"]
+    assert not any(note.startswith("initial loss") for note in summary["notes"])
+    log = (out / "run.log").read_text()
+    assert "Evaluate of the loaded weights before fit: " in log and "Untrained evaluate BEFORE fit" not in log
+
+
+def test_pretrain_resume_of_an_init_run_with_its_source_renamed_away_opens_no_source_file(
+        et_pair, tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    shutil.copytree(et_pair.out, run_dir)
+    (run_dir / "results_summary.json").unlink()  # a run whose reporting died: resumed to report
+    moved = et_pair.source.with_name("moved_away")
+    et_pair.source.rename(moved)
+    try:
+        mim_world(monkeypatch)
+        opened = watch_opens(monkeypatch, str(et_pair.source))
+        keras.backend.clear_session()
+        train_pretrain(**{**et_pair.request, "out": str(run_dir), "resume_interrupted": True})
+    finally:
+        monkeypatch.undo()
+        moved.rename(et_pair.source)
+    assert summary_of(run_dir)["reporting_resumed"] is True and opened == []
+    assert summary_of(run_dir)["init"] == record_of(run_dir)["init"] == record_of(et_pair.out)["init"]
+
+
+def test_pretrain_an_et_mim_run_seeds_the_energy_transformer_classifier_and_its_split_counts_the_rows_read_back(
+        world, et_source, tmp_path, monkeypatch):
+    from tests.classification_fakes import identities_of
+    from train.common.classification_data import load_split_arrays
+    from train.common.image_streams import load_image_streams
+
+    mim_world(monkeypatch)
+    out = tmp_path / "run"
+    start = started(ImageClassificationTrainer, train_image_classification, out=str(out), seed=43,
+                    model="energy_transformer/et_tiny", data={"dataset": "cifar10"}, init=str(et_source),
+                    model_args={"num_steps": 2}, **QUIET)
+    source, record, summary = archive_weights(et_source), record_of(out), summary_of(out)
+    block = record["init"]
+    assert (block["task"], block["family"], block["relation"]) == ("pretrain", "et_mim", "cross_task")
+    assert block["pinned"] == {"patch_size": record_of(et_source)["patch_size"]}  # D-035: read from the source's record
+    assert block["geometry"] == {key: record_of(et_source)[key] for key in ("input_size", "channels", "patch_size")}
+    decoder = sorted(path for path in source if path.startswith(("decoder_norm/", "decoder_proj/")))
+    head = tuple(f"{name}/" for name in registry.MODELS["energy_transformer"].transfer.head)
+    assert decoder and sorted(block["transfer"]["dropped"]) == decoder
+    assert sorted(block["transfer"]["reset"]) == sorted(path for path in start if path.startswith(head))
+    assert block["transfer"]["copied"] == len(source) - len(decoder) and block["transfer"]["resampled"] == []
+    check_copied(block, start, source)
+    # The split, from the rows each loader reads back: the source trained on every row its selection stream (seed 42)
+    # does not hold, and this run selects at seed 43. Both cuts are also the oracle's own permutation.
+    streams = load_image_streams("cifar10", image_size=32, batch_size=4, seed=42, augment=False)
+    theirs = set(identities_of("cifar10", streams.select_ds).tolist())
+    selected = load_split_arrays("cifar10", seed=43).x_select  # bytes / 255, unaugmented
+    ours = set(np.rint(selected.mean(axis=(1, 2, 3)) * 255 / 4).astype(int).tolist())
+    assert (theirs, ours) == (cut(IDENTITY_ROWS, 42)[1], cut(IDENTITY_ROWS, 43)[1])
+    expected = len((set(range(IDENTITY_ROWS)) - theirs) & ours)
+    split = block["split"]
+    assert expected > 0 and (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == (
+        "overlap", expected, 0)
+    assert (summary["init"], summary["selection_biased"], summary["test_biased"]) == (block, True, False)
+    assert predictor.record_problems(record) == []
+
+
+def test_pretrain_a_beit_mim_run_seeds_the_beit_classifier_dropping_its_decoder_on_the_same_rows(
+        world, beit_source, tmp_path, monkeypatch):
+    mim_world(monkeypatch)
+    out = tmp_path / "run"
+    start = started(ImageClassificationTrainer, train_image_classification, out=str(out), model="beit/beit_tiny",
+                    data={"dataset": "cifar10"}, init=str(beit_source), model_args=MIM_SMALL, **QUIET)
+    source, block = archive_weights(beit_source), record_of(out)["init"]
+    assert (block["family"], block["relation"], block["pinned"]) == ("beit_mim", "cross_task", {"patch_size": 4})
+    decoder = sorted(path for path in source if path.startswith(("decoder_norm/", "decoder_head/")))
+    head = tuple(f"{name}/" for name in registry.MODELS["beit"].transfer.head)
+    assert decoder and sorted(block["transfer"]["dropped"]) == decoder
+    assert sorted(block["transfer"]["reset"]) == sorted(path for path in start if path.startswith(head))
+    assert block["transfer"]["copied"] == len(source) - len(decoder) and block["transfer"]["resampled"] == []
+    check_copied(block, start, source)
+    # Seed 42 with the source's split and cap: the same rows, so nothing is biased.
+    assert block["split"]["relation"] == "same_split" and summary_of(out)["selection_biased"] is False
+
+
+def test_pretrain_a_beit_mim_source_at_32_px_seeds_a_64_px_beit_with_its_patch_pinned_and_every_table_resampled(
+        world, beit_source, trees, tmp_path):
+    out = tmp_path / "run"
+    start = started(ImageClassificationTrainer, train_image_classification,
+                    **classify(str(out), trees["ten"], 64, model="beit/beit_tiny", init=str(beit_source),
+                               model_args=MIM_SMALL))
+    source, block = archive_weights(beit_source), record_of(out)["init"]
+    used = json.loads((out / "config.json").read_text())["used"]["model_args"]
+    assert block["pinned"] == {"patch_size": 4} and used["patch_size"] == 4  # the patch rule gives 16 at 64 px (D-035)
+    tables = sorted(path for path in start if path.endswith("/relative_position_bias_table"))
+    rows = [(2 * (side // 4) - 1) ** 2 + 3 for side in (32, 64)]  # a k x k grid: (2k - 1)^2 offsets and 3 class rows
+    heads = MIM_SMALL["num_heads"]
+    assert len(tables) == MIM_SMALL["num_layers"]
+    assert sorted(block["transfer"]["resampled"], key=lambda row: row["path"]) == [
+        {"path": path, "rule": "beit_relpos_cubic", "from": [rows[0], heads], "to": [rows[1], heads]}
+        for path in tables]
+    for path in tables:
+        np.testing.assert_allclose(start[path], init_from.beit_relpos_cubic(source[path], start[path].shape), atol=1e-6)
+    check_copied(block, start, source)
+
+
+def test_pretrain_an_et_mim_source_at_32_px_is_refused_by_a_64_px_energy_transformer_after_the_claim(
+        world, et_source, trees, tmp_path):
+    out = tmp_path / "run"
+    keras.backend.clear_session()
+    with pytest.raises(ConfigError) as caught:
+        train_image_classification(**classify(str(out), trees["ten"], 64, model="energy_transformer/et_tiny",
+                                              init=str(et_source), model_args={"num_steps": 2}))
+    text = str(caught.value)
+    # The pin keeps patch 4, so the grid is 16x16 at 64 px: the ET rule refuses while planning and names both grids.
+    assert "(8x8 patches)" in text and "(16x16 patches)" in text and f"The run directory {out} was claimed" in text
+    assert (out / "config.json").exists() and not (out / "training_log.csv").exists()
+    assert not (out / "best_model.keras").exists() and not (out / "task.json").exists()
+
+
+def test_pretrain_beit_mim_on_another_tokenizer_resets_its_decoder_and_copies_the_trunk(
+        world, beit_source, mim_tokenizer, tmp_path, monkeypatch):
+    mim_world(monkeypatch)
+    # The same codebook moved by 1e-6: the same codes, other bytes, so another sha256, by which D-008 keys the head.
+    tokenizer = keras.models.load_model(mim_tokenizer, compile=False)
+    tokenizer.quantizer.embeddings.assign(tokenizer.quantizer.embeddings + 1e-6)
+    other = tmp_path / "other.keras"
+    tokenizer.save(str(other))
+    out = tmp_path / "run"
+    start = started(PretrainTrainer, train_pretrain, **mim_request(out, "beit_mim", str(other), init=str(beit_source)))
+    source, record = archive_weights(beit_source), record_of(out)
+    block = record["init"]
+    assert record["tokenizer"] == sha(other) != record_of(beit_source)["tokenizer"]
+    decoder = sorted(path for path in start if path.startswith(("decoder_norm/", "decoder_head/")))
+    assert decoder and sorted(block["transfer"]["reset"]) == sorted(block["transfer"]["dropped"]) == decoder
+    assert block["relation"] == "same_task" and block["transfer"]["copied"] == len(start) - len(decoder)
+    check_copied(block, start, source)
