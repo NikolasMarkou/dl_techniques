@@ -1438,6 +1438,7 @@ python -m train image_segmentation out=results/convnext_seg_pet model=convnext_s
 # a pretrain run's trunk into its classifier (the record's patch kept, the decoder dropped, the head fresh)
 python -m train image_classification out=results/beit_c10 model=beit/beit_tiny data.dataset=cifar10 init=results/beit_mim_c10
 # forecasting at a longer lookback
+python -m train time_series_forecasting out=results/tirex_168 model=tirex/tiny data.format=builtin
 python -m train time_series_forecasting out=results/tirex_336 model=tirex/tiny data.format=builtin data.lookback=336 \
     init=results/tirex_168
 # depth at a higher resolution
