@@ -491,7 +491,12 @@ def _pins(path: Path, spec: TransferSpec, used: Mapping[str, Any]) -> Dict[str, 
     return {key: used[key] for key in spec.pinned}
 
 
-def _sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
+    """Return the 64 lowercase hex digits of the sha256 of the file ``path``'s bytes, read in 1 MiB blocks.
+
+    Interface contract: ``path`` is a readable file (``OSError`` otherwise). The ``init`` block's ``sha256`` of a source
+    archive and a pretrain record's ``tokenizer`` (``tasks/pretrain.py``) are this function of their file.
+    """
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""):
@@ -529,7 +534,7 @@ def read_source(init: Any, trainer: Any, config: Any, context: Any) -> Source:
     _check_identity(family, task, spec, record, identity)
     used = (recorded.get("used") or {}).get("model_args") or {}
     pins = _pins(path, spec, used) if relation is None else {}
-    return Source(path, record, recorded, _sha256(path / "best_model.keras"), relation, pins)
+    return Source(path, record, recorded, file_sha256(path / "best_model.keras"), relation, pins)
 
 
 # ---------------------------------------------------------------------
@@ -596,7 +601,7 @@ def transfer(source: Source, model: Any, task: str, family: str, variant: str,
     block = block_of(source, plan)
     del loaded, plan  # the source model is released here, before the optimizer is built
     archive = source.path / SOURCE_FILES[2]
-    again = _sha256(archive)
+    again = file_sha256(archive)
     if again != source.sha256:
         raise _refuse_init(f"{archive} changed while this run read it: its sha256 was {source.sha256} before the run "
                            f"directory was claimed and is {again} now; the copied weights may not be the ones checked, "

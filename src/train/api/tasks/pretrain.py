@@ -48,8 +48,11 @@ Interface contract
     ``epoch_zero``, ``selection`` and ``tokenizer``. The energy trace of ET (``figure_callbacks``) is written to
     ``visualizations/energy_trace.csv`` with one header across a resume.
 
-    The task writes no ``task.json`` (D-013): ``task_record`` is ``None``, so ``predict`` and ``export`` of a pretrain run
-    directory refuse with the existing ``task.json`` sentence.
+    The record (plan-2026-11-19T081214-5c6cc105 D-003, D-009). ``task_record`` writes a ``pretrain`` ``task.json``
+    before ``fit``: the trained side and patch, the word, mean and std the streams standardized with
+    (``train.common.image_streams.stream_statistics``) and the sha256 of a ``beit_mim`` run's tokenizer file (``null``
+    for ``et_mim``). ``predict`` and ``export`` of the run directory answer the backbone's patch-token embeddings
+    (:mod:`train.api.pretrain_predictor`).
 
     The BEiT tokenizer (D-007). ``model_args.tokenizer_checkpoint`` is required for a ``beit_mim`` run and is read by the TASK,
     never by the model (the resolver strips it). Before the claim ``check_model_args`` refuses a missing key, a path that does
@@ -68,7 +71,7 @@ Interface contract
     :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` /
         ``init`` / ``model_args`` and the groups: as in
         :func:`~train.api.tasks.image_classification.train_image_classification`; a non-null ``init`` is refused by
-        name before the claim (a pretrain run writes no record, and no other task's family shares its trunk).
+        name before the claim (no other task's family shares its trunk).
     :return: the :class:`~train.api.trainer.TrainResult`.
     :raises ConfigValidationError: for every bad key, listed together.
     :raises ConfigError: for a request that cannot be honoured; see :meth:`~train.api.trainer.TaskTrainer.run`. A family
@@ -112,6 +115,8 @@ from ..config import (
 )
 from ..data_args import DataFacts
 from ..errors import ConfigError
+from ..init_from import file_sha256
+from ..predictor import build_pretrain_record, overrides_of_variant
 from ..pretrain_args import (
     BEIT,
     ET,
@@ -344,14 +349,25 @@ class PretrainTrainer(TaskTrainer):
         spec = registry.MODELS[context.family]
         return spec.load_resolver()(context, config.optim_args, config.model_args)
 
-    def task_record(self, config: PretrainConfig, context: AutoContext, data: Any) -> None:
-        # DECISION plan-2026-11-12T015747-46e5318f/D-013
-        # No `task.json`: a pretrain run has no reader yet (`predict` and `export` of its directory refuse with the existing
-        # `task.json` sentence), and a record is a schema row in every table of `predictor.TASK_TABLES`, a builder and a
-        # predictor, which belong to the plan that gives the task a reader. Do NOT write a partial record "for later": a
-        # record that exists makes `load_model` dispatch on a task it has no predictor for. A resume works without one
-        # (`check_data_unchanged` skips a `None` record and compares the split sizes with the sidecar).
-        return None
+    def task_record(self, config: PretrainConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
+        """Return the ``pretrain`` ``task.json`` record (schema in :mod:`train.api.predictor`).
+
+        The size and channels are ``data.input_shape`` (``build_model`` builds the model at it), the patch is the
+        data's (the masks and the model share it), the statistics are the ones the streams standardize with, and the
+        tokenizer is the sha256 of a ``beit_mim`` run's tokenizer file (the one file read). Nothing of the model is
+        needed, so a resume asks for it before ``build_model``.
+        """
+        from train.common.image_streams import stream_statistics
+
+        height, width, channels = data.input_shape
+        mean, std = stream_statistics(config.data.dataset)
+        tokenizer = file_sha256(Path(config.model_args[TOKENIZER_KEY])) if context.family == BEIT else None
+        table = registry.MODELS[context.family].load_variants()
+        return build_pretrain_record(
+            model=config.model, family=context.family, variant=context.variant, input_size=(height, width),
+            channels=channels, mean=mean, std=std, patch_size=config.data.patch_size, tokenizer=tokenizer,
+            variant_overrides=overrides_of_variant(table[context.variant], self._model_kwargs(config, context)),
+        )
 
     def used_arguments(self, config: PretrainConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run was built with, for ``config.json``: the model keywords."""
@@ -543,7 +559,6 @@ class PretrainTrainer(TaskTrainer):
             "untrained model's, read from the fit sidecar; the bar is STRICTLY below, compared in float32",
             "`test_metrics_best` is the reloaded best_model.keras and `test_metrics_final` the last epoch's weights, on the "
             "test split, whose masks are fixed too; the test split never influenced selection",
-            "no `task.json` is written: `predict` and `export` of this run directory are refused",
         ]
         if self._usage is not None:
             notes.append(

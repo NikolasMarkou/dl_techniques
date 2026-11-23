@@ -106,6 +106,19 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     the model takes no other size, and a size that is not a multiple of the patch would pass a zero-input call. A resume
     compares ``input_size``, ``channels`` and ``normalize``.
 
+``input_size``, ``channels``, ``normalize``, ``mean``, ``std``, ``patch_size``, ``tokenizer``, ``output`` (pretrain)
+    A pretrain record has no ``class_names``: ``input_size`` is ``[side, side]`` the model was BUILT at (the pretrain
+    streams make square images), ``channels`` is 3, ``normalize`` is ``"standardize"`` (:data:`PRETRAIN_NORMALIZE`: the
+    word image_classification records for the same dataset) with ``mean`` and ``std`` the statistics the streams
+    standardize with (``train.common.image_streams.stream_statistics``), ``patch_size`` is the side of a patch (a
+    positive int dividing ``input_size``), ``tokenizer`` is the 64 lowercase hex digits of the sha256 of a BEiT run's
+    tokenizer file (``null`` for a family with none) and ``output`` is ``"patch_embeddings"`` (:data:`PRETRAIN_OUTPUTS`:
+    the backbone's patch-token embeddings, ``N = (side / patch_size)^2`` rows per image, a class-token row dropped).
+    ``load_model`` refuses a record whose size or channels are not the backbone's before the model is called
+    (:func:`train.api.pretrain_predictor.check_built_size`), and one whose patch is not the model's by the rows of its
+    output on a zero image (:func:`train.api.pretrain_predictor.check_output`). A resume compares the geometry, the
+    scaling, the patch and the tokenizer.
+
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
     run's resolved ``model_args`` set to another value, so the model is the variant WITH these
@@ -115,10 +128,10 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)``
+``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)``
     :return: the record for a finished data load (not checked; see their docstrings). The first
         writes a classification record, the second a segmentation record, the third a denoising one, the fourth a forecasting
-        one, the fifth a depth one.
+        one, the fifth a depth one, the sixth a pretrain one.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
@@ -169,7 +182,8 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
         size and the record's channels) does not match the record is refused here. A ``image_denoising``
         record gives a :class:`~train.api.denoising_predictor.DenoisingPredictor`, a ``time_series_forecasting`` one a
         :class:`~train.api.forecast_predictor.ForecastPredictor`, a ``depth_estimation`` one a
-        :class:`~train.api.depth_predictor.DepthPredictor`.
+        :class:`~train.api.depth_predictor.DepthPredictor`, a ``pretrain`` one a
+        :class:`~train.api.pretrain_predictor.PretrainPredictor`.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -190,14 +204,18 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
 ``EXPORT_RULES[task]`` (an :class:`ExportRule`)
     What ``export`` asks the task: ``shape_of(record)`` is the shape the command line traces (the record's input
     shape; a denoiser's is ``(None, None, channels)``, a free height and width), ``check(record, format, shape)``
-    raises a :class:`ConfigError` for a cell of the task's export table that is refused (denoising and forecasting
-    only, :data:`train.api.denoising_predictor.EXPORT_REFUSALS`, :data:`train.api.forecast_predictor.EXPORT_REFUSALS`)
-    and, for forecasting and depth, for a traced shape that is not the record's (a depth model exports every format at
-    its trained size only, :func:`train.api.depth_predictor.check_export`), and ``note(record)`` is the sentence logged beside an export. ``served`` is ``None`` for the image tasks (the file
-    is the model) and, for forecasting, the layer that standardizes a raw window, runs the model, decodes and
-    de-standardizes (:class:`train.common.forecast_run.ServedForecaster`); the rank of ``shape_of(record)`` is the
-    rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster). A row in every table of
-    :data:`TASK_TABLES`, this one included.
+    raises a :class:`ConfigError` for a cell of the task's export table that is refused (denoising, forecasting and
+    pretrain only, :data:`train.api.denoising_predictor.EXPORT_REFUSALS`,
+    :data:`train.api.forecast_predictor.EXPORT_REFUSALS`, :data:`train.api.pretrain_predictor.EXPORT_REFUSALS`) and,
+    for forecasting, depth and pretrain, for a traced shape that is not the record's (a depth model exports every
+    format at its trained size only, :func:`train.api.depth_predictor.check_export`, and so does a pretrain model,
+    :func:`train.api.pretrain_predictor.check_export`), and ``note(record)`` is the sentence logged beside an export.
+    ``served`` is ``None`` for the other image tasks (the file is the model), for forecasting the layer that
+    standardizes a raw window, runs the model, decodes and de-standardizes
+    (:class:`train.common.forecast_run.ServedForecaster`), and for pretrain a functional model over the run's backbone
+    that returns the patch-token embeddings (:func:`train.api.pretrain_predictor.served`); the rank of
+    ``shape_of(record)`` is the rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster). A row
+    in every table of :data:`TASK_TABLES`, this one included.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
@@ -259,6 +277,7 @@ from . import registry
 from .args import is_count
 from .depth_args import TASK as DEPTH
 from .errors import ConfigError
+from .pretrain_args import TASK as PRETRAIN
 from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 
 # ---------------------------------------------------------------------
@@ -359,6 +378,21 @@ RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
         "normalize",
         "output",
     ),
+    PRETRAIN: (
+        "schema_version",
+        "task",
+        "model",
+        "family",
+        "variant",
+        "input_size",
+        "channels",
+        "normalize",
+        "mean",
+        "std",
+        "patch_size",
+        "tokenizer",
+        "output",
+    ),
 }
 
 #: What ``output`` may say in a segmentation record.
@@ -376,6 +410,13 @@ DENOISING_PROBE_SIDE = 32
 DEPTH_NORMALIZE = "imagenet"
 DEPTH_OUTPUTS = ("relative_disparity",)
 DEPTH_CHANNELS = 3
+
+#: What ``normalize`` says in a pretrain record (the streams always standardize, with ``mean`` and ``std``: the word
+#: image_classification records for the same dataset); what ``output`` may say (the backbone's patch-token embeddings);
+#: the channels its model takes (the pretrain streams are RGB).
+PRETRAIN_NORMALIZE = "standardize"
+PRETRAIN_OUTPUTS = ("patch_embeddings",)
+PRETRAIN_CHANNELS = 3
 
 #: What ``head`` may say in a forecasting record, and the sources ``data_format`` may name (the ``data.format`` values of the task).
 FORECAST_HEADS = ("point", "quantile")
@@ -681,6 +722,50 @@ def build_depth_record(
             "channels": int(channels),
             "normalize": DEPTH_NORMALIZE,
             "output": DEPTH_OUTPUTS[0],
+        },
+        variant_overrides,
+    )
+
+
+def build_pretrain_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    input_size: Sequence[int],
+    channels: int,
+    mean: Sequence[float],
+    std: Sequence[float],
+    patch_size: int,
+    tokenizer: Optional[str],
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a pretrain run; see the module contract.
+
+    :param input_size: ``(side, side)`` the model was built at.
+    :param channels: the model's input channels (3).
+    :param mean, std: the per-channel statistics the streams standardized with.
+    :param patch_size: the side of a patch.
+    :param tokenizer: the sha256 hex of the BEiT tokenizer file; ``None`` for a family with none.
+    :return: the record; ``normalize`` is :data:`PRETRAIN_NORMALIZE` and ``output`` the first of
+        :data:`PRETRAIN_OUTPUTS`. It is NOT checked (:func:`check_record` does that).
+    """
+    return _record_of(
+        PRETRAIN,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "task": PRETRAIN,
+            "model": model,
+            "family": family,
+            "variant": variant,
+            "input_size": [int(side) for side in input_size],
+            "channels": int(channels),
+            "normalize": PRETRAIN_NORMALIZE,
+            "mean": [float(v) for v in mean],
+            "std": [float(v) for v in std],
+            "patch_size": int(patch_size),
+            "tokenizer": tokenizer,
+            "output": PRETRAIN_OUTPUTS[0],
         },
         variant_overrides,
     )
@@ -1105,6 +1190,42 @@ def _depth_tail_problems(record: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _pretrain_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, channels)`` for a square ``input_size``, a ``patch_size`` that divides it and 3 ``channels``."""
+    lines = _input_size_problems(record)
+    size, patch, channels = record["input_size"], record["patch_size"], record["channels"]
+    if not lines and size[0] != size[1]:
+        lines.append(f"'input_size' must be [side, side] (the pretrain streams make square images), got {size!r}")
+    if not (_is_whole(patch) and patch > 0):
+        lines.append(f"'patch_size' must be a positive int, got {patch!r}")
+    elif not lines and size[0] % patch:
+        lines.append(
+            f"'patch_size' {patch} does not divide 'input_size' {size}: the model cuts the image into whole patches")
+    if not (_is_whole(channels) and channels == PRETRAIN_CHANNELS):
+        lines.append(f"'channels' must be {PRETRAIN_CHANNELS} (the pretrain streams are RGB), got {channels!r}")
+        return lines, None
+    return lines, channels
+
+
+def _pretrain_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``normalize`` (a known word other than :data:`PRETRAIN_NORMALIZE`), ``tokenizer`` and
+    ``output``."""
+    lines: List[str] = []
+    if record["normalize"] in _NORMALIZE and record["normalize"] != PRETRAIN_NORMALIZE:
+        lines.append(
+            f"'normalize' must be {PRETRAIN_NORMALIZE!r} (the pretrain streams standardize with the dataset's mean and "
+            f"std), got {record['normalize']!r}"
+        )
+    tokenizer = record["tokenizer"]
+    if tokenizer is not None and not (isinstance(tokenizer, str) and re.fullmatch(r"[0-9a-f]{64}", tokenizer)):
+        lines.append(
+            f"'tokenizer' must be null or the 64 lowercase hex digits of the tokenizer file's sha256, got {tokenizer!r}"
+        )
+    if record["output"] not in PRETRAIN_OUTPUTS:
+        lines.append(f"'output' must be one of {', '.join(PRETRAIN_OUTPUTS)}, got {record['output']!r}")
+    return lines
+
+
 # DECISION plan-2026-11-10T095307-d483ffab/D-006: the per-task work of reading a record is a ROW of
 # a table keyed by task, not a branch. Do NOT add a third ``elif task == ...`` here or in
 # ``input_shape_of``, ``load_model`` or ``_run_on_zeros`` (a third task would be one more branch in
@@ -1206,6 +1327,9 @@ DATA_KEYS: Dict[str, Tuple[str, ...]] = {
     FORECASTING: ("lookback", "horizon", "channels", "value_cols", "scale_floor", "data_format", "data_sha256"),
     # A depth resume compares the size the model is built at, the channels and the standardization: what the crops were.
     DEPTH: ("input_size", "channels", "normalize"),
+    # A pretrain resume compares the geometry, the scaling, the patch and the tokenizer: the masks and the targets are
+    # functions of them. ``output`` is how the predictor answers.
+    PRETRAIN: ("input_size", "channels", "normalize", "mean", "std", "patch_size", "tokenizer"),
 }
 
 
@@ -1841,6 +1965,18 @@ def _depth_output_check(output: Any, record: Mapping[str, Any]) -> None:
     check_output(output, record)
 
 
+def _pretrain_model_check(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> None:
+    from .pretrain_predictor import check_built_size
+
+    check_built_size(model, record, model_file, task_file)
+
+
+def _pretrain_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    from .pretrain_predictor import check_output
+
+    check_output(output, record)
+
+
 def _classification_predictor(model: Any, record: Mapping[str, Any]) -> "Predictor":
     return Predictor(model, record)
 
@@ -1867,6 +2003,12 @@ def _depth_predictor(model: Any, record: Mapping[str, Any]) -> Any:
     from .depth_predictor import DepthPredictor
 
     return DepthPredictor(model, record)
+
+
+def _pretrain_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    from .pretrain_predictor import PretrainPredictor
+
+    return PretrainPredictor(model, record)
 
 
 class ExportRule(NamedTuple):
@@ -1952,6 +2094,24 @@ def _depth_export_note(record: Mapping[str, Any]) -> str:
     return export_note(record)
 
 
+def _pretrain_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    from .pretrain_predictor import check_export
+
+    check_export(record, format, shape)
+
+
+def _pretrain_served(model: Any, record: Mapping[str, Any]) -> Any:
+    from .pretrain_predictor import served
+
+    return served(model, record)
+
+
+def _pretrain_export_note(record: Mapping[str, Any]) -> str:
+    from .pretrain_predictor import export_note
+
+    return export_note(record)
+
+
 #: Geometry keys and the channel count, per task (see the contract above).
 GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Optional[int]]]] = {
     CLASSIFICATION: _classification_geometry,
@@ -1959,6 +2119,7 @@ GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Option
     DENOISING: _denoising_geometry,
     FORECASTING: _forecast_geometry,
     DEPTH: _depth_geometry,
+    PRETRAIN: _pretrain_geometry,
 }
 
 #: The keys only one task holds (classification's ``eval_transform``, segmentation's void,
@@ -1969,6 +2130,7 @@ TAIL_CHECKS: Dict[str, Callable[[Mapping[str, Any]], List[str]]] = {
     DENOISING: _denoising_tail_problems,
     FORECASTING: _forecast_tail_problems,
     DEPTH: _depth_tail_problems,
+    PRETRAIN: _pretrain_tail_problems,
 }
 
 #: A denoiser's own input is flexible, so its row gives the zero image it is probed with.
@@ -1978,22 +2140,24 @@ INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
     DENOISING: _denoising_input_shape,
     FORECASTING: _forecast_input_shape,
     DEPTH: _segmentation_input_shape,
+    PRETRAIN: _segmentation_input_shape,
 }
 
 #: The record key that holds the input geometry, per task (a denoiser's is its channel count).
 INPUT_KEY: Dict[str, str] = {
     CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels", FORECASTING: "lookback",
-    DEPTH: "input_size",
+    DEPTH: "input_size", PRETRAIN: "input_size",
 }
 
-#: What a loaded model says of itself against its record, run BEFORE the model is called (D-042): a forecaster's built window
-#: and a depth model's built size.
+#: What a loaded model says of itself against its record, run BEFORE the model is called (D-042): a forecaster's built
+#: window, a depth model's built size and a pretrain backbone's built size and channels.
 MODEL_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any], Path, Path], None]] = {
     CLASSIFICATION: _no_model_check,
     SEGMENTATION: _no_model_check,
     DENOISING: _no_model_check,
     FORECASTING: _forecasting_model_check,
     DEPTH: _depth_model_check,
+    PRETRAIN: _pretrain_model_check,
 }
 
 OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
@@ -2002,6 +2166,7 @@ OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
     DENOISING: _denoising_output_check,
     FORECASTING: _forecasting_output_check,
     DEPTH: _depth_output_check,
+    PRETRAIN: _pretrain_output_check,
 }
 
 PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
@@ -2010,6 +2175,7 @@ PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
     DENOISING: _denoising_predictor,
     FORECASTING: _forecasting_predictor,
     DEPTH: _depth_predictor,
+    PRETRAIN: _pretrain_predictor,
 }
 
 #: What ``export`` does per task (see :class:`ExportRule`). Classification and segmentation trace at the record's
@@ -2024,6 +2190,10 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     # A depth model's file takes ImageNet-standardized images at the trained size (D-009): the record's own input shape;
     # every format is written, and ``check`` refuses any other size by name (D-018).
     DEPTH: ExportRule(_segmentation_input_shape, _depth_export_check, _depth_export_note),
+    # A pretrain model's file is its backbone's embeddings at the trained size: ``served`` is a functional model over
+    # the run's backbone, ``check`` refuses another size and the measured cells that do not convert (plan 5c6cc105
+    # D-003, D-024).
+    PRETRAIN: ExportRule(_segmentation_input_shape, _pretrain_export_check, _pretrain_export_note, _pretrain_served),
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of

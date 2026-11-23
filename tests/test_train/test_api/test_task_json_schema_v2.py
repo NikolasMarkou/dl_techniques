@@ -34,6 +34,7 @@ from train.api.predictor import (
     SCHEMA_VERSION,
     build_depth_record,
     build_forecast_record,
+    build_pretrain_record,
     build_segmentation_record,
     build_task_record,
     check_record,
@@ -51,6 +52,7 @@ SEGMENTATION = "image_segmentation"
 DENOISING = "image_denoising"
 FORECASTING = "time_series_forecasting"
 DEPTH = "depth_estimation"
+PRETRAIN = "pretrain"
 
 #: The keys and order of a version 1 classification record, written out (not read from the module).
 V1_KEYS = [
@@ -97,6 +99,15 @@ def depth(**changes):
     return value
 
 
+def pretrain(**changes):
+    value = build_pretrain_record(
+        model="beit_mim/beit_tiny", family="beit_mim", variant="beit_tiny", input_size=(32, 32), channels=3,
+        mean=[0.49, 0.48, 0.45], std=[0.25, 0.24, 0.26], patch_size=4, tokenizer="ab" * 32,
+    )
+    value.update(changes)
+    return value
+
+
 def without(value, *keys):
     value = dict(value)
     for key in keys:
@@ -109,9 +120,9 @@ def without(value, *keys):
 # ---------------------------------------------------------------------
 
 
-def test_the_version_is_two_and_the_tables_are_the_five_tasks():
+def test_the_version_is_two_and_the_tables_are_the_six_tasks():
     assert SCHEMA_VERSION == 2
-    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH])
+    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH, PRETRAIN])
     assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
     assert OPTIONAL_RECORD_KEYS == ("variant_overrides", "init")
 
@@ -164,8 +175,19 @@ def test_a_depth_record_has_its_own_keys_the_trained_size_and_no_class_names_and
     assert not {"class_names", "mean", "std", "input_shape", "lookback"} & set(record)
 
 
-@pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth],
-                         ids=[CLASSIFICATION, SEGMENTATION, FORECASTING, DEPTH])
+def test_a_pretrain_record_has_its_own_keys_the_patch_the_tokenizer_and_no_class_names():
+    record = pretrain()
+    assert list(record) == list(RECORD_KEYS[PRETRAIN]) == [
+        "schema_version", "task", "model", "family", "variant", "input_size", "channels", "normalize", "mean", "std",
+        "patch_size", "tokenizer", "output",
+    ]
+    assert (record["task"], record["input_size"], record["channels"], record["patch_size"]) == (PRETRAIN, [32, 32], 3, 4)
+    assert (record["normalize"], record["tokenizer"], record["output"]) == ("standardize", "ab" * 32, "patch_embeddings")
+    assert not {"class_names", "input_shape", "lookback"} & set(record)
+
+
+@pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth, pretrain],
+                         ids=[CLASSIFICATION, SEGMENTATION, FORECASTING, DEPTH, PRETRAIN])
 def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp_path):
     record = make()
     check_record(record, "<built>")
@@ -175,7 +197,7 @@ def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp
 
 
 def test_the_optional_key_rides_on_every_task():
-    for make in (classification, segmentation, forecasting, depth):
+    for make in (classification, segmentation, forecasting, depth, pretrain):
         with_overrides = make(variant_overrides={"depth": 4})
         check_record(with_overrides, "<built>")
     assert "variant_overrides" not in segmentation()

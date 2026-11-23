@@ -6,7 +6,8 @@ ids). It supplies the ten required hooks, the two seams of the shared sequence (
 the bar, and nothing else (a task overrides hooks, never stages). This part pins:
 
 * **The hook table.** Every hook of ``REQUIRED_HOOKS`` is overridden, and so is each optional one the task relies on;
-  ``task_record`` answers ``None`` (the task writes no ``task.json``, D-013).
+  ``task_record`` answers the ``pretrain`` record (plan-2026-11-19T081214-5c6cc105 step 4; its keys and values are pinned
+  in ``test_pretrain_record.py``).
 * **The bar** (D-009). ``val_loss`` is a loss, so the bar is STRICTLY below, in float32: equal is a miss, and a float64
   value that rounds to the float32 threshold is judged in float32. ``success_value`` is the MINIMUM of ``val_loss`` over
   the selection window (and ignores the epochs before it). The threshold is ``min(baseline, epoch-zero)``: the baseline is
@@ -26,10 +27,11 @@ floor are found at build time (the run directory is claimed, and the message say
 what a 16-code toy can reach, so the arms that need a tokenizer to PASS lower it by patching the module constant.
 
 Third part (step 12): a 2-epoch run per family through ``train_pretrain`` and through ``cli.main(["pretrain", ...])`` on the fake
-CIFAR-10 (CPU, ``tmp_path``). It pins the run-directory listing (derived by running, no ``task.json``), the equal ``config.json``
+CIFAR-10 (CPU, ``tmp_path``). It pins the run-directory listing (derived by running, ``task.json`` included), the equal ``config.json``
 bytes, the summary's metric, baseline, epoch-zero loss, threshold and verdict, ``steps_per_epoch == n_train // batch`` as a fit
 spy sees it (a callback stops a fit that has no epoch length, so a missing ``steps_per_epoch`` is reported, not hung), the best
-checkpoint's reload gap of exactly 0.0, and the ``task.json`` refusals of ``predict`` and ``export``.
+checkpoint's reload gap of exactly 0.0, and that ``predict`` and ``export`` read the run in both input forms (the
+directory and its ``best_model.keras``).
 
 The runs are real ``et_mim/et_tiny`` runs (``model_args.num_steps=2``) on the fake CIFAR-10 of
 ``tests/classification_fakes.py``: 54 fit rows, batch 4, so 13 steps of an epoch. Tests write only under ``tmp_path``.
@@ -143,7 +145,7 @@ OPTIONAL_HOOKS = (
     "check_model_args",      # the refusals before the claim
     "epoch_line_metrics",    # the epoch line prints loss and val_loss only
     "unjudged_note",         # why init_scale_warning is null
-    "task_record",           # the task writes none
+    "task_record",           # the pretrain record (test_pretrain_record.py)
 )
 
 
@@ -164,9 +166,12 @@ def test_every_optional_hook_the_task_relies_on_is_overridden(hook):
     assert getattr(PretrainTrainer, hook) is not getattr(TaskTrainer, hook), hook
 
 
-def test_the_task_writes_no_record_and_no_stamps(world, tmp_path):
+def test_the_task_writes_a_pretrain_record_and_no_stamps(world, tmp_path):
+    from train.api.predictor import record_problems
+
     trainer, resolved, context = prepared(tmp_path / "run")
-    assert trainer.task_record(resolved, context, None) is None
+    record = trainer.task_record(resolved, context, SimpleNamespace(input_shape=(32, 32, 3)))
+    assert record_problems(record) == [] and (record["task"], record["tokenizer"]) == ("pretrain", None)
     assert trainer.config_stamps(resolved, registry.MODELS["et_mim"]) == {}
 
 
@@ -279,8 +284,10 @@ def runs(world, tmp_path_factory):
             ReportingCrash(make_config(crashed, **{"analysis_args.figures": True})).run()
         before = read_json(crashed / "checkpoints" / FIT_STATE_NAME)
         trace_before = (crashed / "visualizations" / "energy_trace.csv").read_text()
+        task_before = (crashed / "task.json").read_bytes(), (crashed / "task.json").stat().st_mtime_ns
         PretrainTrainer(make_config(crashed, resume_interrupted=True, **{"analysis_args.figures": True})).run()
-    return {"whole": whole, "crashed": crashed, "sidecar_before": before, "trace_before": trace_before}
+    return {"whole": whole, "crashed": crashed, "sidecar_before": before, "trace_before": trace_before,
+            "task_before": task_before}
 
 
 def sidecar_epoch_zero(run_dir: Path) -> float:
@@ -349,9 +356,16 @@ def test_the_energy_trace_has_one_header_and_one_row_per_finished_epoch(runs):
     assert "\n".join(trace) == runs["trace_before"].rstrip("\n")
 
 
-def test_the_run_directory_holds_no_task_record(runs):
+def test_the_run_directory_holds_a_task_record_and_the_resume_leaves_it_as_it_was(runs):
+    from train.api.predictor import record_problems
+
     for name in ("whole", "crashed"):
-        assert not (runs[name] / "task.json").exists(), name
+        assert record_problems(read_json(runs[name] / "task.json")) == [], name
+    # The crashed run wrote its record before `fit`; its reporting-only resume compared it (DATA_KEYS) and did not
+    # write it again: the bytes and the modification time are the ones from before the resume.
+    path = runs["crashed"] / "task.json"
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == runs["task_before"]
+    assert read_json(path) == read_json(runs["whole"] / "task.json")
 
 
 # ---------------------------------------------------------------------
@@ -836,8 +850,8 @@ def ended(request, world, tokenizers, tmp_path_factory):
 
 RUN_FILES = {
     "best_model.keras", "config.json", "config_requested.json", "final_model.keras", "results_summary.json",
-    "run.lock", "run.log", "training_history.json", "training_log.csv",
-}  # and NO task.json (D-013)
+    "run.lock", "run.log", "task.json", "training_history.json", "training_log.csv",
+}
 RUN_DIRS = {"checkpoints", "model_analysis", "tensorboard", "visualizations"}
 #: The contents of the directories whose names do not depend on the run's clock (tensorboard holds event files).
 NESTED = {
@@ -852,9 +866,9 @@ def names(path: Path) -> set:
 
 
 @pytest.mark.parametrize("which", ["function", "cli"])
-def test_the_run_directory_holds_the_pinned_listing_and_no_task_record(ended, which):
+def test_the_run_directory_holds_the_pinned_listing(ended, which):
     run_dir = getattr(ended, which)
-    assert names(run_dir) == RUN_FILES | RUN_DIRS, "an added or a missing file (task.json included) is a change of the contract"
+    assert names(run_dir) == RUN_FILES | RUN_DIRS, "an added or a missing file is a change of the contract"
     assert names(run_dir / "checkpoints") == NESTED["checkpoints"]
     assert names(run_dir / "model_analysis") == NESTED["model_analysis"]
     assert names(run_dir / "visualizations") == NESTED["visualizations"][ended.family]
@@ -904,28 +918,24 @@ def test_the_best_checkpoint_reloads_with_a_gap_of_exactly_zero(ended, which):
     assert summary["test_metrics_best"] is not None
 
 
-SENTENCE_OF_A_DIRECTORY = "task.json does not exist; a model is loaded from a run directory, or from a .keras file whose directory holds task.json"
-SENTENCE_OF_A_FILE = (
-    "has no record beside it; a .keras file is read with the first of best_model.keras.task.json, best_model.task.json, "
-    "task.json that exists in"
-)
-
-
 @pytest.mark.parametrize("command", ["predict", "export"])
 @pytest.mark.parametrize("form", ["directory", "keras_file"])
-def test_predict_and_export_refuse_a_pretrain_run_with_the_task_json_sentence_of_their_input_form(ended, command, form, capsys, tmp_path):
+def test_predict_and_export_read_a_pretrain_run_in_either_input_form(ended, command, form, capsys, tmp_path):
     from PIL import Image
 
     from train.api import cli
 
     model = ended.function if form == "directory" else ended.function / "best_model.keras"
+    record = read_json(ended.function / "task.json")
     picture = tmp_path / "a.png"
     Image.new("RGB", (32, 32)).save(picture)
-    answer = tmp_path / ("answers.json" if command == "predict" else "exported.keras")
+    answer = tmp_path / ("answers" if command == "predict" else "exported.keras")
     asked = [f"data={picture}", f"out={answer}"] if command == "predict" else [f"out={answer}", "format=keras"]
     code = cli.main([command, f"model={model}", *asked])
-    error = capsys.readouterr().err
-    assert code == 2, error
-    assert f"Invalid value for 'model': {model}" in error
-    assert (SENTENCE_OF_A_DIRECTORY if form == "directory" else SENTENCE_OF_A_FILE) in error
-    assert not answer.exists() and not (ended.function / "task.json").exists()
+    assert code == 0, capsys.readouterr().err
+    if command == "predict":
+        assert sorted(path.name for path in answer.iterdir()) == ["a.npy", "index.json"]
+        patches = (record["input_size"][0] // record["patch_size"]) * (record["input_size"][1] // record["patch_size"])
+        assert np.load(answer / "a.npy").shape[0] == patches
+    else:
+        assert answer.is_file() and read_json(answer.with_name(answer.name + ".task.json")) == record

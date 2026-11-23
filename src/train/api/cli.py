@@ -62,6 +62,12 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     and, written last, ``index.json`` with one ``{"path", "file", "size"}`` per image
     (:func:`train.api.depth_predictor.write_predictions`). Two images with one stem are refused before the model is loaded.
 
+    For a PRETRAIN run ``out`` is a new DIRECTORY: one ``<stem>.npy`` per image, the float32 ``(N, width)``
+    patch-token embeddings of the backbone (``N = (side / patch_size)^2``, BEiT's class-token row dropped; the image
+    is resized to the trained side and standardized as the evaluation stream does), and, written last, ``index.json``
+    with one ``{"path", "file", "shape"}`` per image (:func:`train.api.pretrain_predictor.write_predictions`). Two
+    images with one stem are refused before the model is loaded.
+
 ``convert <dataset> key=value ...``
     Writes a source dataset as index masks and CSV listings the segmentation task reads, outside the
     source tree, resumably and without deleting (:mod:`train.api.convert`; ``ade20k``, ``coco``). Exit 0 and ONLY
@@ -179,7 +185,10 @@ from .config import (
 )
 from .errors import ConfigError, ConfigValidationError, DLTrainError
 from .forecast_predictor import FLAT_WINDOW_EXPORT_NOTE
-from .predictor import CLASSIFICATION, DENOISING, DEPTH, FORECASTING, SEGMENTATION, known_tasks_line, record_beside
+from .predictor import (
+    CLASSIFICATION, DENOISING, DEPTH, FORECASTING, PRETRAIN, SEGMENTATION, known_tasks_line, record_beside,
+)
+from .pretrain_predictor import EXPORT_REFUSALS as PRETRAIN_EXPORT_REFUSALS
 
 # ---------------------------------------------------------------------
 
@@ -331,11 +340,18 @@ EXPORT_NOTES = (
     "shift per image, not metric depth; resize the map back to the picture yourself (predict does both resizes).",
     "Every format is written; measured against Keras on a vit_s at 252 px, the files differ by at most 1.3e-5 of",
     "the map's largest value (tflite; saved_model and onnx less).",
+    "",
+    "a pretrain model takes float32 images (batch, height, width, 3) at the input_size in <out>.task.json only",
+    "(another size is refused in every format, keras included; the batch is free), scaled to [0, 1] and standardized",
+    "with the mean and std there, (x - mean) / std, after a bilinear resize of the picture to that size. It returns",
+    "the backbone's patch-token embeddings (batch, N, width), N = (height / patch_size) x (width / patch_size) rows",
+    "in row-major order, BEiT's class-token row dropped. Refused with the reason: "
+    + ", ".join(f"{fmt} of {family}" for family, fmt in PRETRAIN_EXPORT_REFUSALS) + ".",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
     Option("data", "an image file, or a directory of images (searched recursively); a forecasting model takes a csv file or a .npy or .npz array of windows"),
-    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts; a depth model a directory of float32 .npy relative-disparity maps and an index.json)"),
+    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts; a depth model a directory of float32 .npy relative-disparity maps and an index.json; a pretrain model a directory of float32 .npy patch-token embeddings (N, width) and an index.json)"),
 )
 
 
@@ -571,6 +587,19 @@ def _predict_disparity(model_path: Path, record: Mapping[str, Any], files: List[
     return 0
 
 
+def _predict_embeddings(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the patch-token embeddings of ``files`` as ``.npy`` arrays and an index into the new directory ``out``."""
+    from .depth_predictor import ARRAY_SUFFIX
+    from .predictor import load_model
+    from .pretrain_predictor import write_predictions
+    from .segmentation_predictor import mask_names
+
+    mask_names(files, ARRAY_SUFFIX)  # two images with one stem are refused before the model is loaded
+    write_predictions(load_model(model_path), files, out)
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
 #: What ``predict`` lists from ``data=``, per task: ``lister(data) -> files``. The image tasks list images (recursively); a
 #: forecasting run takes one csv or numpy file. The keys are those of :data:`PREDICT_WRITERS`.
 DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
@@ -579,6 +608,7 @@ DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
     DENOISING: _image_files,
     FORECASTING: _forecast_files,
     DEPTH: _image_files,
+    PRETRAIN: _image_files,
 }
 
 #: What ``predict`` writes, per task: ``writer(model_path, record, files, out) -> exit code``. A task
@@ -591,6 +621,7 @@ PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path],
     DENOISING: _predict_images,
     FORECASTING: _predict_forecasts,
     DEPTH: _predict_disparity,
+    PRETRAIN: _predict_embeddings,
 }
 
 

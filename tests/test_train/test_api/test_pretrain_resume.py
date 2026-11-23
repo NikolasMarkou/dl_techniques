@@ -184,7 +184,11 @@ def test_the_weights_a_resume_restores_score_the_val_loss_the_killed_run_logged_
 def test_the_summary_says_the_run_resumed_and_finished(chain):
     summary = json.loads((chain.run / "results_summary.json").read_text())
     assert summary["resumed_after_epochs"] == KILL_2[0] and summary["epochs_run"] == EPOCHS
-    assert (chain.run / "final_model.keras").is_file() and not (chain.run / "task.json").exists()
+    assert (chain.run / "final_model.keras").is_file()
+    # Written once, before the first process's `fit`; each resume compared it (DATA_KEYS) and left it as it was.
+    from train.api.predictor import record_problems
+
+    assert record_problems(json.loads((chain.run / "task.json").read_text())) == []
 
 
 def test_the_energy_trace_has_one_header_and_one_row_per_finished_epoch(chain):

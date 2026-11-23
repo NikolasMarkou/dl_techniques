@@ -14,12 +14,13 @@ the classifiers do.
 """
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Sequence, Tuple
 
 import numpy as np
 import tensorflow as tf
 
 from dl_techniques.datasets.vision.classification import get_spec
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.datasets.vision.imagenette import (
     CROP_POLICIES,
     ImagenetteConfig,
@@ -81,6 +82,58 @@ class ImageStreams:
     def capped_steps(self, max_steps: Optional[int]) -> Tuple[int, int]:
         """``(steps_per_epoch, val_steps)``, each capped by ``--max-steps`` (smoke runs)."""
         return capped_steps(self.steps_per_epoch, self.val_steps, max_steps)
+
+
+def standardizer(mean: Sequence[float], std: Sequence[float]) -> Callable[[tf.Tensor], tf.Tensor]:
+    """``image -> (image - mean) / std`` per channel, with ``mean`` and ``std`` as float32.
+
+    Interface contract: ``mean`` and ``std`` are one number per channel (``std`` positive); the
+    returned function takes a float32 image or batch ``(..., channels)`` and returns it standardized,
+    float32. The in-memory streams standardize with it; :func:`evaluation_transform` ends with it.
+    """
+    mean, std = np.asarray(mean, np.float32), np.asarray(std, np.float32)
+    return lambda image: (image - mean) / std
+
+
+def stream_statistics(dataset: str) -> Tuple[np.ndarray, np.ndarray]:
+    """The per-channel ``(mean, std)`` the streams of ``dataset`` standardize with, float32 ``(3,)`` each.
+
+    Interface contract: ``dataset`` is one of :data:`SUPPORTED_DATASETS`; raises ``ValueError``
+    for another. Imagenette's records are standardized inside
+    ``dl_techniques.datasets.vision.imagenette.imagenette_examples`` with the ImageNet statistics
+    (its ``normalize="imagenet"``, which :func:`load_image_streams` passes); an in-memory dataset
+    with its spec's, which the CIFAR branch below reads from here. A pretrain ``task.json``
+    records these numbers.
+    """
+    if dataset not in SUPPORTED_DATASETS:
+        raise ValueError(f"Unsupported dataset {dataset!r}; supported: {sorted(SUPPORTED_DATASETS)}")
+    spec = get_spec(dataset)
+    if spec.source == "records":
+        return np.asarray(IMAGENET_MEAN, np.float32), np.asarray(IMAGENET_STD, np.float32)
+    return np.asarray(spec.mean, np.float32), np.asarray(spec.std, np.float32)
+
+
+def evaluation_transform(
+        image_size: int, mean: Sequence[float], std: Sequence[float],
+) -> Callable[[tf.Tensor], tf.Tensor]:
+    """The transform of the selection and test streams: a ``[0, 1]`` image to the model's input.
+
+    Interface contract: the returned function takes one float32 ``(H, W, 3)`` image in ``[0, 1]``
+    (bytes divided by 255) of any size and returns the float32 ``(image_size, image_size, 3)``
+    input: a bilinear resize (``classification_data.resizer``), then :func:`standardizer` with
+    ``mean`` and ``std`` (:func:`stream_statistics` for the dataset). That is what the streams
+    apply after their decode, with ``crop_policy="resize"``: the CIFAR branch below (it skips the
+    resize at the native size, where the resize is the identity, measured bit for bit) and
+    Imagenette's records (``imagenette_examples``: a bilinear resize, then the ImageNet statistics).
+    """
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-023
+    # The pretrain predictor imports THIS function; the CIFAR branch below standardizes with the
+    # same `standardizer`. Do NOT copy the transform into the predictor (D-003) and do NOT add a
+    # crop: the pretrain streams resize the whole image. Imagenette's own transform lives in the
+    # `dl_techniques` loader and is held equal to this one by `test_pretrain_record.py`.
+    resize = resizer(image_size)
+    normalize = standardizer(mean, std)
+    return lambda image: normalize(resize(image))
 
 
 def _indexed_call(indexed_element_map_fn: ElementMapFn) -> ElementMapFn:
@@ -223,9 +276,8 @@ def load_image_streams(
     else:
         arrays = load_split_arrays(
             dataset, seed=seed, validation_split=split, max_samples=max_samples)
-        mean, std = np.asarray(spec.mean, np.float32), np.asarray(spec.std, np.float32)
         common = dict(
-            seed=stream, normalize=lambda image: (image - mean) / std,
+            seed=stream, normalize=standardizer(*stream_statistics(dataset)),
             resize=resizer(None if image_size == spec.input_shape[0] else image_size))
         hook = flip_pad_crop(mode="REFLECT", seed=stream) if augment else None
         train = array_examples(arrays.x_train, arrays.y_train, training=True,

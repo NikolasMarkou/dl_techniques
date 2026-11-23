@@ -1187,14 +1187,15 @@ def test_a_rank_two_shape_is_accepted_only_where_the_rule_says_rank_two(one):
         exporting._input_spec(one.predictor.model, (None, 1), rank=2)
 
 
-def test_the_three_older_tasks_keep_no_served_function_and_the_forecaster_has_one():
+def test_the_image_tasks_keep_no_served_function_and_the_forecaster_and_pretrain_have_one():
+    # Depth (phase 4f) exports its raw model too; pretrain (phase 4h) serves its backbone's embeddings.
     assert predictor.ExportRule._field_defaults["served"] is None, "the default is a no-op: the image tasks export the raw model"
-    older = [task for task in predictor.EXPORT_RULES if task != TASK]
-    assert sorted(older) == ["image_classification", "image_denoising", "image_segmentation"]
-    assert [predictor.EXPORT_RULES[task].served for task in older] == [None, None, None]
-    assert predictor.EXPORT_RULES[TASK].served is not None
+    served = sorted(task for task, rule in predictor.EXPORT_RULES.items() if rule.served is not None)
+    assert served == sorted([TASK, "pretrain"])
+    raw = [task for task in predictor.EXPORT_RULES if task not in served]
+    assert sorted(raw) == ["depth_estimation", "image_classification", "image_denoising", "image_segmentation"]
     assert len(predictor.EXPORT_RULES[TASK].shape_of(one_record())) == 2
-    assert all(len(predictor.EXPORT_RULES[task].shape_of({"input_shape": [8, 8, 1], "input_size": [8, 8], "channels": 1})) == 3 for task in older)
+    assert all(len(predictor.EXPORT_RULES[task].shape_of({"input_shape": [8, 8, 1], "input_size": [8, 8], "channels": 1})) == 3 for task in raw)
 
 
 def one_record() -> Dict[str, Any]:
