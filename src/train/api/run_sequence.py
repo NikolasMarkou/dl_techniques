@@ -726,7 +726,7 @@ def train_or_restore(run: Run) -> None:
         record = trainer.task_record(config, run.context, data)
         if record is not None:
             if run.init_block is not None:
-                # The init block is added HERE, the one task.json write site, not in the five record builders (D-014).
+                # The init block is added HERE, the one task.json write site, not in the record builders (D-014).
                 record = {**record, "init": run.init_block}
             if not write_task(run_dir, record):
                 logger.info("task.json is already in the run directory: left as it is")

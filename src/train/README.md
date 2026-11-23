@@ -1612,19 +1612,21 @@ gate added only `p4g_gate_*` run directories to `results/`: 76 entries before, 8
 <!-- pretrain-gate:begin -->
 **Measured: the Phase 4h gate** (plan 5c6cc105: the pretrain sources, the two classifiers from them and from scratch, pretrain
 from pretrain, the Energy Transformer refusal, `predict` and `export`). Run on the code HEAD `14f3ef3a6` of the branch
-`train-api/phase-4h` (the commits after it change no file under `src/` but this README, and under `tests/` only the README
-command test), one job at a time, at the recipes' learning rates and seed 42: the GPU runs on an NVIDIA GeForce RTX 4090
-(`CUDA_VISIBLE_DEVICES=0`, no `--gpu`), the refusal and `predict` and `export` on the CPU. Each log names the HEAD and the
-worktree `src` as the origin of `dl_techniques` and `train`; the two sources' `best_model.keras` and the tokenizer kept their
-sha256 through every job. With none of the new rows used nothing changed: three CPU reference runs (API classification, the
-legacy convnext trainer, API segmentation) reproduce the runs recorded before Phase 4g exactly (`GOLDEN: EXACT for api,
-convnext, seg`), the `checkpoint` key that Phase 4g renamed `init` aside. Before those, the same night ran this work's targeted
-tests on the CPU at that HEAD: 67 pytest commands, 5,937 tests run, 1 failed and 4 skipped (the failure, in
-`test_the_readme_commands_run_to_the_claim.py`: this README's forecasting `init` example named a run that no command trained,
-wrong since Phase 4g wrote the `init` section; the example now trains its source first), and 73 of 73 planted mutants made their
-tests fail (1 stale spec, not run). Every one of the gate's 84 claims holds; the predictions below are reported apart. Every
-number is read by script from the runs' own files and the night's logs. Step is the median epoch after the first over its steps,
-peak memory TensorFlow's GPU allocator peak.
+`train-api/phase-4h` (the commits after it change no code under `src/`, only this README and a comment line of
+`run_sequence.py`, and under `tests/` only the README command test and the export read-back of `test_pretrain_record.py`), one
+job at a time, at the recipes' learning rates and seed 42: the GPU runs on an NVIDIA GeForce RTX 4090 (`CUDA_VISIBLE_DEVICES=0`,
+no `--gpu`), the refusal and `predict` and `export` on the CPU. Each log names the HEAD and the worktree `src` as the origin of
+`dl_techniques` and `train`; the two sources' `best_model.keras` and the tokenizer kept their sha256 through every job. With
+none of the new rows used nothing changed: three CPU reference runs (API classification, the legacy convnext trainer, API
+segmentation) reproduce the runs recorded before Phase 4g exactly (`GOLDEN: EXACT for api, convnext, seg`), the `checkpoint` key
+that Phase 4g renamed `init` aside. Before those, the same night ran this work's targeted tests on the CPU at that HEAD: 67
+pytest commands, which overlap (a file run whole and again by selector, or named by more than one command), so 5,937 test
+executions (5,932 passed, 1 failed, 4 skipped) of 3,177 distinct tests, of which 3,174 passed, 1 failed and 2 were skipped, each
+with one outcome in every command that ran it (the failure, in `test_the_readme_commands_run_to_the_claim.py`: this README's
+forecasting `init` example named a run that no command trained, wrong since Phase 4g wrote the `init` section; the example now
+trains its source first), and 73 of 73 planted mutants made their tests fail (1 stale spec, not run). Every one of the gate's 84
+claims holds; the predictions below are reported apart. Every number is read by script from the runs' own files and the night's
+logs. Step is the median epoch after the first over its steps, peak memory TensorFlow's GPU allocator peak.
 
 | Arm | Run | Copied, resampled, reset, dropped | Relation, split | Bar | Loaded weights at epoch zero | Best (epoch of) | Verdict | Step | Peak memory | Wall |
 |---|---|---|---|---|---|---|---|---|---|---|

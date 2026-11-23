@@ -38,6 +38,7 @@ from train.api.exporting import FORMATS, SUFFIX, TFLITE_CHECK_RTOL
 from train.api.tasks.pretrain import PretrainTrainer
 from train.common import pretrain_run
 
+from .test_export_roundtrip import read_back
 from .test_pretrain_task import (  # noqa: F401  (``world`` is a fixture)
     BEIT_MODEL, BEIT_SMALL, LOW_FLOOR, TOKENIZER_KEY, make_config, make_tokenizer, world,
 )
@@ -321,27 +322,6 @@ def test_a_path_a_pil_image_and_an_array_of_one_picture_give_one_answer(runs, tm
 # ---------------------------------------------------------------------
 
 
-def run_file(path: Path, fmt: str, batch: np.ndarray) -> np.ndarray:
-    """The exported file's answer for ``batch``, read back the way its user would."""
-    if fmt == "keras":
-        return np.asarray(keras.models.load_model(str(path), compile=False)(batch))
-    if fmt == "saved_model":
-        loaded = tf.saved_model.load(str(path))  # held: a temporary's variables are deleted under the call
-        return np.asarray(loaded.serve(tf.constant(batch)))
-    if fmt == "tflite":
-        interpreter = tf.lite.Interpreter(model_path=str(path))
-        entry = interpreter.get_input_details()[0]
-        interpreter.resize_tensor_input(entry["index"], batch.shape)
-        interpreter.allocate_tensors()
-        interpreter.set_tensor(entry["index"], batch)
-        interpreter.invoke()
-        return interpreter.get_tensor(interpreter.get_output_details()[0]["index"])
-    import onnxruntime
-
-    session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-    return session.run(None, {session.get_inputs()[0].name: batch})[0]
-
-
 EXPORTED = [(family, fmt) for family in FAMILIES for fmt in FORMATS if (family, fmt) != ("et_mim", "tflite")]
 
 
@@ -356,7 +336,7 @@ def test_each_export_that_is_not_refused_equals_the_predictor(runs, family, fmt,
     predictor = load_model(runs[family].run)
     images = pictures(3, seed=5)
     expected = np.stack(predictor.predict(images)["embeddings"])
-    got = run_file(out, fmt, model_input(images, predictor.record))
+    got = np.asarray(read_back(fmt, out, model_input(images, predictor.record)))
     assert got.shape == expected.shape == (3, N, expected.shape[-1])
     scale = max(1.0, float(np.abs(expected).max()))
     assert float(np.abs(got - expected).max()) <= TFLITE_CHECK_RTOL * scale
