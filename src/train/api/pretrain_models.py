@@ -1,11 +1,12 @@
 """The pretrain model families of ``python -m train``: adapters, refusals, recipes and notices.
 
-Two families train the ``pretrain`` task:
+Two families train the ``pretrain`` task (their names are :data:`train.api.pretrain_args.ET` and ``BEIT``; the names
+they had before, ``energy_transformer`` and ``beit``, are not aliases of them):
 
-``energy_transformer``
+``et_mim``
     ``dl_techniques.models.vision.energy_transformer``: the Energy Transformer completing masked patches (method
     ``et_masked``). The model returns the pixels of every patch, the mask reaches the loss as ``sample_weight``.
-``beit``
+``beit_mim``
     ``dl_techniques.models.vision.beit``: BEiT predicting, for the masked patches, the code ids a frozen stage-0
     tokenizer gives them (method ``beit_mim``). The model returns logits over the tokenizer's codebook.
 
@@ -41,11 +42,11 @@ Interface contract
 
 ``resolve_pretrain_args(context, optim_args, model_args)``
     The ``resolve_model_args`` of both families. :return: the factory keywords: the recipe's ``model_args``, then the caller's,
-        without the keys the task reads itself (:data:`TASK_KEYS`: ``model_args.tokenizer_checkpoint`` of ``beit``).
+        without the keys the task reads itself (:data:`TASK_KEYS`: ``model_args.tokenizer_checkpoint`` of ``beit_mim``).
     :raises ConfigValidationError: naming EVERY refused key at once (``model_args.<key>`` and why; a key of the other family is
         named with that family), before the run directory is claimed.
     :raises ConfigError: for an sgd weight decay (no model regularizer is built here), a library-supplied key, an adamw
-        ``kernel_regularizer``, and for ``energy_transformer`` a ``global_clipnorm`` that is not a number (the clip is
+        ``kernel_regularizer``, and for ``et_mim`` a ``global_clipnorm`` that is not a number (the clip is
         load-bearing: a run that nulls it is refused by name).
 
 ``problems_of(family, model_args)``
@@ -82,7 +83,7 @@ from .args import AutoContext, OptimArgs, is_count
 from .config import AUTO, unknown_key_message
 from .denoising_models import named_parameters
 from .errors import ConfigError, ConfigValidationError, UnresolvedAutoError
-from .pretrain_args import GEOMETRY, TASK, WATCH_METRIC
+from .pretrain_args import BEIT, ET, GEOMETRY, TASK, WATCH_METRIC
 from .registry import ModelSpec
 
 # ---------------------------------------------------------------------
@@ -90,8 +91,6 @@ from .registry import ModelSpec
 _HERE = "train.api.pretrain_models"
 _ET = "dl_techniques.models.vision.energy_transformer.model"
 _BEIT = "dl_techniques.models.vision.beit.model"
-
-ET, BEIT = "energy_transformer", "beit"
 
 #: The two methods of ``train.common.pretrain_data`` by family; ``test_pretrain_families`` holds the values equal to its ``METHODS``.
 METHOD_OF: Dict[str, str] = {ET: "et_masked", BEIT: "beit_mim"}
@@ -133,12 +132,12 @@ REFUSED: Dict[str, Dict[str, str]] = {
 #: Keywords the task or the API passes to the adapter itself: ``{family: {key: why}}``. Naming one in ``model_args`` is refused.
 SUPPLIED: Dict[str, Dict[str, str]] = {
     ET: {
-        "variant": "model=energy_transformer/<variant> chooses it",
+        "variant": f"model={ET}/<variant> chooses it",
         "input_shape": "it is (image_size, image_size, 3), from transform_args.image_size",
         "patch_size": "it is data.patch_size, which the masks and the model share",
     },
     BEIT: {
-        "variant": "model=beit/<variant> chooses it",
+        "variant": f"model={BEIT}/<variant> chooses it",
         "input_shape": "it is (image_size, image_size, 3), from transform_args.image_size",
         "patch_size": "it is data.patch_size, which the masks and the model share",
         "vocab_size": "it is read off the tokenizer's codebook (model_args.tokenizer_checkpoint), so it cannot drift from it",
@@ -146,11 +145,11 @@ SUPPLIED: Dict[str, Dict[str, str]] = {
 }
 
 # DECISION plan-2026-11-12T015747-46e5318f/D-007
-# `tokenizer_checkpoint` is a `model_args` key of `beit` that the TASK reads, not the model: it names the frozen stage-0
+# `tokenizer_checkpoint` is a `model_args` key of `beit_mim` that the TASK reads, not the model: it names the frozen stage-0
 # tokenizer whose code ids are the targets and whose codebook size is the model's `vocab_size`. The resolver strips it from the
-# factory keywords and the adapter refuses it, so no path ever reaches a constructor. It is REQUIRED for a beit run; that check
-# (a `.keras` path that exists, named before the claim, with the codebook usage floor) is the task's. Do NOT make it a field
-# of `PretrainData`: the energy_transformer family has no tokenizer, and a key one family refuses by name is a model key.
+# factory keywords and the adapter refuses it, so no path ever reaches a constructor. It is REQUIRED for a beit_mim run; that
+# check (a `.keras` path that exists, named before the claim, with the codebook usage floor) is the task's. Do NOT make it a
+# field of `PretrainData`: the et_mim family has no tokenizer, and a key one family refuses by name is a model key.
 TASK_KEYS: Dict[str, Tuple[str, ...]] = {ET: (), BEIT: ("tokenizer_checkpoint",)}
 
 #: The library callables whose signatures :func:`signature_census` classifies: the factories the adapter calls and the backbone

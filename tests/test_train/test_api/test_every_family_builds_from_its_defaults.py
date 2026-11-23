@@ -94,8 +94,8 @@ DENOISING = "image_denoising"
 #: own ``MODEL_VARIANTS`` (``dl_techniques.models.vision.energy_transformer.model`` and ``...beit.model``). Their builds,
 #: recipes and refusals are in ``test_pretrain_families.py``.
 PRETRAIN_VARIANTS = {
-    "energy_transformer": ["et_tiny", "et_small", "et_base"],
-    "beit": ["beit_tiny", "beit_small", "beit_base", "beit_large"],
+    "et_mim": ["et_tiny", "et_small", "et_base"],
+    "beit_mim": ["beit_tiny", "beit_small", "beit_base", "beit_large"],
 }
 PRETRAIN = "pretrain"
 

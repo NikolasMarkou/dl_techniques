@@ -13,6 +13,7 @@ registers nothing at import: ``test_registry`` swaps both dicts for empty ones.
 """
 
 from .. import registry
+from ..pretrain_args import BEIT, ET
 
 #: One row per task module, in listing order.
 BUILTIN_TASKS = (
@@ -38,7 +39,7 @@ BUILTIN_TASKS = (
         name="pretrain",
         config_class="train.api.tasks.pretrain:PretrainConfig",
         function="train.api.tasks.pretrain:train_pretrain",
-        summary="pretrain a masked-image model (energy_transformer patch completion, beit against a frozen tokenizer)",
+        summary=f"pretrain a masked-image model ({ET} patch completion, {BEIT} against a frozen tokenizer)",
     ),
     registry.TaskSpec(
         name="time_series_forecasting",

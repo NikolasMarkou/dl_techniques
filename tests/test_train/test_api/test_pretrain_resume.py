@@ -13,12 +13,12 @@ resumed ``fit`` starts a fresh iterator, which would replay the stream from its 
   (``start * steps + batch + 1`` for a copy taken inside an epoch), so the stream of a process is the one
   ``PretrainBatches.with_stream`` gives for exactly that count.
 
-Each family (``energy_transformer`` with the fake CIFAR-10, ``beit`` with a tiny tokenizer) runs one chain of three child
+Each family (``et_mim`` with the fake CIFAR-10, ``beit_mim`` with a tiny tokenizer) runs one chain of three child
 processes (``_pretrain_child.py``; the marker protocol of ``test_backup_every_steps.run_child``, which SIGKILLs the RECORDED
 PID at a ``@@AT`` marker) on 3 epochs of 3 batches: process 1 is killed after 2 batches of epoch 1 (the backup holds the end
 of epoch 0), process 2 resumes, finishes epoch 1 and is killed after 2 batches of epoch 2, process 3 resumes and finishes.
 (Killing the same epoch twice would resume at the same count and so on the same stream, by design: the stream is a function
-of the count.) One more run (``energy_transformer``, ``checkpoint_args.backup_every_steps=2``) is killed INSIDE epoch 1 right
+of the count.) One more run (``et_mim``, ``checkpoint_args.backup_every_steps=2``) is killed INSIDE epoch 1 right
 after a mid-epoch copy: the resume runs the one batch the copy had not taken, at ``completed_steps = 3 + 2``.
 
 The data is un-augmented: the augmentation seeds are re-randomised on every iterator, so two iterators of one stream differ in
@@ -50,7 +50,7 @@ CHILD = Path(__file__).resolve().parent / "_pretrain_child.py"
 BATCH, EPOCHS = 16, 3
 #: Batches of one epoch: the fake cifar10's 54 fit rows over the batch (asserted against the data by ``test_the_sizes...``).
 STEPS = 54 // BATCH
-FAMILIES = ("energy_transformer", "beit")
+FAMILIES = ("et_mim", "beit_mim")
 #: Where the two kills land: ``(epoch, batches finished in it)``.
 KILL_1, KILL_2 = (1, 2), (2, 2)
 #: ``completed_steps`` of each resume: the end of epoch 0, the end of epoch 1; and a copy 2 batches into epoch 1.
@@ -62,11 +62,11 @@ FIRST = 3        # the batches whose digest is compared
 def request(family, tokenizer, **changes):
     """The ``mapping`` of a run of ``family`` (a dotted key sets a field of a group); ``out`` is added by the chain."""
     asked = {
-        "model": ET_MODEL if family == "energy_transformer" else BEIT_MODEL,
+        "model": ET_MODEL if family == "et_mim" else BEIT_MODEL,
         "data": {"dataset": "cifar10"}, "epochs": EPOCHS, "batch_size": BATCH,
         "transform_args": {"augment": False},
-        "model_args": {"num_steps": 2} if family == "energy_transformer" else {TOKENIZER_KEY: tokenizer, **BEIT_SMALL},
-        "analysis_args": {"model_analysis": False, "figures": family == "energy_transformer"},
+        "model_args": {"num_steps": 2} if family == "et_mim" else {TOKENIZER_KEY: tokenizer, **BEIT_SMALL},
+        "analysis_args": {"model_analysis": False, "figures": family == "et_mim"},
     }
     return protocol.merge_changes(asked, changes)
 
@@ -89,7 +89,7 @@ class Chain(protocol.ResumeChain):
         return request(self.family, self.tokenizer, **self.changes)
 
     def child_spec(self):
-        return {"floor": LOW_FLOOR if self.family == "beit" else None}
+        return {"floor": LOW_FLOOR if self.family == "beit_mim" else None}
 
 
 def stream_digests(ds):
@@ -138,12 +138,12 @@ def chain(request, world, tokenizer, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def mid_epoch(world, tokenizer, tmp_path_factory):
-    """``energy_transformer`` with a copy every 2 batches: killed after 2 batches of epoch 1, then resumed to the end."""
-    run = Chain(tmp_path_factory.mktemp("resume_mid_epoch"), "energy_transformer", tokenizer,
+    """``et_mim`` with a copy every 2 batches: killed after 2 batches of epoch 1, then resumed to the end."""
+    run = Chain(tmp_path_factory.mktemp("resume_mid_epoch"), "et_mim", tokenizer,
                 **{"checkpoint_args.backup_every_steps": 2})
     run.go("p1", "@@AT 1 2", stop_at=[1, 2])
     run.go("p2", "@@DONE", resume=True)
-    run.expected, run.select, run.data = expected(run.root, "energy_transformer", tokenizer, (STEPS, MID_COMPLETED))
+    run.expected, run.select, run.data = expected(run.root, "et_mim", tokenizer, (STEPS, MID_COMPLETED))
     return run
 
 
@@ -189,7 +189,7 @@ def test_the_summary_says_the_run_resumed_and_finished(chain):
 
 def test_the_energy_trace_has_one_header_and_one_row_per_finished_epoch(chain):
     path = chain.run / "visualizations" / "energy_trace.csv"
-    if chain.family != "energy_transformer":
+    if chain.family != "et_mim":
         assert not path.exists()
         return
     lines = path.read_text().splitlines()

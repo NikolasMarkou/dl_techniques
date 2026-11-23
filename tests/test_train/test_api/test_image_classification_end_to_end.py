@@ -401,8 +401,8 @@ def test_the_function_registers_the_families_before_it_validates(world, tmp_path
     with pytest.raises(ConfigValidationError):
         run_function(tmp_path / "run", epochs="5")
     assert sorted(registry.MODELS) == [
-        "accunet", "beit", "bfcnn", "bfconvunext", "bfunet", "cliffordnet", "cliffordnet_hier", "convnext_seg",
-        "convnext_v1", "convnext_v2", "convunext", "convunext_biased", "depth_anything", "energy_transformer", "ets",
+        "accunet", "beit_mim", "bfcnn", "bfconvunext", "bfunet", "cliffordnet", "cliffordnet_hier", "convnext_seg",
+        "convnext_v1", "convnext_v2", "convunext", "convunext_biased", "depth_anything", "et_mim", "ets",
         "mdn", "nbeats", "prism", "resnet", "resnet_seg", "scunet", "timestral", "tirex", "vit", "xlstm",
     ]
 

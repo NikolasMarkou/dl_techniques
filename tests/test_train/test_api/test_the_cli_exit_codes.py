@@ -316,7 +316,7 @@ def test_a_list_command_accepts_every_help_word(command, word, cwd):
         # 36 classifier variants, the 17 of the four segmentation families (D-077; plan 98b866fb step 2 added
         # the 11 of resnet_seg and convnext_seg, which read the classifiers' own tables) and the 23 of the five
         # denoising families (plan d483ffab step 7: four with five variants each, scunet with three) and the 7 of the two
-        # pretrain families (energy_transformer with three, beit with four) and the 23 of the seven
+        # pretrain families (et_mim with three, beit_mim with four) and the 23 of the seven
         # forecasting families (nbeats 3, prism 4, tirex 4, xlstm 2, ets 3, timestral 4, mdn 3) and the 3 of the one depth
         # family (depth_anything: vit_s, vit_b, vit_l).
         assert len(result.stdout.split()) == 109

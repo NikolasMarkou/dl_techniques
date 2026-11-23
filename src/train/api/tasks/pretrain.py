@@ -4,7 +4,7 @@
 calls, so the two cannot disagree. It validates its keywords into a :class:`PretrainConfig` and hands that to
 :class:`PretrainTrainer`, a :class:`~train.api.trainer.TaskTrainer` that supplies the hooks of this task and nothing else
 (a task overrides hooks, never stages). Two families train it, and the FAMILY chooses the method (D-006):
-``energy_transformer`` completes the pixels of masked patches (``et_masked``), ``beit`` predicts the code ids a frozen
+``et_mim`` completes the pixels of masked patches (``et_masked``), ``beit_mim`` predicts the code ids a frozen
 stage-0 tokenizer gives the masked patches (``beit_mim``). Both take their images from the shared image streams
 (``cifar10`` and ``imagenette``); a labelled image is only an image here.
 
@@ -51,7 +51,7 @@ Interface contract
     The task writes no ``task.json`` (D-013): ``task_record`` is ``None``, so ``predict`` and ``export`` of a pretrain run
     directory refuse with the existing ``task.json`` sentence.
 
-    The BEiT tokenizer (D-007). ``model_args.tokenizer_checkpoint`` is required for a ``beit`` run and is read by the TASK,
+    The BEiT tokenizer (D-007). ``model_args.tokenizer_checkpoint`` is required for a ``beit_mim`` run and is read by the TASK,
     never by the model (the resolver strips it). Before the claim ``check_model_args`` refuses a missing key, a path that does
     not exist and one that does not end in ``.keras``; at build time ``train.beit.common.load_frozen_tokenizer`` proves the
     code grid by a forward pass at the run's image size and refuses a file that is not a ``VQVAERotationTrick`` (these are
@@ -61,7 +61,7 @@ Interface contract
 
 ``train_pretrain(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
-    :param model: ``"family/variant"``, e.g. ``"energy_transformer/et_tiny"`` or ``"beit/beit_tiny"``;
+    :param model: ``"family/variant"``, e.g. ``"et_mim/et_tiny"`` or ``"beit_mim/beit_tiny"``;
         ``python -m train list_models task=pretrain`` lists them.
     :param data: a mapping (``{"dataset": "cifar10"}``), a :class:`~train.api.pretrain_args.PretrainData`, or the path of
         a YAML file holding one.
@@ -113,6 +113,8 @@ from ..config import (
 from ..data_args import DataFacts
 from ..errors import ConfigError
 from ..pretrain_args import (
+    BEIT,
+    ET,
     MASK_KEYS,
     TASK,
     PretrainData,
@@ -122,13 +124,13 @@ from ..pretrain_args import (
     pretrain_facts,
     read_pretrain_data_file,
 )
-from ..pretrain_models import BEIT, METHOD_OF, TASK_KEYS, recipe_notices_of
+from ..pretrain_models import METHOD_OF, TASK_KEYS, recipe_notices_of
 from ..run_dir import CHECKPOINTS_DIR
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
 
 # ---------------------------------------------------------------------
 
-#: The ``model_args`` key of ``beit`` that names the frozen stage-0 tokenizer (the task reads it, the model never sees it).
+#: The ``model_args`` key of ``beit_mim`` that names the frozen stage-0 tokenizer (the task reads it, the model never sees it).
 TOKENIZER_KEY = TASK_KEYS[BEIT][0]
 
 _RESUME_ORDER = (
@@ -144,15 +146,15 @@ class PretrainConfig(StrictConfig):
     out: str = dataclasses.field(metadata={"help": RUN_HELP["out"]})
     model: str = dataclasses.field(
         metadata={
-            "help": "family/variant, e.g. energy_transformer/et_tiny or beit/beit_tiny; python -m train list_models "
+            "help": f"family/variant, e.g. {ET}/et_tiny or {BEIT}/beit_tiny; python -m train list_models "
             "task=pretrain lists them"
         }
     )
     data: PretrainData = dataclasses.field(
         metadata={
             "help": "the images and the mask: data.dataset=cifar10 (or imagenette), with data.patch_size and the mask "
-            "keys of the family (data.mask_ratio and data.mask_token_frac for energy_transformer, "
-            "data.num_mask_patches and data.min_mask_patches_per_block for beit); or the path of a YAML file holding "
+            f"keys of the family (data.mask_ratio and data.mask_token_frac for {ET}, "
+            f"data.num_mask_patches and data.min_mask_patches_per_block for {BEIT}); or the path of a YAML file holding "
             "them (data=data.yaml), over which dotted keys win (data=data.yaml data.max_samples=100)",
             PATH_FORM: read_pretrain_data_file,
         }
@@ -170,8 +172,8 @@ class PretrainConfig(StrictConfig):
     model_args: Dict[str, Any] = dataclasses.field(
         default_factory=dict,
         metadata={
-            "help": RUN_HELP["model_args"] + "; beit also takes model_args.tokenizer_checkpoint, the path of the "
-            "stage-0 tokenizer .keras (python -m train.beit.train_tokenizer), which is required for beit and is "
+            "help": RUN_HELP["model_args"] + f"; {BEIT} also takes model_args.tokenizer_checkpoint, the path of the "
+            f"stage-0 tokenizer .keras (python -m train.beit.train_tokenizer), which is required for {BEIT} and is "
             "not a model keyword"
         },
     )
@@ -208,7 +210,7 @@ class PretrainTrainer(TaskTrainer):
         self._baseline: Optional[Any] = None
         #: The untrained model's ``val_loss``, read from the fit sidecar by ``evaluate_and_report`` and by nothing else.
         self._epoch_zero: Optional[float] = None
-        #: The BEiT codebook size, set by ``build_data`` from the tokenizer (``None`` for energy_transformer).
+        #: The BEiT codebook size, set by ``build_data`` from the tokenizer (``None`` for et_mim).
         self._vocab_size: Optional[int] = None
         #: The BEiT tokenizer's usage over the select split's masked positions, set by ``build_data`` (``None`` for ET).
         self._usage: Optional[Any] = None
@@ -308,7 +310,7 @@ class PretrainTrainer(TaskTrainer):
     @staticmethod
     def _tokenizer_required_message() -> str:
         return (
-            f"Invalid value for 'model_args.{TOKENIZER_KEY}': a beit run predicts the code ids of a frozen stage-0 "
+            f"Invalid value for 'model_args.{TOKENIZER_KEY}': a {BEIT} run predicts the code ids of a frozen stage-0 "
             "tokenizer, so it needs the path of one (a .keras file); train one with "
             "python -m train.beit.train_tokenizer, then give model_args.tokenizer_checkpoint=<its best_model.keras>"
         )
@@ -525,7 +527,7 @@ class PretrainTrainer(TaskTrainer):
         method = data.request["method"]
         loss = (
             "the mean over the loss patches of the patch MSE (the mask is a sample weight N / n_loss)"
-            if method == METHOD_OF["energy_transformer"]
+            if method == METHOD_OF[ET]
             else "the mean over examples of the per-example masked-token cross-entropy (sample weight N / n_masked: the "
             "reference's scale, not the legacy trainer's, which is that mean times the mask fraction)"
         )
@@ -569,7 +571,7 @@ class PretrainTrainer(TaskTrainer):
 
     def figure_callbacks(self, config: PretrainConfig, data: Any, vis_dir: Path) -> List[Any]:
         """Return the energy trace of ET (none for BEiT): the energy descent of one fixed selection batch per epoch."""
-        if data.request["method"] != METHOD_OF["energy_transformer"]:
+        if data.request["method"] != METHOD_OF[ET]:
             return []
         from train.energy_transformer.common import EnergyTraceCallback
 

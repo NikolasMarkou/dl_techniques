@@ -21,7 +21,8 @@ Interface contract
     :param task: the task the model is for; ``None`` skips the task check.
     :return: ``(family, variant)``.
     :raises UnknownModelError: for a missing slash, an unknown family or an
-        unknown variant; the message carries a ``difflib`` suggestion. The
+        unknown variant; the message carries a ``difflib`` suggestion, and for
+        an unknown family with ``task`` given, the families of ``task``. The
         variant check imports the family's variants table.
     :raises ConfigError: when ``task`` is given and is not in the family's
         ``tasks``, in either direction (a segmentation family under the
@@ -382,6 +383,12 @@ def _variant_names(spec: ModelSpec) -> List[str]:
     return sorted(spec.load_variants())
 
 
+def _families_of(task: str) -> str:
+    """The registered families that list ``task``, sorted and joined, or ``"none registered"``."""
+    siblings = sorted(other for other, row in MODELS.items() if task in row.tasks)
+    return ", ".join(siblings) if siblings else "none registered"
+
+
 def parse_model_name(name: str, task: Optional[str] = None) -> Tuple[str, str]:
     """Split ``"family/variant"`` and check both halves; see the module contract."""
     family, slash, variant = name.partition("/")
@@ -393,8 +400,15 @@ def parse_model_name(name: str, task: Optional[str] = None) -> Tuple[str, str]:
     spec = MODELS.get(family)
     if spec is None:
         known = ", ".join(sorted(MODELS)) or "none registered"
+        # DECISION plan-2026-11-19T081214-5c6cc105/D-021: under a task, an unknown family is
+        # also told the families OF that task, the sentence the wrong-task refusal below ends
+        # with. Do NOT answer a renamed family's old name with an alias or a rename hint
+        # instead (no legacy compat, D-002): pretrain's old `beit` and `energy_transformer` are
+        # told `beit_mim, et_mim` this way, and a name another task's family holds gets the
+        # same tail below.
+        of_task = "" if task is None else f"; the families of {task!r} are {_families_of(task)}"
         raise UnknownModelError(
-            f"Unknown model family {family!r} in {name!r} (families: {known})."
+            f"Unknown model family {family!r} in {name!r} (families: {known}){of_task}."
             f"{_suggest(family, sorted(MODELS))}"
         )
     # DECISION plan-2026-10-31T180033-2faf890a/D-072: the task is checked HERE, before the variants
@@ -402,11 +416,9 @@ def parse_model_name(name: str, task: Optional[str] = None) -> Tuple[str, str]:
     # resolver: a segmentation family handed to the classifier would reach its build as "an
     # unknown key" or a shape error, after the user has waited for the data.
     if task is not None and task not in spec.tasks:
-        siblings = sorted(other for other, row in MODELS.items() if task in row.tasks)
         raise ConfigError(
             f"Invalid value for 'model': the family {family!r} trains {' and '.join(spec.tasks)}, "
-            f"not {task!r}; the families of {task!r} are "
-            f"{', '.join(siblings) if siblings else 'none registered'}"
+            f"not {task!r}; the families of {task!r} are {_families_of(task)}"
         )
     variants = _variant_names(spec)
     if variant not in variants:

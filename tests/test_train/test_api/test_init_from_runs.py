@@ -257,7 +257,7 @@ def test_preclaim_a_lookback_the_family_sizes_its_weights_by_is_refused(world, t
 def test_preclaim_pretrain_refuses_init_by_its_rows_reason(world, tmp_path):
     out = tmp_path / "run"
     with pytest.raises(ConfigError, match="Invalid value for 'init': " + NO_TRANSFER.replace("(", r"\(").replace(")", r"\)")):
-        train_pretrain(out=out, model="energy_transformer/et_tiny", data={"dataset": "cifar10"}, batch_size=4,
+        train_pretrain(out=out, model="et_mim/et_tiny", data={"dataset": "cifar10"}, batch_size=4,
                        model_args={"num_steps": 2}, init=tmp_path / "any_source")
     assert not out.exists()
 

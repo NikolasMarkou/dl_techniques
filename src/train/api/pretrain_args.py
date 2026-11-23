@@ -1,7 +1,7 @@
 """The pretrain arguments of ``python -m train``: the data group with its mask keys, the transform and metric groups.
 
-The ``pretrain`` task trains a model on masked images: ``energy_transformer`` predicts the pixels of the masked patches
-(ET masked completion), ``beit`` predicts the code ids a frozen tokenizer gives them (BEiT masked image modelling). Both
+The ``pretrain`` task trains a model on masked images: ``et_mim`` predicts the pixels of the masked patches
+(ET masked completion), ``beit_mim`` predicts the code ids a frozen tokenizer gives them (BEiT masked image modelling). Both
 take their images from the shared image streams (``cifar10`` and ``imagenette``): a seeded slice of the train rows
 selects, the test split is scored once after ``fit``, and a labelled image is only an image here. ``PretrainData`` names
 the dataset, how it is split and capped, the patch the images are cut into and how many patches are masked.
@@ -14,6 +14,10 @@ Interface contract
 ------------------
 ``TASK``
     ``"pretrain"``, the task these groups belong to.
+
+``ET`` / ``BEIT``
+    ``"et_mim"`` and ``"beit_mim"``, the names of the task's two families: :mod:`train.api.pretrain_models` registers its
+    rows under them, and the help of the mask keys names them.
 
 ``DATASETS`` / ``GEOMETRY``
     The datasets the shared streams serve (``train.common.image_streams.SUPPORTED_DATASETS``, held equal by a test) and,
@@ -84,6 +88,12 @@ from .errors import ConfigError
 # ---------------------------------------------------------------------
 
 TASK = "pretrain"
+
+# DECISION plan-2026-11-19T081214-5c6cc105/D-022: the two family names live HERE, beside TASK, because the help of the
+# mask keys below names them and `pretrain_models`, which registers the rows under them, imports this module (the other
+# way round is a cycle). Do NOT define them again there or type them into a help text or a message: a rename then misses
+# the typed copy, as the help of these four keys would have.
+ET, BEIT = "et_mim", "beit_mim"
 
 #: The datasets of the shared image streams; ``test_pretrain_families`` holds it equal to
 #: ``train.common.image_streams.SUPPORTED_DATASETS``.
@@ -174,30 +184,30 @@ class PretrainData(StrictConfig):
     mask_ratio: Auto[Optional[float]] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "energy_transformer only: the share of the patches in the loss, in (0, 1]; auto is the paper's 0.5; "
-            "refused for beit"
+            "help": f"{ET} only: the share of the patches in the loss, in (0, 1]; auto is the paper's 0.5; "
+            f"refused for {BEIT}"
         },
     )
     mask_token_frac: Auto[Optional[float]] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "energy_transformer only: the share of the loss patches occluded in the input, in (0, 1], the rest are "
-            "scored without being hidden; auto is the paper's 0.9; refused for beit; a value that occludes every loss patch "
-            "is refused by the library when the data loads"
+            "help": f"{ET} only: the share of the loss patches occluded in the input, in (0, 1], the rest are "
+            f"scored without being hidden; auto is the paper's 0.9; refused for {BEIT}; a value that occludes every loss "
+            "patch is refused by the library when the data loads"
         },
     )
     num_mask_patches: Auto[Optional[int]] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "beit only: how many patches are masked, in blocks; at most the number of patches; auto is the BEiT "
-            "recipe's 75 of 196 patches, scaled to the grid (24 at 8 x 8); refused for energy_transformer"
+            "help": f"{BEIT} only: how many patches are masked, in blocks; at most the number of patches; auto is the BEiT "
+            f"recipe's 75 of 196 patches, scaled to the grid (24 at 8 x 8); refused for {ET}"
         },
     )
     min_mask_patches_per_block: Auto[Optional[int]] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "beit only: the smallest block of masked patches, at most num_mask_patches; auto is the BEiT recipe's 16 "
-            "of 196 patches, scaled to the grid (5 at 8 x 8); refused for energy_transformer"
+            "help": f"{BEIT} only: the smallest block of masked patches, at most num_mask_patches; auto is the BEiT "
+            f"recipe's 16 of 196 patches, scaled to the grid (5 at 8 x 8); refused for {ET}"
         },
     )
 

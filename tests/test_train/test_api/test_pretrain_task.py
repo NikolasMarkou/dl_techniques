@@ -1,7 +1,7 @@
 """The ``pretrain`` task: the hook table, the bar, the epoch-zero term, the refusals before the claim and the BEiT tokenizer.
 
 ``train.api.tasks.pretrain.PretrainTrainer`` (plan-2026-11-12T015747-46e5318f step 10) is the task of two families:
-``energy_transformer`` (masked-patch completion) and ``beit`` (masked image modelling against a frozen tokenizer's code
+``et_mim`` (masked-patch completion) and ``beit_mim`` (masked image modelling against a frozen tokenizer's code
 ids). It supplies the ten required hooks, the two seams of the shared sequence (``fit_kwargs``, ``resume_stream``) and
 the bar, and nothing else (a task overrides hooks, never stages). This part pins:
 
@@ -18,7 +18,7 @@ the bar, and nothing else (a task overrides hooks, never stages). This part pins
 * **Refusals.** A model argument the family refuses, a missing tokenizer and a conformal level leave ``out`` absent;
   ``debug_args.smoke`` applies no bar.
 
-Second part (step 11): the BEiT tokenizer. A ``beit`` run needs the path of a stage-0 ``.keras`` (refused before the claim when it
+Second part (step 11): the BEiT tokenizer. A ``beit_mim`` run needs the path of a stage-0 ``.keras`` (refused before the claim when it
 is missing, does not exist or is not a ``.keras``); the grid proof, the file that is not a ``VQVAERotationTrick`` and the usage
 floor are found at build time (the run directory is claimed, and the message says so); a healthy tokenizer's usage reaches
 ``results_summary.json`` and the BEiT baseline is the in-sample unigram ``val_loss``. The tokenizers are tiny
@@ -31,7 +31,7 @@ bytes, the summary's metric, baseline, epoch-zero loss, threshold and verdict, `
 spy sees it (a callback stops a fit that has no epoch length, so a missing ``steps_per_epoch`` is reported, not hung), the best
 checkpoint's reload gap of exactly 0.0, and the ``task.json`` refusals of ``predict`` and ``export``.
 
-The runs are real ``energy_transformer/et_tiny`` runs (``model_args.num_steps=2``) on the fake CIFAR-10 of
+The runs are real ``et_mim/et_tiny`` runs (``model_args.num_steps=2``) on the fake CIFAR-10 of
 ``tests/classification_fakes.py``: 54 fit rows, batch 4, so 13 steps of an epoch. Tests write only under ``tmp_path``.
 """
 
@@ -72,8 +72,8 @@ STEPS = N_FIT // BATCH             # 13
 #: A baseline far above any random-init ET loss (2 to 3), so that the epoch-zero term of the threshold binds.
 HUGE = 1000.0
 
-ET_MODEL = "energy_transformer/et_tiny"
-BEIT_MODEL = "beit/beit_tiny"
+ET_MODEL = "et_mim/et_tiny"
+BEIT_MODEL = "beit_mim/beit_tiny"
 
 
 def make_config(out: Path, **changes: Any) -> PretrainConfig:
@@ -167,7 +167,7 @@ def test_every_optional_hook_the_task_relies_on_is_overridden(hook):
 def test_the_task_writes_no_record_and_no_stamps(world, tmp_path):
     trainer, resolved, context = prepared(tmp_path / "run")
     assert trainer.task_record(resolved, context, None) is None
-    assert trainer.config_stamps(resolved, registry.MODELS["energy_transformer"]) == {}
+    assert trainer.config_stamps(resolved, registry.MODELS["et_mim"]) == {}
 
 
 def test_the_task_does_not_name_a_stage():
@@ -461,7 +461,7 @@ def test_the_command_the_model_help_names_lists_the_variants(world, capsys):
     written = re.search(r"python -m train (list_models \S+)", field.metadata["help"])
     assert written, "the help of `model` names the command that lists the variants"
     assert cli.main(written.group(1).split()) == 0, written.group(1)
-    assert "beit/beit_tiny" in capsys.readouterr().out
+    assert "beit_mim/beit_tiny" in capsys.readouterr().out
     # The docstring of the function says the same command.
     from train.api.tasks import pretrain
 
@@ -768,7 +768,7 @@ def test_the_pretrain_resume_note_names_its_own_order_and_claims_no_replay(monke
 # Third part (step 12): a stubbed end to end per family, the run directory, the refusals of predict and export
 # ---------------------------------------------------------------------
 
-FAMILIES = ("energy_transformer", "beit")
+FAMILIES = ("et_mim", "beit_mim")
 #: A fit that runs more batches than ``EPOCHS * STEPS`` has an epoch with no length (an infinite stream, no steps_per_epoch).
 RUNAWAY_BATCHES = 4 * EPOCHS * STEPS
 
@@ -809,9 +809,9 @@ def ended(request, world, tokenizers, tmp_path_factory):
 
     family = request.param
     root = tmp_path_factory.mktemp("end_to_end_" + family)
-    model_args = {"num_steps": 2} if family == "energy_transformer" else {TOKENIZER_KEY: tokenizers["healthy"], **BEIT_SMALL}
+    model_args = {"num_steps": 2} if family == "et_mim" else {TOKENIZER_KEY: tokenizers["healthy"], **BEIT_SMALL}
     asked = {
-        "out": str(root / "run"), "model": ET_MODEL if family == "energy_transformer" else BEIT_MODEL,
+        "out": str(root / "run"), "model": ET_MODEL if family == "et_mim" else BEIT_MODEL,
         "data": {"dataset": "cifar10"}, "epochs": EPOCHS, "batch_size": BATCH, "model_args": model_args,
         "analysis_args": {"model_analysis": True, "figures": True},
     }
@@ -843,7 +843,7 @@ RUN_DIRS = {"checkpoints", "model_analysis", "tensorboard", "visualizations"}
 NESTED = {
     "checkpoints": {"backup", "fit_state.json"},
     "model_analysis": {"analysis_results.json", "spectral_funnel_diagram.png", "spectral_summary.png", "weight_learning_journey.png"},
-    "visualizations": {"energy_transformer": {"energy_trace.csv", "training_dashboard.png"}, "beit": {"training_dashboard.png"}},
+    "visualizations": {"et_mim": {"energy_trace.csv", "training_dashboard.png"}, "beit_mim": {"training_dashboard.png"}},
 }
 
 
@@ -873,7 +873,7 @@ def test_the_function_and_the_cli_write_the_same_config_bytes_and_the_cli_exits_
 @pytest.mark.parametrize("which", ["function", "cli"])
 def test_the_summary_holds_the_metric_the_baseline_the_epoch_zero_loss_the_threshold_and_the_verdict(ended, which):
     summary = read_json(getattr(ended, which) / "results_summary.json")
-    kind = "zero_patches" if ended.family == "energy_transformer" else "unigram_codes"
+    kind = "zero_patches" if ended.family == "et_mim" else "unigram_codes"
     assert summary["task"] == "pretrain" and summary["status"] == "ok" and summary["success_metric"] == "val_loss"
     assert summary["baseline"]["kind"] == kind and summary["baseline"]["val_loss"] > 0
     epoch_zero = read_json(getattr(ended, which) / "checkpoints" / FIT_STATE_NAME)["initial"]["metrics"]["loss"]
@@ -882,7 +882,7 @@ def test_the_summary_holds_the_metric_the_baseline_the_epoch_zero_loss_the_thres
     column = csv_column(getattr(ended, which), "val_loss")
     assert len(column) == EPOCHS and summary["success_value"] == pytest.approx(min(column), rel=1e-6)
     assert summary["success"] is bool(np.float32(summary["success_value"]) < np.float32(summary["success_threshold"]))
-    assert (summary["tokenizer"] is None) is (ended.family == "energy_transformer")
+    assert (summary["tokenizer"] is None) is (ended.family == "et_mim")
 
 
 def test_an_epoch_is_n_train_over_batch_steps_and_fit_sees_both_lengths(ended):

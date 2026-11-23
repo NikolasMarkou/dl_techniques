@@ -229,6 +229,28 @@ def test_an_unknown_family_is_suggested(fake_module, empty_registries):
     assert "Did you mean 'fam'?" in str(caught.value)
 
 
+def test_an_unknown_family_under_a_task_names_the_families_of_that_task(
+    fake_module, empty_registries
+):
+    # A renamed family has no alias (plan-2026-11-19T081214-5c6cc105 D-002): its old name,
+    # given to its task, is told the names that task takes, in the sentence the wrong-task
+    # refusal ends with.
+    for family, task in (("kin", "one"), ("fam", "one"), ("far", "two")):
+        registry.register_model(model_spec(family=family, tasks=(task,)))
+    with pytest.raises(UnknownModelError) as caught:
+        registry.parse_model_name("old/tiny", task="one")
+    assert str(caught.value).startswith(
+        "Unknown model family 'old' in 'old/tiny' (families: fam, far, kin)"
+    )
+    assert "; the families of 'one' are fam, kin." in str(caught.value)
+    with pytest.raises(UnknownModelError, match="the families of 'nobody' are none registered"):
+        registry.parse_model_name("old/tiny", task="nobody")
+    # Control: with no task there is no task to name.
+    with pytest.raises(UnknownModelError) as caught:
+        registry.parse_model_name("old/tiny")
+    assert "the families of" not in str(caught.value)
+
+
 def test_an_unknown_variant_is_suggested(fake_module, empty_registries):
     registry.register_model(model_spec())
     with pytest.raises(UnknownModelError) as caught:
