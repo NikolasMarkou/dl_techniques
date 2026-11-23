@@ -87,7 +87,8 @@ Interface contract
     :raises ConfigError: when ``config_requested.json`` is missing, empty (the
         run died before writing it) or unreadable; when ``mapping`` differs from
         it in any key except ``resume_interrupted``, ``out`` and ``devices`` (the
-        keys are named); or when the backup, the CSV and the sidecar do not agree on where
+        keys are named), or it names a pretrain family's pre-rename name (D-052); or when the backup,
+        the CSV and the sidecar do not agree on where
         the run stopped (D-058).
 
 ``write_requested(run_dir, mapping)`` / ``write_resolved(run_dir, config, used=None, stamps=None)``
@@ -142,6 +143,9 @@ CHECKPOINTS_DIR = "checkpoints"
 #: What a model needs to be used without its config (class names, preprocessing);
 #: schema and reader in :mod:`train.api.predictor`.
 TASK_FILE = "task.json"
+
+#: The pretrain family names runs recorded before plan 5c6cc105 renamed them (D-002): history, not the live names.
+PRE_RENAME_PRETRAIN = {"energy_transformer": "et_mim", "beit": "beit_mim"}
 
 #: The ending of the record ``export`` writes beside an exported model (``<out>.task.json``);
 #: ``predict`` reads it for a ``.keras`` file (D-068).
@@ -887,6 +891,16 @@ def load_resume_point(run_dir: Path, mapping: Any) -> Any:
         raise ConfigError(f"Cannot resume: {path} is not valid JSON ({exc})") from exc
     if not isinstance(earlier, dict):
         raise ConfigError(f"Cannot resume: {path} does not hold a JSON object")
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-052: a pretrain run recorded before its family was renamed names one
+    # no pretrain request can name, so say it cannot be resumed. Do NOT list it as a request difference or map the old
+    # name onto the new (no alias); refuse it before `checkpoint`, whose init advice fails (it has no task.json).
+    if str(earlier.get("model")).split("/")[0] in PRE_RENAME_PRETRAIN and not (run_dir / TASK_FILE).exists():
+        raise ConfigError(
+            f"Cannot resume {run_dir}: it is a pretrain run recorded before its family was renamed ("
+            + ", ".join(f"{old} to {new}" for old, new in PRE_RENAME_PRETRAIN.items()) + f"), so its "
+            f"{REQUESTED_CONFIG_NAME} names {earlier['model']!r}, which no pretrain request can name, and it cannot be "
+            f"resumed. Start a new run with another 'out'; it cannot be an init source either (it has no {TASK_FILE})"
+        )
     # DECISION plan-2026-11-18T072904-0fd54b91/D-050: a request holding `checkpoint` predates `init`, and no
     # request can match it (`checkpoint` is an unknown key now), so say it cannot be resumed and name the way
     # forward. Do NOT list it as a request difference (that advice loops) and do NOT map it onto `init` (no alias).

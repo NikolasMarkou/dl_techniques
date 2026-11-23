@@ -818,9 +818,9 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
     trains image_classification, not 'pretrain'; the families of 'pretrain' are beit_mim, et_mim` (`beit/beit_tiny` the same with
     `'beit'`). A pretrain run made before the rename wrote no `task.json`, so it is no `init` source (`Invalid value for 'init':
     <run>/task.json does not exist; a source is a python -m train run, which writes it before its first epoch (legacy trainer runs
-    and runs made before their task wrote one have none)`) and cannot be predicted from or exported, and it cannot be resumed: its
-    command now names a classifier, and the same command with the new name is another request. Its `best_model.keras` still loads
-    in Keras.
+    and runs made before their task wrote one have none)`) and cannot be predicted from or exported, and a resume under the new
+    name is refused by name (`Cannot resume <run>: it is a pretrain run recorded before its family was renamed ...`, D-052; the
+    old name is refused as a classifier's before that). Its `best_model.keras` still loads in Keras.
   * The tokenizer is made by hand with the legacy script, and the floor rests on two tokenizers.
   * The recipe's learning rate and batch are doubted, not measured, and `run.log` says so (a recipe notice): ET lr 5e-4 is the paper's
     Table 4 value at a batch of 768, 24 times the batch here, and BEiT lr 1.5e-3 is the recipe's at a global batch of 2,048 (128 on 16
@@ -1465,12 +1465,14 @@ of 140 weights differ), are refused.
 `decoder_head` or `decoder_proj`) and the classifier head is fresh: 220 copied, 4 reset and 4 dropped on `beit_tiny` at 32 px and
 patch 4, and 9, 4 and 4 on `et_tiny`. The classifier takes the source record's `patch_size` as a pin (D-036); a typed
 `model_args.patch_size` must repeat it. So a 64 px `beit` from a 32 px source keeps patch 4, has a 16x16 grid and resamples the
-relative position bias table of each of its 12 layers from (228, 3) to (964, 3) (208 copied); such a pin is logged before the
-claim (`init: the source's record pins patch_size 4 (the recipe gives 16 at 64 px), so this run cuts its 64 px input into 16x16 =
-256 tokens`). unilm's rule grows a grid of W x W patches to at most `ceil(2 (1.5^(W - 1) - 1))` (3 cannot grow, 4 reaches 5, 8
-reaches 33, D-046): past it unilm's search for its ratio stops at its upper bound and the spline extrapolates, so a larger grid
-is refused, before the claim from the two runs' sizes (a CIFAR trunk at 32 px and patch 4 into a 224 px `beit`: 3136 tokens)
-and by the rule itself after it. `model_args.use_mean_pooling=false`
+relative position bias table of each of its 12 layers from (228, 3) to (964, 3) (208 copied); such a pin is a notice in
+`run.log` (`init: the source's record pins patch_size 4 (the recipe gives 16 at 64 px), so this run cuts its 64 px input into
+16x16 = 256 tokens`, D-053). unilm's rule grows a grid of W x W patches to at most `ceil(2 (1.5^(W - 1) - 1))` (3 cannot grow, 4
+reaches 5, 8 reaches 33, D-046): past it the ratio of its geometric grid stops at its upper bound 1.5 and the source grid no
+longer spans the target, so every outer displacement takes the value at the source's edge (FITPACK clamps to its knots; nothing
+is extrapolated, D-051). unilm's published fine-tunes (14x14 to 24x24 patches) stay far inside the reach (388) and no reference
+measures a growth past it, so a larger grid is refused, before the claim from the two runs' sizes (a CIFAR trunk at 32 px and
+patch 4 into a 224 px `beit`: 3136 tokens) and by the rule itself after it. `model_args.use_mean_pooling=false`
 adds a trunk `beit_backbone/final_norm`: set on both runs the pair transfers (222 copied, 2 reset, 4 dropped); set on one only, the
 weight check refuses it (`2 of 224 weights of beit have no source weight of their shape and no declared rule: ...` on the
 classifier only, `2 of 226 weights of the source run are neither used nor dropped by a declared rule: ...` on the source only, D-031).
@@ -1481,7 +1483,7 @@ geometric grid and reads it at the integer target displacements, the 3 class-tok
 `tests/test_train/test_api/data/beit_relpos_reference.npz` holds the output of unilm's lines run verbatim (by
 `tests/test_train/test_api/data/generate_beit_relpos_reference.py`, under scipy 1.13.1 and torch 2.7.0), and the rule is held to
 it at 1e-6 on 5 cases (measured 0.0, the 3 rows bit-equal). No reference resizes the Energy Transformer's position table, so an
-`energy_transformer` on another grid is refused (after the claim, below). `et_mim` and `beit_mim` take a run of their own family
+`energy_transformer` on another grid is refused before the claim (below, D-055). `et_mim` and `beit_mim` take a run of their own family
 only, at the same `transform_args.image_size`, `data.patch_size` and channels (checked before the claim); their decoder is
 their head, copied when the two records' `tokenizer`, `mean` and `std` agree (for `et_mim`, whose `tokenizer` is null, the
 statistics alone, D-048) and fresh otherwise
@@ -1499,8 +1501,10 @@ statistics alone, D-048) and fresh otherwise
 | a pair not declared | `Invalid value for 'init': <family> (<task>) cannot seed <family> (<task>); <family> takes weights from <its declared sources>`, for example `beit (image_classification) cannot seed beit_mim (pretrain); beit_mim takes weights from beit_mim (pretrain)` |
 | a geometry the family sizes its weights by | `Invalid value for 'init': nbeats sizes its weights by data.lookback; the source trained at 168, this run asks for 336 (families of time_series_forecasting that keep every weight across a data.lookback change: ets, timestral, tirex, xlstm)`; every key that differs is named: `et_mim sizes its weights by transform_args.image_size and data.patch_size; the source trained at [32, 32] and 4, this run asks for [224, 224] and 16` |
 | another input scaling | `Invalid value for 'init': the source standardizes its input and this run takes its input in [0, 1] (transform_args.normalize)` |
-| a BEiT grid past its rule's reach | `Invalid value for 'init': the source's grid of 8x8 patches (32 px at patch_size 4, which init keeps) would become 56x56 at 224 px, 3136 tokens; unilm's rule grows the relative position bias table of a grid of 8x8 patches to at most 33x33 (beyond it the search for the ratio of the rule's geometric grid stops at its upper bound 1.5, so the outer target displacements lie past the source's last one and the spline extrapolates them); ask for transform_args.image_size of at most 132 px` |
-| a pinned argument changed | `Invalid value for 'model_args.patch_size': the source was built with patch_size=4 and init keeps the source's architecture` |
+| a resume of a pretrain run recorded before the rename | `Cannot resume <run>: it is a pretrain run recorded before its family was renamed (energy_transformer to et_mim, beit to beit_mim), so its config_requested.json names 'energy_transformer/et_tiny', which no pretrain request can name, and it cannot be resumed. Start a new run with another 'out'; it cannot be an init source either (it has no task.json)` (D-052) |
+| a BEiT grid past its rule's reach | `Invalid value for 'init': the source's grid of 8x8 patches (32 px at patch_size 4, which init keeps) would become 56x56 at 224 px, 3136 tokens; unilm's rule grows the relative position bias table of a grid of 8x8 patches to at most 33x33 (past it the ratio of the rule's geometric grid stops at its upper bound 1.5 and the source grid no longer spans the target, so every outer target displacement takes the value at the source's edge; unilm's published fine-tunes grow 14x14 patches to 24x24, far inside the reach of 14 (388), and no reference measures a fine-tune past it); ask for transform_args.image_size of at most 132 px` |
+| another grid that no position rule makes (D-055) | the same first sentence, then: an Energy Transformer grid change, `the Energy Transformer position table cannot change its grid: no reference rule resamples it (the Energy Transformer paper describes no fine-tuning at another resolution); train this run at the source's grid (its image_size and patch_size)`; a smaller BEiT grid, `BEiT's relative position bias table: only a larger grid is resampled (unilm's rule grows a grid; for a smaller one its search for the ratio stops at its lower bound)`; a BEiT grid below 3x3 patches on either side, `BEiT's relative position bias table: the rule resamples no grid below 3x3 patches` |
+| a pinned argument changed (checked first: a typed patch never gets a grid sentence) | `Invalid value for 'model_args.patch_size': the source was built with patch_size=4 and init keeps the source's architecture` |
 | a classifier `model_args.pretrained` other than false | `Invalid value for 'model_args.pretrained': only false is offered, got True; a classifier is built with fresh weights (a path is not offered, and no official weights are read); init takes a run directory` |
 | depth `model_args.pretrained` under `init` | `Invalid value for 'model_args.pretrained': init replaces every weight, so the official weights would be read and overwritten` (for `false`: `so no official weights are read and the run keeps the warm-start rate with the head at 10x; remove model_args.pretrained`) |
 
@@ -1508,20 +1512,13 @@ After the claim, before any weight is copied (exit 2, the claimed directory is k
 'init': <n> of <m> weights of <family/variant> have no source weight of their shape and no declared rule: <the first 5 paths,
 both shapes> (+<k> more); nothing was copied (paths without the model's root)`, and the same for the other direction (`...
 of the source run are neither used nor dropped by a declared rule`); a smaller ViT grid, `vit pos_embed would shrink its grid
-from 16x16 to 8x8; only a larger grid is resampled (bicubic, no antialiasing)`; a smaller BEiT grid, `BEiT
-relative_position_bias_table would resample a grid of 16x16 patches to 8x8; only a larger grid is resampled (unilm's rule grows a
-grid; for a smaller one its search for the ratio stops at its lower bound)`; a BEiT grid past the rule's reach, `BEiT
-relative_position_bias_table would resample a grid of 4x4 patches to 8x8; unilm's rule grows the relative position bias table of
-a grid of 4x4 patches to at most 5x5 (beyond it the search for the ratio of the rule's geometric grid stops at its upper bound
-1.5, so the outer target displacements lie past the source's last one and the spline extrapolates them)`; a BEiT source below
-3x3 patches, `BEiT
-relative_position_bias_table (12, 3): 12 rows are not the (2W - 1)^2 + 3 of a square grid of W x W patches with W at least 3;
-only such a table is resampled`; other heads, `BEiT relative_position_bias_table (228, 3) cannot become (964, 4); only its number
-of rows (the grid of patches) may change`; an Energy Transformer grid, `the Energy Transformer position table (1, 64, 192) (8x8
-patches) cannot become (1, 256, 192) (16x16 patches): no reference rule resamples it (the Energy Transformer paper describes no
-fine-tuning at another resolution); train this run at the source's grid (its image_size and patch_size)`; a weight two resample
-keys match, `<path> matches <n> resample keys of the family (<keys>); a weight takes one rule`. The archive is hashed before the claim and again
-after the copy, and a run whose `best_model.keras` changed in between stops before it trains, naming both sha256.
+from 16x16 to 8x8; only a larger grid is resampled (bicubic, no antialiasing)`; other heads, `BEiT
+relative_position_bias_table (228, 3) cannot become (964, 4); only its number of rows (the grid of patches) may change`; a
+weight two resample keys match, `<path> matches <n> resample keys of the family (<keys>); a weight takes one rule`. The BEiT
+and Energy Transformer grid changes of the table above are refused by their rules too (`BEiT relative_position_bias_table would
+resample a grid of 4x4 patches to 8x8; ...`), which a run meets before the claim since D-055 (the rules stay for a direct
+caller). The archive is hashed before the claim and again after the copy, and a run whose `best_model.keras` changed in between
+stops before it trains, naming both sha256.
 
 **The head** is copied only when the two `task.json` records say it means the same thing: classification and segmentation
 `class_names` equal as ordered lists (the same names in another order reset it), denoising `channels`, forecasting `horizon`,

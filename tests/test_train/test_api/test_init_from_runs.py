@@ -33,8 +33,9 @@ weights' value its bar compared; it predicts and exports with its source gone; e
 The ``pretrain`` tests (plan-2026-11-19T081214-5c6cc105 Step 6, U4, D-008, D-012, D-035): an ``et_mim`` or ``beit_mim``
 run seeds its own family and its classifier (``energy_transformer``, ``beit``, whose patch the source's record pins), on
 the identity fake of CIFAR-10 (row ``i`` has the mean colour ``4i``, so the rows a stream holds read back); any other
-pair, another dataset geometry and a BEiT grid past the reach of its resample rule are refused before the claim (D-046),
-and a pin that moves the patch off the recipe's is logged; the decoder is reset when the tokenizer or the input statistics
+pair, another dataset geometry and a grid change no position rule makes are refused before the claim (D-046, D-055),
+and a pin that moves the patch off the recipe's is a notice in run.log (D-053); a pretrain run recorded before the rename
+is refused on resume by name (D-052); the decoder is reset when the tokenizer or the input statistics
 differ (D-048); the pretrain bar under ``init`` stays strictly below the loaded weights' ``val_loss`` and the
 higher-is-better rule never judges it.
 """
@@ -304,10 +305,11 @@ PRETRAIN_REFUSALS = {
                           {**BEIT_TARGET, "data": {"dataset": "imagenette"}}, re.escape(
                               "the source's grid of 8x8 patches (32 px at patch_size 4, which init keeps) would become "
                               "56x56 at 224 px, 3136 tokens; unilm's rule grows the relative position bias table of a grid "
-                              "of 8x8 patches to at most 33x33 (beyond it the search for the ratio of the rule's geometric "
-                              "grid stops at its upper bound 1.5, so the outer target displacements lie past the source's "
-                              "last one and the spline extrapolates them); ask for transform_args.image_size of at most "
-                              "132 px") + "$"),
+                              "of 8x8 patches to at most 33x33 (past it the ratio of the rule's geometric grid stops at its "
+                              "upper bound 1.5 and the source grid no longer spans the target, so every outer target "
+                              "displacement takes the value at the source's edge; unilm's published fine-tunes grow 14x14 "
+                              "patches to 24x24, far inside the reach of 14 (388), and no reference measures a fine-tune "
+                              "past it); ask for transform_args.image_size of at most 132 px") + "$"),
 }
 
 
@@ -323,6 +325,46 @@ def test_preclaim_pretrain_a_pair_no_row_declares_or_another_geometry_is_refused
     assert not out.exists(), "a pre-claim refusal claimed the run directory"
 
 
+def grid_words(theirs: int, size: int, patch: int, ours: int, side: int) -> str:
+    return (f"Invalid value for 'init': the source's grid of {theirs}x{theirs} patches ({size} px at patch_size {patch}, "
+            f"which init keeps) would become {ours}x{ours} at {side} px, {ours * ours} tokens; ")
+
+
+#: ``name: (the source record, its used.model_args, the request, the message)``: a grid change no position rule makes is
+#: refused before the claim, and a typed patch meets the pin's refusal first (D-055, review S5).
+BEIT_224 = (lambda: classification_record("beit/beit_tiny", side=224), {"patch_size": 16})  # a 224/16 beit source
+NETTE = {"data": {"dataset": "imagenette"}}
+AT_64 = {**NETTE, "transform_args": {"image_size": 64}}
+TABLE_WORDS = "BEiT's relative position bias table: "
+GRID_REFUSALS = {
+    "et_grid": (pretrain_record, {}, {**BEIT_TARGET, **NETTE, "model": "energy_transformer/et_tiny"}, grid_words(
+        8, 32, 4, 56, 224) + "the Energy Transformer position table cannot change its grid: no reference rule resamples it "
+        "(the Energy Transformer paper describes no fine-tuning at another resolution); train this run at the source's grid "
+        "(its image_size and patch_size)"),
+    "beit_below_3": (*BEIT_224, BEIT_TARGET, grid_words(14, 224, 16, 2, 32) + TABLE_WORDS + "the rule resamples no grid "
+                     "below 3x3 patches"),
+    "beit_source_below_3": (lambda: classification_record("beit/beit_tiny"), {"patch_size": 16}, {**BEIT_TARGET, **AT_64},
+                            grid_words(2, 32, 16, 4, 64) + TABLE_WORDS + "the rule resamples no grid below 3x3 patches"),
+    "beit_smaller": (*BEIT_224, {**BEIT_TARGET, **AT_64}, grid_words(14, 224, 16, 4, 64) + TABLE_WORDS + "only a larger "
+                     "grid is resampled (unilm's rule grows a grid; for a smaller one its search for the ratio stops at its "
+                     "lower bound)"),
+    "typed_patch": (lambda: pretrain_record("beit_mim/beit_tiny"), {}, {**BEIT_TARGET, **NETTE, "model_args": {
+        "patch_size": 16}}, "Invalid value for 'model_args.patch_size': the source was built with patch_size=4 and init "
+        "keeps the source's architecture"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(GRID_REFUSALS))
+def test_preclaim_pretrain_a_grid_no_position_rule_makes_is_refused_and_a_typed_patch_meets_the_pin_first(
+        world, tmp_path, monkeypatch, case):
+    make, used, request, message = GRID_REFUSALS[case]
+    monkeypatch.setattr(data_args, "_check_imagenette_records", lambda: None)
+    out = tmp_path / "run"
+    with pytest.raises(ConfigError) as refused:
+        train_image_classification(out=out, init=write_source(tmp_path / "source", make(), used), **request)
+    assert (str(refused.value), out.exists()) == (message, False)
+
+
 def test_preclaim_pretrain_a_source_of_the_same_family_is_taken_with_no_pin(world, tmp_path):
     source = write_source(tmp_path / "source", pretrain_record(), {"num_steps": 2})
     config = validate(PretrainConfig, {"out": str(tmp_path / "run"), "init": str(source), **PRETRAIN_TARGET})
@@ -332,7 +374,7 @@ def test_preclaim_pretrain_a_source_of_the_same_family_is_taken_with_no_pin(worl
     assert not (tmp_path / "run").exists()
 
 
-#: The one info line before the claim when a cross-task pin moves the patch off the recipe's (D-046, review R5).
+#: The one notice when a cross-task pin moves the patch off the recipe's (D-046), replayed into run.log (D-053).
 PIN_LINE = ("init: the source's record pins patch_size 4 (the recipe gives 16 at 64 px), so this run cuts its 64 px input "
             "into 16x16 = 256 tokens")
 
@@ -340,12 +382,14 @@ PIN_LINE = ("init: the source's record pins patch_size 4 (the recipe gives 16 at
 def test_preclaim_pretrain_a_classifier_takes_its_patch_from_the_source_record_and_a_typed_one_must_repeat_it(
         world, trees, tmp_path, caplog):
     """D-035: a 64 px beit from a 32/4 beit_mim keeps patch 4 (grid 16; its patch rule gives 16, a 4x4 grid). The pin is
-    read from the source's record: its ``config.json`` records no ``used.model_args`` here. The pin is logged once."""
+    read from the source's record: its ``config.json`` records no ``used.model_args`` here. The pin line is one trainer
+    notice, which run.log replays after the claim, and nothing logs it before the claim (D-053)."""
     caplog.set_level(logging.INFO, logger="dl")
     source = write_source(tmp_path / "source", pretrain_record("beit_mim/beit_tiny"), {})
 
-    def pin_lines():
-        return [record.getMessage() for record in caplog.records if "pins patch_size" in record.getMessage()]
+    def pin_lines(trainer):
+        return ([record.getMessage() for record in caplog.records if "pins patch_size" in record.getMessage()],
+                [text for _level, text in trainer._notices if "pins patch_size" in text])
 
     def resolved(**changes: Any) -> Any:
         config = validate(ImageClassificationConfig, classify(str(tmp_path / "run"), trees["ten"], 64,
@@ -358,10 +402,10 @@ def test_preclaim_pretrain_a_classifier_takes_its_patch_from_the_source_record_a
         trainer, context, patch = resolved(init=str(source), **typed)
         assert trainer._init_source.pins == context.pinned == {"patch_size": 4} and patch == 4
         assert trainer._init_source.relation == registry.MODELS["beit"].transfer.sources[("pretrain", "beit_mim")]
-        assert pin_lines() == [PIN_LINE]
+        assert pin_lines(trainer) == ([], [PIN_LINE])
     caplog.clear()
-    _, context, patch = resolved()
-    assert (context.pinned, patch, pin_lines()) == ({}, 16, [])
+    trainer, context, patch = resolved()
+    assert (context.pinned, patch, pin_lines(trainer)) == ({}, 16, ([], []))
     with pytest.raises(ConfigError, match=r"Invalid value for 'model_args\.patch_size': the source was built with "
                                           r"patch_size=4 and init keeps the source's architecture"):
         resolved(init=str(source), model_args={"patch_size": 16})
@@ -1089,6 +1133,38 @@ def test_resume_a_pre_init_forecasting_request_is_refused_by_checkpoint_before_a
     assert re.fullmatch(PRE_INIT, str(refused.value)) and "noise_level" not in str(refused.value)
 
 
+#: The refusal of a pretrain run recorded before its family was renamed (D-052, review S2): no request can resume it.
+PRE_RENAME = (r"Cannot resume (?P<run>\S+): it is a pretrain run recorded before its family was renamed \(energy_transformer "
+              r"to et_mim, beit to beit_mim\), so its config_requested\.json names '(?P<model>[^']+)', which no "
+              r"pretrain request can name, and it cannot be resumed\. Start a new run with another 'out'; it cannot be "
+              r"an init source either \(it has no task\.json\)$")
+
+
+def test_resume_a_pretrain_run_recorded_before_the_rename_is_refused_as_not_resumable_before_any_write(world, tmp_path):
+    # The pass-2 probe: a killed pre-4h et_mim run (backup, fit sidecar, the old name in its request, no task.json),
+    # resumed under the new name; then the p4d shape (beit, `checkpoint` held too), which this refusal answers first.
+    from train.api.run_dir import _plain_request, load_resume_point
+
+    run = tmp_path / "run"
+    (run / "checkpoints" / "backup").mkdir(parents=True)
+    (run / "checkpoints" / "fit_state.json").write_text("{}")
+    request = _plain_request(validate(PretrainConfig, {"out": str(run), "model": "et_mim/et_tiny",
+                                                       "data": {"dataset": "cifar10"}, "resume_interrupted": True}))
+    (run / "config_requested.json").write_text(json.dumps({**request, "model": "energy_transformer/et_tiny"}))
+    before = {path: path.stat().st_mtime_ns for path in run.rglob("*")}
+    with pytest.raises(ConfigError) as refused:
+        train_pretrain(out=str(run), model="et_mim/et_tiny", data={"dataset": "cifar10"}, resume_interrupted=True)
+    assert re.fullmatch(PRE_RENAME, str(refused.value)).group("run", "model") == (str(run), "energy_transformer/et_tiny")
+    assert {path: path.stat().st_mtime_ns for path in run.rglob("*")} == before
+    (run / "config_requested.json").write_text(json.dumps({**request, "model": "beit/beit_tiny", "checkpoint": None}))
+    with pytest.raises(ConfigError) as refused:
+        load_resume_point(run, request)
+    assert re.fullmatch(PRE_RENAME, str(refused.value)).group("model") == "beit/beit_tiny"
+    (run / "task.json").write_text("{}")  # a classifier run under the same name holds one: not this refusal
+    with pytest.raises(ConfigError, match=PRE_INIT):
+        load_resume_point(run, request)
+
+
 def test_resume_a_user_value_against_the_records_pin_is_refused_before_the_claim(vit_64, tmp_path):
     run_dir = tmp_path / "run"
     shutil.copytree(vit_64.out, run_dir)
@@ -1731,20 +1807,19 @@ def test_pretrain_a_beit_mim_source_at_32_px_seeds_a_64_px_beit_with_its_patch_p
     for path in tables:
         np.testing.assert_allclose(start[path], init_from.beit_relpos_cubic(source[path], start[path].shape), atol=1e-6)
     check_copied(block, start, source)
+    assert (out / "run.log").read_text().count(PIN_LINE) == 1  # D-053: the pin line is a notice run.log replays
 
 
-def test_pretrain_an_et_mim_source_at_32_px_is_refused_by_a_64_px_energy_transformer_after_the_claim(
+def test_pretrain_an_et_mim_source_at_32_px_is_refused_by_a_64_px_energy_transformer_before_the_claim(
         world, et_source, trees, tmp_path):
     out = tmp_path / "run"
     keras.backend.clear_session()
     with pytest.raises(ConfigError) as caught:
         train_image_classification(**classify(str(out), trees["ten"], 64, model="energy_transformer/et_tiny",
                                               init=str(et_source), model_args={"num_steps": 2}))
-    text = str(caught.value)
-    # The pin keeps patch 4, so the grid is 16x16 at 64 px: the ET rule refuses while planning and names both grids.
-    assert "(8x8 patches)" in text and "(16x16 patches)" in text and f"The run directory {out} was claimed" in text
-    assert (out / "config.json").exists() and not (out / "training_log.csv").exists()
-    assert not (out / "best_model.keras").exists() and not (out / "task.json").exists()
+    # The pin keeps patch 4, so the grid is 16x16 at 64 px: refused before the claim, naming both grids (D-055).
+    assert "grid of 8x8 patches (32 px at patch_size 4, which init keeps) would become 16x16 at 64 px" in str(caught.value)
+    assert "the Energy Transformer position table cannot change its grid" in str(caught.value) and not out.exists()
 
 
 def test_pretrain_beit_mim_on_another_tokenizer_resets_its_decoder_and_copies_the_trunk(

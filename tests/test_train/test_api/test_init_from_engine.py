@@ -15,7 +15,8 @@ A ``resample`` key is a regex that must match the whole path, so one key covers 
 encoder layer at any depth; a path two keys match is refused (plan-2026-11-19T081214-5c6cc105 D-005).
 The BEiT relative position bias rule is held to unilm's own resize, run verbatim and frozen into
 ``data/beit_relpos_reference.npz`` by ``data/generate_beit_relpos_reference.py`` (D-004), and refuses a growth past
-the reach of unilm's search for its ratio, where the spline would extrapolate (the fixture's 4 to 8 case, D-046); the Energy
+the reach of unilm's search for its ratio, where the source grid stops spanning the target and every outer displacement
+takes the value at the source's edge (FITPACK clamps; the fixture's 4 to 8 case, D-046, D-051); the Energy
 Transformer position table has no reference rule, so its grid change is refused by name (D-006).
 
 ``model.weights`` holds no ``SeedGenerator`` state in Keras 3.8 (it is in ``model.variables``),
@@ -537,8 +538,28 @@ def test_a_growth_past_the_reach_is_refused_naming_both_grids_and_the_reach(src,
     assert message == (
         f"Invalid value for 'init': BEiT relative_position_bias_table would resample a grid of {src}x{src} patches to "
         f"{dst}x{dst}; unilm's rule grows the relative position bias table of a grid of {src}x{src} patches to at most "
-        f"{reach}x{reach} (beyond it the search for the ratio of the rule's geometric grid stops at its upper bound 1.5, "
-        "so the outer target displacements lie past the source's last one and the spline extrapolates them)")
+        f"{reach}x{reach} (past it the ratio of the rule's geometric grid stops at its upper bound 1.5 and the source "
+        "grid no longer spans the target, so every outer target displacement takes the value at the source's edge; "
+        "unilm's published fine-tunes grow 14x14 patches to 24x24, far inside the reach of 14 (388), and no reference "
+        "measures a fine-tune past it)")
+
+
+def test_past_the_reach_every_outer_displacement_takes_the_value_at_the_source_edge(unilm, monkeypatch):
+    """D-051: FITPACK clamps to the knots, so nothing is extrapolated. unilm's own 4 to 8 output and the engine's (the
+    reach lifted) repeat the source's edge past its outer knot (4.75): measured 0.0 (scratch_step9_2/clamp_probe.log)."""
+    table, want = unilm["4_8_3__table"], unilm["4_8_3__resized"]
+    monkeypatch.setattr(init_from, "beit_reach", lambda window: 10 ** 6)
+    got = init_from.beit_relpos_cubic(table, want.shape)
+    source, d = table[:-3].reshape(7, 7, 3), np.arange(-7, 8)
+    for out in (want, got):
+        grid = out[:-3].reshape(15, 15, 3)
+        for past in (d < -4.75, d > 4.75):
+            assert np.ptp(grid[:, past], axis=1).max() == 0.0 and np.ptp(grid[past], axis=0).max() == 0.0
+        for i in (-1, 0, 1):  # displacements on a source knot: the source's own edge values
+            np.testing.assert_allclose(grid[i + 7, [0, 14]], source[i + 3, [0, 6]], atol=1e-6)
+            np.testing.assert_allclose(grid[[0, 14], i + 7], source[[0, 6], i + 3], atol=1e-6)
+        np.testing.assert_allclose(grid[np.ix_([0, 14], [0, 14])], source[np.ix_([0, 6], [0, 6])], atol=1e-6)
+    np.testing.assert_allclose(got, want, atol=1e-6)
 
 
 @pytest.mark.parametrize("src,dst", [(8, 33), (4, 5), (24, 25)], ids=["reach_of_8", "reach_of_4", "lower_bound"])

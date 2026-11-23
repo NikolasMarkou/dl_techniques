@@ -73,12 +73,13 @@ Interface contract
         is missing; the record fails the predictor's record check or ``config.json`` is no JSON object; the
         source's task and family are neither this run's nor a declared cross-task pair; ``fixed`` keys of
         this family differ (every one named) or the input scaling does; a pinned argument of a same-task source is
-        not recorded in its ``config.json`` ``used.model_args`` (a cross-task source pins what its record holds); a
-        target that resamples by ``beit_relpos_cubic`` would have a grid past :func:`beit_reach` of the source's (its
-        side over the pinned patch; the tokens and the largest side named). (A request ``model_args`` value other than a
-        pin is refused by :func:`train.api.recipes.merge_model_args` when the task checks its model arguments, also
-        before the claim.) A cross-task pin of ``patch_size`` other than the recipe's patch is logged in one info line
-        with the tokens it gives.
+        not recorded in its ``config.json`` ``used.model_args`` (a cross-task source pins what its record holds); the
+        target's grid (its side over the pinned patch) differs from the source's where its position rule makes no such
+        change: any change of ``et_pos_refused``'s; for ``beit_relpos_cubic`` a grid below 3x3, a smaller one or one
+        past :func:`beit_reach` (both grids and the tokens named). (A request ``model_args`` value other than a pin
+        skips that check and is refused by :func:`train.api.recipes.merge_model_args`, also before the claim.) A
+        cross-task pin of ``patch_size`` other than the recipe's patch gives the :class:`Source` a ``notice`` with the
+        tokens.
 
 ``transfer(source, model, task, family, variant, record)``
     :param source: the :class:`Source` :func:`read_source` returned before the claim.
@@ -120,7 +121,7 @@ Interface contract
         ``s=0``) through the source grid set at unilm's geometric positions, evaluated at the target's integer
         displacements, then the 3 extra rows unchanged, in ``value``'s dtype.
     :raises ConfigError: another rank or head count, a row count that is no such grid, a grid that is not larger, or
-        one past :func:`beit_reach` of the source's (where unilm's search saturates and the spline extrapolates).
+        one past :func:`beit_reach` of the source's (where unilm's grid stops spanning the target, see BEYOND_REACH).
 
 ``beit_reach(window)``
     :return: the largest side of a grid of patches ``beit_relpos_cubic`` grows a ``window x window`` grid to
@@ -335,8 +336,15 @@ BEIT_EXTRA_ROWS = 3
 #: The upper bound of unilm's search for the ratio of its geometric grid (``run_class_finetuning.py`` L376).
 BEIT_RATIO_BOUND = 1.5
 #: Why :func:`beit_relpos_cubic` grows no grid past :func:`beit_reach` (both refusals say it).
-BEYOND_REACH = ("beyond it the search for the ratio of the rule's geometric grid stops at its upper bound 1.5, so the "
-                "outer target displacements lie past the source's last one and the spline extrapolates them")
+BEYOND_REACH = ("past it the ratio of the rule's geometric grid stops at its upper bound 1.5 and the source grid no "
+                "longer spans the target, so every outer target displacement takes the value at the source's edge; "
+                "unilm's published fine-tunes grow 14x14 patches to 24x24, far inside the reach of 14 (388), and no "
+                "reference measures a fine-tune past it")
+#: Why the BEiT rule grows a grid only and the ET grid never changes: each rule says it, and read_source (D-055).
+BEIT_LARGER_ONLY = ("only a larger grid is resampled (unilm's rule grows a grid; for a smaller one its search for the "
+                    "ratio stops at its lower bound)")
+ET_NO_RULE = ("no reference rule resamples it (the Energy Transformer paper describes no fine-tuning at another "
+              "resolution); train this run at the source's grid (its image_size and patch_size)")
 
 
 def beit_reach(window: int) -> int:
@@ -385,13 +393,12 @@ def beit_relpos_cubic(value: Any, target_shape: Tuple[int, ...]) -> Any:
     src, dst = _beit_side(value.shape), _beit_side(target_shape)
     if dst <= src:
         raise ConfigError(f"Invalid value for 'init': BEiT relative_position_bias_table would resample a grid of "
-                          f"{(src + 1) // 2}x{(src + 1) // 2} patches to {(dst + 1) // 2}x{(dst + 1) // 2}; only a "
-                          "larger grid is resampled (unilm's rule grows a grid; for a smaller one its search for the "
-                          "ratio stops at its lower bound)")
-    # DECISION plan-2026-11-19T081214-5c6cc105/D-046
-    # Past beit_reach unilm's search stops at its upper bound and the spline EXTRAPOLATES the outer displacements (8 to
-    # 56 patches: the source's outer position 32.17 against the target's 55, scratch_step9_1/reach_probe.log). Do NOT
-    # resample it: refused here, and before the claim by read_source (_refuse_beyond_reach) for a run's own grids.
+                          f"{(src + 1) // 2}x{(src + 1) // 2} patches to {(dst + 1) // 2}x{(dst + 1) // 2}; "
+                          f"{BEIT_LARGER_ONLY}")
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-046 (amended by D-051)
+    # Past beit_reach the source grid stops spanning the target and FITPACK clamps, so the margin repeats the source's
+    # edge (scratch_step9_2/clamp_probe.log). Do NOT justify it by overshoot or extrapolation (the cubic rings as much
+    # inside): no reference measures a growth past it. Refused here, and before the claim by read_source.
     if (dst + 1) // 2 > beit_reach((src + 1) // 2):
         raise ConfigError(f"Invalid value for 'init': BEiT relative_position_bias_table would resample a grid of "
                           f"{(src + 1) // 2}x{(src + 1) // 2} patches to {(dst + 1) // 2}x{(dst + 1) // 2}; "
@@ -430,9 +437,7 @@ def et_pos_refused(value: Any, target_shape: Tuple[int, ...]) -> Any:
     # bicubic: a convention is not a reference (U3). It is declared so the refusal names both grids and the reason;
     # it runs while planning, so nothing is assigned.
     raise ConfigError(f"Invalid value for 'init': the Energy Transformer position table {_grid_of(value.shape)} cannot "
-                      f"become {_grid_of(target_shape)}: no reference rule resamples it (the Energy Transformer paper "
-                      "describes no fine-tuning at another resolution); train this run at the source's grid (its "
-                      "image_size and patch_size)")
+                      f"become {_grid_of(target_shape)}: {ET_NO_RULE}")
 
 
 # ---------------------------------------------------------------------
@@ -461,6 +466,7 @@ class Source:
     sha256: str
     relation: Optional[CrossTask]
     pins: Mapping[str, Any]
+    notice: Optional[str] = None  # the moved-patch line; the trainer's notices replay it into run.log (D-053)
 
 
 def _refuse_init(text: str) -> ConfigError:
@@ -582,41 +588,53 @@ def read_source(init: Any, trainer: Any, config: Any, context: Any) -> Source:
     # same precedence as a same-task pin (recipes.merge_model_args). Do NOT read its used.model_args (another family's
     # factory keywords) and do NOT pin nothing: a 64 px beit would take patch 16 and be refused after the claim.
     pins = _pins(path, spec, used) if relation is None else {key: record[key] for key in spec.pinned if key in record}
-    _refuse_beyond_reach(spec, record, pins, context)
-    if relation is not None:
-        _log_moved_patch(pins, context)
-    return Source(path, record, recorded, file_sha256(path / "best_model.keras"), relation, pins)
+    _refuse_grid_change(spec, record, pins, context)
+    notice = _moved_patch(pins, context) if relation is not None else None
+    return Source(path, record, recorded, file_sha256(path / "best_model.keras"), relation, pins, notice)
 
 
-def _refuse_beyond_reach(spec: TransferSpec, record: Mapping[str, Any], pins: Mapping[str, Any], context: Any) -> None:
-    """Refuse a BEiT target whose grid is past :func:`beit_reach` of the source's, naming the tokens (D-046)."""
-    if "beit_relpos_cubic" not in spec.resample.values() or "patch_size" not in pins:
-        return
-    if (context.model_args or {}).get("use_relative_position_bias") is False:
-        return  # the target has no table to resample
+def _refuse_grid_change(spec: TransferSpec, record: Mapping[str, Any], pins: Mapping[str, Any], context: Any) -> None:
+    """Refuse a target grid its position rule cannot make, naming both grids and the tokens (D-046, D-055)."""
+    # DECISION plan-2026-11-19T081214-5c6cc105/D-055
+    # Every grid change the position rules refuse while planning, after the claim, is refused HERE, before it, from
+    # the source record's size, the pinned patch and the run's side. Do NOT leave one to the rules: a claimed directory
+    # stays behind. A typed patch other than the pin skips it, so merge_model_args's pin refusal is what it gets.
+    rules = set(spec.resample.values()) & {"beit_relpos_cubic", "et_pos_refused"}
+    if not rules or "patch_size" not in pins:
+        return  # no position rule: the context is not read (the source reader's own test passes a bare one)
+    asked = context.model_args or {}
+    if asked.get("patch_size", pins["patch_size"]) != pins["patch_size"]:
+        return  # a typed patch other than the pin: merge_model_args refuses it, before the claim too
+    if "et_pos_refused" not in rules and asked.get("use_relative_position_bias") is False:
+        return  # the target has no relative position bias table
     patch, side, size = pins["patch_size"], context.image_size, record.get("input_size") or record.get("input_shape")
-    if not isinstance(side, int) or not size or side % patch or size[0] % patch or size[0] // patch < 3:
-        return  # an untiled side and a grid below the rule's floor are refused by name elsewhere
+    if not isinstance(side, int) or not size or side % patch or size[0] % patch or side == size[0]:
+        return  # an untiled side is refused by name elsewhere; an equal grid is copied
     theirs, ours = size[0] // patch, side // patch
-    if ours > beit_reach(theirs):
-        raise _refuse_init(f"the source's grid of {theirs}x{theirs} patches ({size[0]} px at patch_size {patch}, which "
-                           f"init keeps) would become {ours}x{ours} at {side} px, {ours * ours} tokens; "
-                           f"{_reach_words(theirs)}; ask for transform_args.image_size of at most "
-                           f"{beit_reach(theirs) * patch} px")
+    if "et_pos_refused" in rules:
+        reason = f"the Energy Transformer position table cannot change its grid: {ET_NO_RULE}"
+    elif min(theirs, ours) < 3:
+        reason = "BEiT's relative position bias table: the rule resamples no grid below 3x3 patches"
+    elif ours < theirs:
+        reason = f"BEiT's relative position bias table: {BEIT_LARGER_ONLY}"
+    elif ours > beit_reach(theirs):
+        reason = f"{_reach_words(theirs)}; ask for transform_args.image_size of at most {beit_reach(theirs) * patch} px"
+    else:
+        return
+    raise _refuse_init(f"the source's grid of {theirs}x{theirs} patches ({size[0]} px at patch_size {patch}, which "
+                       f"init keeps) would become {ours}x{ours} at {side} px, {ours * ours} tokens; {reason}")
 
 
-def _log_moved_patch(pins: Mapping[str, Any], context: Any) -> None:
-    """Log the one line of a cross-task patch pin that is not the recipe's patch (D-046)."""
-    from dl_techniques.utils.logger import logger
-
+def _moved_patch(pins: Mapping[str, Any], context: Any) -> Optional[str]:
+    """The line of a cross-task patch pin that is not the recipe's patch, else None (D-046; a notice since D-053)."""
     from .recipes import vit_patch_size  # the patch rule of the rows a pretrain record pins (beit, energy_transformer)
 
     patch, side, computed = pins.get("patch_size"), context.image_size, vit_patch_size(context)
     if patch is None or not isinstance(side, int) or side % patch or patch == computed:
-        return
+        return None
     grid = side // patch
-    logger.info(f"init: the source's record pins patch_size {patch} (the recipe gives {computed} at {side} px), so this "
-                f"run cuts its {side} px input into {grid}x{grid} = {grid * grid} tokens")
+    return (f"init: the source's record pins patch_size {patch} (the recipe gives {computed} at {side} px), so this "
+            f"run cuts its {side} px input into {grid}x{grid} = {grid * grid} tokens")
 
 
 # ---------------------------------------------------------------------

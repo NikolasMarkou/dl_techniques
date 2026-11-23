@@ -1025,6 +1025,10 @@ class TaskTrainer:
                 pins = self._init_source.pins
             context = dataclasses.replace(context, pinned=dict(pins))
         self._notices = self._recipe_notices(config, resolved, facts, family, recipe)
+        # DECISION plan-2026-11-19T081214-5c6cc105/D-053: the moved-patch line of an init source is a notice, which
+        # run.log replays after the claim. Do NOT log it in read_source: before the claim it reaches the console only.
+        if self._init_source is not None and self._init_source.notice:
+            self._notices.append(("info", self._init_source.notice))
         self._refuse_before_the_claim(resolved, facts)
         self.check_model_args(resolved, context)
         return resolved, context
