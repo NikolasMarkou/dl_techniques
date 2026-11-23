@@ -584,7 +584,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   `horizon`, `channels`, `value_cols`, `time_col`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and
   `data_sha256` and no class, statistic or input size, and a resume compares its `DATA_KEYS` (the window, channels, columns, scale
   floor and source) and nothing about the head; a depth record (the fifth kind) has `input_size` (the size the model is built at),
-  `channels`, `normalize` (`imagenet`) and `output` (`relative_disparity`), and a resume compares the first three. A new task is a new row of both tables and a
+  `channels`, `normalize` (`imagenet`) and `output` (`relative_disparity`), and a resume compares the first three; a pretrain record (the
+  sixth kind, plan 5c6cc105 D-009) has `input_size`, `channels`, `normalize`, `mean`, `std`, `patch_size`, `tokenizer` (the sha256 of
+  the tokenizer file, null for `et_mim`) and `output` (`patch_embeddings`), and a resume compares the seven before `output`. A new task is a new row of both tables and a
   builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
   `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`.
 - **The `image_denoising` task** (plan d483ffab): `api/tasks/image_denoising.py:ImageDenoisingTrainer` supplies hooks and no
@@ -625,8 +627,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   denoising groups reads it).
 - **The `pretrain` task** (plan 46e5318f): `api/tasks/pretrain.py:PretrainTrainer` supplies the ten required hooks (`REQUIRED_HOOKS`)
   and `fit_kwargs`, `resume_stream`, `bar_is_met`, `figure_callbacks`, `run_analysis`, `summary_fields`, `recipe_notices` and the
-  rest of the optional ones, and no stage. The FAMILY chooses the method (`pretrain_models.METHOD_OF`: `energy_transformer` is
-  `et_masked`, `beit` is `beit_mim`), so there is one task and no `method` key (an earlier design had `pretrain(method=...)`; the model name selects it here, D-006). The groups (`PretrainData` with the four mask keys, `PretrainTransformArgs`, `PretrainMetricArgs`) are in
+  rest of the optional ones, and no stage. The FAMILY chooses the method (`pretrain_models.METHOD_OF`: `et_mim` is
+  `et_masked`, `beit_mim` is `beit_mim`; renamed from `energy_transformer` and `beit` with no alias, plan 5c6cc105 D-002), so there is one task and no `method` key (an earlier design had `pretrain(method=...)`; the model name selects it here, D-006). The groups (`PretrainData` with the four mask keys, `PretrainTransformArgs`, `PretrainMetricArgs`) are in
   `api/pretrain_args.py` (they cannot live in `api/args.py`, whose seven groups `_groups.py` pins, and classification's `MetricArgs`
   holds a `top_k`); the adapters `create_et` and `create_beit` (a built model of `[image, mask]`, `num_classes` refused when not
   `None`), the refusal tables `ALLOWED`, `REFUSED`, `SUPPLIED` and `TASK_KEYS` (held equal to the factories' signatures by
@@ -645,7 +647,7 @@ classification task calls the same `train.common.classification_run` helpers as 
   read by the task (the resolver strips it; the adapter refuses it): the path is checked before the claim, the grid is proved by a
   forward pass at build time against the patches' grid, never the tokenizer's own, and a perplexity below 64 effective codes is
   refused (D-007, D-019; do not lower the floor, move it only with a measurement of a third tokenizer). ET keeps its global gradient
-  clip: `pretrain_models.resolve_pretrain_args` refuses `optim_args.global_clipnorm=null` by name, and the recipes carry `global_clipnorm`, never a
+  clip: `recipes.require_global_clip` (called by `pretrain_models.resolve_pretrain_args` and the `energy_transformer` classifier's resolver) refuses `optim_args.global_clipnorm=null` by name, and the recipes carry `global_clipnorm`, never a
   literal `clipnorm` (a per-variable clip leaves the global norm unbounded). Two additive keywords on legacy-shared code serve it: `classification_run.finalize_last_epoch(sample=None)` (the load check's
   input used as given; a model of two inputs has a stream of `((image, mask), target, weight)` and no `x_fig`, so the two legacy
   branches, `select_ds.take(1)` and `x_fig`, cannot build it; `None` keeps them byte for byte; the caller cuts the sample to
@@ -654,7 +656,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   attached by `figure_callbacks`, the one hook that receives the directory (`extra_callbacks` does not), into
   `visualizations/energy_trace.csv`, with `skip_header_if_file_exists` true on a resume. Decisions with anchors: the two seams
   (D-003, D-004), the mask keys (D-005), the tokenizer (D-007, D-019), the loss weight and the auto mask counts (D-008, D-018), the bar
-  (D-009), the trace and `finalize_last_epoch` (D-010), the recipe notices (D-012), no record (D-013). The user-facing description,
+  (D-009), the trace and `finalize_last_epoch` (D-010), the recipe notices (D-012); the record, `predict`, `export` and `init` are plan
+  5c6cc105's (D-003, D-008, D-009, D-023, D-024). The user-facing description,
   with the measured numbers, is in [`README.md`](README.md).
 - **Two more seams, for a task whose stream does not end** (plan 46e5318f; five of this kind with the three above; each a no-op by default, proven in
   `test_the_sequence_seams_default_to_nothing.py` and `test_the_stream_contract.py`, with the goldens EXACT after every shared edit).
@@ -703,28 +706,31 @@ classification task calls the same `train.common.classification_run` helpers as 
   another one. `AutoContext.pinned` carries the pins and only `recipes.merge_model_args` reads it.
   - **`TransferSpec` per family.** `registry.TransferSpec` and `registry.CrossTask` (frozen dataclasses, standard library only, so
     the help path stays light, D-032) are declared on each `ModelSpec` as `transfer=`: `head` (path prefixes of the final layer),
-    `resample` (path to a rule of `init_from.RULES`, today only `vit_pos_bicubic`), `grow` (a regex of the depth-indexed blocks a
-    deeper variant adds), `pinned` (factory arguments the target takes from the source's `used.model_args`), `fixed` (`channels`,
-    `lookback`, `horizon`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask` of a target
+    `resample` (a regex the whole weight path must match, to a rule of `init_from.RULES`: `vit_pos_bicubic`, `beit_relpos_cubic`, or
+    `et_pos_refused`, which only refuses; plan 5c6cc105 D-005), `grow` (a regex of the depth-indexed blocks a
+    deeper variant adds), `pinned` (factory arguments the target takes from the source's `used.model_args`, or from a source of
+    another task the keys its record holds, plan 5c6cc105 D-036), `fixed` (`channels`, `lookback`, `horizon`, `input_size`,
+    `patch_size`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask` of a target
     prefix and the dropped source head) and `positional` (top-level components whose weights pair by order, xlstm only, D-031).
-    A new family of a task that takes `init` declares `transfer=TransferSpec(...)`, or `transfer=None` with a non-empty
-    `transfer_reason` (the pretrain rows do), which `init` then quotes in its refusal. `ModelSpec` does not enforce this
+    A new family declares `transfer=TransferSpec(...)`: `transfer_reason` is gone (plan 5c6cc105 D-011), and a `None` spec, left
+    to test fixtures, gets one generic refusal. `ModelSpec` does not enforce this
     (D-033): `tests/test_train/test_api/test_init_from_families.py` does, and builds each row's smallest variant (its `VARIANT`
     table) at the source geometry and at every change the spec names, requiring the engine's verdict to be the declared one, so a
     new row adds its variant there. It checks every row twice at the source geometry: after `clear_session`, and in the production
     order (the target built first, then the source's saved archive loaded beside it, its head naming a weight), the latter also
-    for one change of each kind and every cross-task pair. Today 23 rows declare a spec and the 2 pretrain rows give a reason.
+    for one change of each kind and every cross-task pair. Every registered row declares a spec (27, counted from `registry.MODELS`).
   - **Two hooks.** `TaskTrainer.init_identity(config, context)`, before the claim and without TensorFlow, returns the record keys
-    this run will write about its input (`channels`, `lookback`, `horizon`, `normalize`, `data_range`; those its record has),
-    which `read_source` compares with the source's record; the base class refuses `init` naming the task (`pretrain` keeps it,
-    though a user meets its rows' `transfer_reason` first, which `read_source` checks before the hook). `TaskTrainer.init_overlap(source, config, data)`, after `build_data` on a fresh run, returns the `split` of the
+    this run will write about its input (`channels`, `lookback`, `horizon`, `normalize`, `data_range`, `input_size`, `patch_size`;
+    those its record has), which `read_source` compares with the source's record; the base class refuses `init` naming the task
+    (every built-in task overrides it; pretrain's reads the RESOLVED size and patch, plan 5c6cc105 D-037). `TaskTrainer.init_overlap(source, config, data)`, after `build_data` on a fresh run, returns the `split` of the
     block through `init_from.split_block` (helpers `same_split`, `counted_split`, `seeded_rows_split`); the base class returns
     `unknown` with "this task does not rebuild a source's rows". It never refuses: an overlap is counted and marked (D-012, D-038).
   - **The summary and the bar.** `TaskTrainer._summary_head` takes a keyword `init_block`, `None` for a run without `init`, so
     its other callers are unchanged; with a block it writes `init`, `epoch_zero_of` and the three flags of `init_from.bias_of`
     after `init_scale_warning`, for a finished and a diverged run alike (D-040). Under `init` `run_sequence.epoch_zero` calls
     `init_from.evaluate_loaded` instead of the task's `initial_loss_check`, and a task whose bar is absolute returns
-    `Evaluation.loaded` from `evaluate_and_report` (`init_from.loaded_value`, the fit sidecar's `initial.metrics`); `report`
+    `Evaluation.loaded` from `evaluate_and_report` (`init_from.loaded_value`, the fit sidecar's `initial.metrics`; pretrain does not,
+    its bar is a loss whose epoch-zero term is the loaded weights', plan 5c6cc105 D-012); `report`
     passes it to `bar_is_met(..., loaded=)`, which checks `init_from.beats_loaded` (D-039, D-050); no trainer attribute carries
     it. Tests: `tests/test_train/test_api/test_init_from_engine.py`, `test_init_from_families.py` and `test_init_from_runs.py`.
 - **The mask-key rule** (D-004, D-005; why a pretrain run is reproducible and a resume does not leak). A mask is a function of a key
@@ -843,12 +849,11 @@ classification task calls the same `train.common.classification_run` helpers as 
   may name. A task
   is known to the reader only when it has a row in EVERY table of `TASK_TABLES` (`record_problems` refuses another, naming the tasks
   of the first table it is missing from), and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
-  only for a task whose `RECORD_KEYS` hold those keys. A task that writes a record is one row in each table plus one in `PREDICT_WRITERS` and one in `DATA_LISTERS`;
-  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. Five tasks write a record, `depth_estimation`
-  the fifth; `pretrain` writes none (D-013 of plan
-  46e5318f: `task_record` returns `None`), so it is in no table and `predict`, `export` and `load_model` of its run directory stop
-  in `read_record` with the existing `task.json` sentence; do not write a partial record for it, a record that exists makes
-  `load_model` dispatch on a task it has no predictor for. Do not add an `elif task ==` to
+  only for a task whose `RECORD_KEYS` hold those keys. A record kind is a row in each of the 10 tables of `TASK_TABLES` plus one in each of the
+  2 cli tables, `PREDICT_WRITERS` and `DATA_LISTERS`;
+  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. All six tasks write a record, `pretrain`
+  the sixth (plan 5c6cc105 D-009; its predictor, served function and export check are `api/pretrain_predictor.py`, D-013): do
+  not write a partial record for a new task, a record that exists makes `load_model` dispatch on the task's rows. Do not add an `elif task ==` to
   `load_model`, `input_shape_of`, `_run_on_zeros` or the predict command. The help text of `cli.PREDICT_OPTIONS` and
   `cli.EXPORT_NOTES` names every task's output; `test_export_per_family.py` pins phrases of it.
 - **The help path imports no TensorFlow, Keras or yaml and stays under 1 s**:

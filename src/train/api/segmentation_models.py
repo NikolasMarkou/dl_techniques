@@ -125,7 +125,7 @@ Interface contract
     :return: the four :class:`~train.api.registry.ModelSpec` rows (``convunext``, ``accunet``,
         ``resnet_seg``, ``convnext_seg``),
         freshly built, each with its recipe (``defaults``) and ``resolve_segmentation_args``.
-        :func:`train.api.recipes.register_builtin_models` registers them with the six classifiers
+        :func:`train.api.recipes.register_builtin_models` registers them with the eight classifiers
         (D-077: they were held back in step 23 for want of a recipe and a task, and both exist now).
 
 ``resolve_segmentation_args(context, optim_args, model_args)``

@@ -4,7 +4,8 @@
 :func:`train.api.predictor.load_model`) and writes ONE new file or directory. The formats
 are the literal :data:`FORMATS`; each reloads in its own runtime and gives the Keras
 model's outputs on the same input to within float rounding (the tests pin 1e-5 on an untrained
-``vit_pico`` and a tolerance of 1e-4 on six families, see ``test_export_per_family.py``).
+``vit_pico`` and a tolerance of 1e-4 on the eight classification families, one cell refused, see
+``test_export_per_family.py``).
 
 The module is named ``exporting`` so that ``train.api.export`` is always the FUNCTION on the
 lazy package surface (D-068): a submodule named ``export`` would replace it on first import.

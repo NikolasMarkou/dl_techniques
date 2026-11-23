@@ -7,9 +7,9 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 ## `python -m train` and `train.api`
 
 A key=value command line over strict configs. It has six tasks, `image_classification`
-(families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`),
+(families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`, `beit`, `energy_transformer`),
 `image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), `image_denoising`
-(families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), `pretrain` (families `energy_transformer`, `beit`)
+(families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), `pretrain` (families `et_mim`, `beit_mim`),
 `time_series_forecasting` (families `nbeats`, `prism`, `tirex`, `xlstm`, `ets`, `timestral`, `mdn`) and
 `depth_estimation` (family `depth_anything`), and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
@@ -600,33 +600,34 @@ images: a hypothesis for the spread of the whole-image cells, not a finding.
   that smoke (the multiplicative run ended 1.0 dB below its input); clipped noise ran there and in the additive parity arm, not in the
   24-epoch gate.
 
-**`pretrain`** (plan 46e5318f): masked-image pretraining on CIFAR-10 or Imagenette; the labels are not used. The family chooses the
-method (there is no `method` key): `energy_transformer` completes the pixels of masked patches (ET masked completion) and `beit`
+**`pretrain`** (plan 46e5318f; the record, `predict`, `export` and `init` are plan 5c6cc105): masked-image pretraining on CIFAR-10 or Imagenette; the labels are not used. The family chooses the
+method (there is no `method` key): `et_mim` completes the pixels of masked patches (ET masked completion) and `beit_mim`
 predicts the code ids that a frozen stage-0 tokenizer gives the masked patches (BEiT masked image modelling). `out`, `model` and
-`data.dataset` are required, and a `beit` run also needs `model_args.tokenizer_checkpoint`. A seeded slice of the train rows selects
+`data.dataset` are required, and a `beit_mim` run also needs `model_args.tokenizer_checkpoint`. A seeded slice of the train rows selects
 the best epoch, as in the other tasks, and the test split is scored once after `fit`.
 
 ```bash
 python -m train list_models task=pretrain
 python -m train pretrain                     # every key of the task, its type and default
-python -m train pretrain out=auto model=energy_transformer/et_tiny data.dataset=cifar10 epochs=12
-python -m train pretrain out=auto model=beit/beit_tiny data.dataset=cifar10 epochs=12 \
+python -m train pretrain out=auto model=et_mim/et_tiny data.dataset=cifar10 epochs=12
+python -m train pretrain out=auto model=beit_mim/beit_tiny data.dataset=cifar10 epochs=12 \
     model_args.tokenizer_checkpoint=/path/to/stage0_run/best_model.keras
 ```
 
 ```python
 from train.api import train_pretrain
-result = train_pretrain(out="auto", model="energy_transformer/et_tiny", data={"dataset": "cifar10"}, epochs=12)
+result = train_pretrain(out="auto", model="et_mim/et_tiny", data={"dataset": "cifar10"}, epochs=12)
 ```
 
 * **Families** (`train/api/pretrain_models.py`; the variants are the keys of each model module's `MODEL_VARIANTS`, and
   `python -m train list_models task=pretrain` prints them). Each family trains this task only: a `vit/vit_pico` model given to `pretrain`
-  exits 2 naming the families of this task, and the other five tasks refuse these two the same way.
+  exits 2 naming the families of this task, and the other five tasks refuse these two the same way. The names before plan 5c6cc105,
+  `energy_transformer` and `beit`, are the classifiers of `image_classification` now, with no alias (Limits).
 
 | Family | Method | Variants | Recipe (the legacy trainer's) |
 |---|---|---|---|
-| `energy_transformer` | `et_masked` | `et_tiny` `et_small` `et_base` | AdamW, lr 5e-4, 2 warmup epochs, global clip 1.0, `model_args.num_steps` 12 |
-| `beit` | `beit_mim` | `beit_tiny` `beit_small` `beit_base` `beit_large` | AdamW, lr 1.5e-3, 10 warmup epochs, global clip 3.0, `model_args.drop_path_rate` 0.1 |
+| `et_mim` | `et_masked` | `et_tiny` `et_small` `et_base` | AdamW, lr 5e-4, 2 warmup epochs, global clip 1.0, `model_args.num_steps` 12 |
+| `beit_mim` | `beit_mim` | `beit_tiny` `beit_small` `beit_base` `beit_large` | AdamW, lr 1.5e-3, 10 warmup epochs, global clip 3.0, `model_args.drop_path_rate` 0.1 |
 
 Both recipes also hold 100 epochs, batch 32, weight decay 0.05, cosine decay over the whole run to 0.01 of the peak, and a patience of 15
 (`ET_RECIPE` and `BEIT_RECIPE` in `pretrain_models.py`; a test reads the legacy `TrainingConfig` of each trainer and holds them equal).
@@ -637,9 +638,9 @@ the input, which is 32 and 29 of 64 patches on CIFAR-10 and 98 and 88 of 196 on 
 75 in blocks of at least 16 on the 14 x 14 one (the auto rule below).
 * **Keys of the task** (`python -m train pretrain` lists all, with their help; the groups `optim_args`, `checkpoint_args`,
   `logger_args`, `analysis_args` and `debug_args`, and `epochs`, `batch_size`, `seed`, `devices`, `precision`, `resume_interrupted`
-  and `init`, are the shared ones and mean what they mean for the other tasks, except where this section says otherwise; `init` is
-  refused here by name, see Limits).
-  Required: `out`, `model`, `data.dataset` (`cifar10` or `imagenette`) and, for `beit`, `model_args.tokenizer_checkpoint`.
+  and `init`, are the shared ones and mean what they mean for the other tasks, except where this section says otherwise; `init`
+  takes an earlier run of the same family only, see "Starting from an earlier run").
+  Required: `out`, `model`, `data.dataset` (`cifar10` or `imagenette`) and, for `beit_mim`, `model_args.tokenizer_checkpoint`.
 
 | Key | Default | Read at |
 |---|---|---|
@@ -647,10 +648,10 @@ the input, which is 32 and 29 of 64 patches on CIFAR-10 and 98 and 88 of 196 on 
 | `data.validation_split` | `null` | `PretrainTrainer.build_data`, then `image_streams.load_image_streams`; null is the loader's 0.1 |
 | `data.max_samples` | `null` | `PretrainTrainer.build_data`, then `image_streams.load_image_streams` (the test split is never capped); `debug_args.smoke` sets 512 when null |
 | `data.patch_size` | `"auto"` | `PretrainData.resolve_auto` (it must divide `transform_args.image_size`), `PretrainTrainer.build_model` (the model's patch), `pretrain_data.load_pretrain_batches` (the masks); auto is 4 for cifar10 and 16 for imagenette |
-| `data.mask_ratio` | `"auto"` | `PretrainData.resolve_auto`, `pretrain_data.load_pretrain_batches`, then `make_stateless_masked_patch_map_fn`; energy_transformer only, auto is 0.5 |
-| `data.mask_token_frac` | `"auto"` | the same path as `data.mask_ratio`; energy_transformer only, auto is 0.9 |
-| `data.num_mask_patches` | `"auto"` | `resolve_mask_counts` of `api/pretrain_args.py` (through `PretrainData.resolve_auto`), then `make_stateless_beit_mim_map_fn`; beit only, an explicit value above N is refused by name |
-| `data.min_mask_patches_per_block` | `"auto"` | the same path as `data.num_mask_patches`; beit only, at most `data.num_mask_patches` |
+| `data.mask_ratio` | `"auto"` | `PretrainData.resolve_auto`, `pretrain_data.load_pretrain_batches`, then `make_stateless_masked_patch_map_fn`; et_mim only, auto is 0.5 |
+| `data.mask_token_frac` | `"auto"` | the same path as `data.mask_ratio`; et_mim only, auto is 0.9 |
+| `data.num_mask_patches` | `"auto"` | `resolve_mask_counts` of `api/pretrain_args.py` (through `PretrainData.resolve_auto`), then `make_stateless_beit_mim_map_fn`; beit_mim only, an explicit value above N is refused by name |
+| `data.min_mask_patches_per_block` | `"auto"` | the same path as `data.num_mask_patches`; beit_mim only, at most `data.num_mask_patches` |
 | `transform_args.image_size` | `"auto"` | `PretrainTransformArgs.resolve_auto`, `PretrainTrainer.describe_data`, `PretrainTrainer.build_data`; auto is 32 for cifar10 and 224 for imagenette |
 | `metric_args.watch_metric` | `"auto"` | `PretrainMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`, `PretrainTrainer.evaluate_and_report`; auto is `val_loss`, the only value accepted (the success bar is a statement about the minimum `val_loss`, so the saved checkpoint must be that epoch; `loss`, the train loss, and any other metric are refused by key before the run directory is claimed) |
 | `metric_args.watch_mode` | `"auto"` | `PretrainMetricArgs.resolve_auto` (read from the metric's name); auto is `min`, the only value accepted (`val_loss` is a loss, and the bar is its minimum; `max` is refused by key) |
@@ -662,7 +663,7 @@ is not in the table above).
 group: the loss follows the method (ET: the mean squared error of the patch pixels; BEiT: the sparse categorical cross-entropy of the
 code ids on logits). `optim_args.optimizer=sgd` with a positive `optim_args.weight_decay` is refused, because the adapters build no L2
 penalty and the decay would be dropped (`pretrain_models.resolve_pretrain_args`; the denoising and segmentation resolvers do the same). A key of the
-other family (`data.num_mask_patches` on `energy_transformer`, `model_args.num_steps` on `beit`) is refused by name before the run
+other family (`data.num_mask_patches` on `et_mim`, `model_args.num_steps` on `beit_mim`) is refused by name before the run
 directory is claimed, and so is a `model_args` key the model takes from the task (`patch_size`, `input_shape`, `vocab_size`).
 `debug_args.smoke` runs one epoch on at most 512 train samples and applies no bar (`success` and `success_threshold` are null).
 * **Defaults that differ from the legacy trainers** (`train.energy_transformer.train_masked_completion` and `train.beit.train_mim`),
@@ -670,8 +671,8 @@ directory is claimed, and so is a `model_args` key the model takes from the task
   generator (`tf.random.Generator` for ET, the global `random` module for BEiT), so the same weights score a different `val_loss` on
   every pass (0.37 percent spread over four passes of one set of ET weights, measured on CPU before the port). (2) The global
   gradient clip stays on: both recipes carry it as `optim_args.global_clipnorm` (1.0 and 3.0, the legacy numbers; never a per-variable
-  `optim_args.clipnorm`, which leaves the global norm unbounded), and an `energy_transformer` run with `optim_args.global_clipnorm=null`
-  is refused by name, because the energy descent is unrolled (`model_args.num_steps` of it, 12 in the recipe) and the paper reports
+  `optim_args.clipnorm`, which leaves the global norm unbounded), and an `et_mim` run with `optim_args.global_clipnorm=null`
+  is refused by name (`recipes.require_global_clip`, which the `energy_transformer` classifier calls too), because the energy descent is unrolled (`model_args.num_steps` of it, 12 in the recipe) and the paper reports
   that the model fails to train at a learning rate above 1e-4 without the clip. (3) The BEiT loss is the reference's: each example's
   masked tokens weigh `N / n_masked`, so `val_loss` is the mean over examples of the per-example masked-token cross-entropy. The
   legacy weight is the bare mask, which makes `val_loss` that mean times the mask fraction (0.375, that is 24 of 64, in a probe), so a
@@ -751,7 +752,7 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   6.26 to 6.28 over three against 5.8716, so there the threshold is the baseline and the term is a guard. Because a random initialization sits above the constant predictor,
   `initial_loss_ratio` was above 1 in those runs, and no verdict is given on the initialization (`init_scale_warning` is null with a note). The
   summary also carries `method`, `mask` (patch size, grid and the four mask keys), `stream`, `selection`
-  and `tokenizer` (null for ET). The run directory is the shared contract without `task.json`: `config.json`, `config_requested.json`,
+  and `tokenizer` (null for ET). The run directory is the shared contract: `task.json` (the record, below), `config.json`, `config_requested.json`,
   `run.log`, `training_log.csv`, `training_history.json`, `best_model.keras`, `final_model.keras`, `results_summary.json`,
   `visualizations/` (`training_dashboard.png`, and for ET `energy_trace.csv`, the energy descent of one fixed selection batch per
   epoch with one header across a resume; both only while `analysis_args.figures` is true), `model_analysis/` (while `analysis_args.model_analysis` is true; data-free: weights and
@@ -781,18 +782,42 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   `resume_interrupted` says it in one clause: "the training masks and the shuffle continue on a fresh stream derived from the seed and
   the steps completed, never epoch 0's order and never a selection row, and the selection and test masks stay fixed" (the other tasks
   say "the data order replays epoch 0's"), and the summary's resume note carries the same clause (`TaskTrainer.resume_order`).
-* **`predict` and `export` are not available for this task.** A pretrain run writes no `task.json` (`task_record` returns `None`;
-  a resume works without one and compares the split sizes with the sidecar), so both commands exit 2 and write nothing. For a run
-  directory the sentence is `<run>/task.json does not exist; a model is loaded from a run directory, or from a .keras file whose
-  directory holds task.json`; for the `.keras` file inside it, `<file> has no record beside it; a .keras file is read with the first
-  of best_model.keras.task.json, best_model.task.json, task.json that exists in <run> (export writes best_model.keras.task.json)`. It
-  is the existing refusal and it names no pretrain-specific reason; a pretrain-specific sentence needs a change in `predictor.py`.
+* **The record, `predict` and `export`** (plan 5c6cc105, D-003, D-009, D-023). A pretrain run writes `task.json` (schema version 2,
+  the sixth record kind) with `schema_version`, `task`, `model`, `family`, `variant`, `input_size` (`[height, width]`), `channels`
+  (3), `normalize` (`standardize`), `mean` and `std` (what the streams standardize with: CIFAR-10's own statistics, ImageNet's for
+  Imagenette), `patch_size`, `tokenizer` (the sha256 of the tokenizer file for `beit_mim`, null for `et_mim`) and `output`
+  (`patch_embeddings`); a resume compares the seven from `input_size` to `tokenizer`. `predict model=<run dir or .keras>
+  data=<image or directory> out=<new directory>` answers the BACKBONE's patch-token embeddings, not what the run optimized (no
+  reconstructed pixels for ET, no code logits for BEiT): per image `<stem>.npy`, float32 `(N, D)`, one row per patch in row-major
+  order, BEiT's class-token row dropped (N = 64 at 32 px and patch 4, 196 at 224 px and patch 16; D = 192 for `et_tiny` and
+  `beit_tiny`), and LAST `index.json` (`{"output", "note", "embeddings": [{"path", "file", "shape"}]}`); two images with one stem
+  are refused before the model is loaded. A path is decoded by TensorFlow (3 channels, no EXIF orientation), divided by 255,
+  resized bilinearly to `input_size` and standardized with the record's `mean` and `std` (`image_streams.evaluation_transform`,
+  the evaluation stream's own). `export` writes the same function, standardized pixels `(batch, height, width, 3)` in and
+  `(batch, N, D)` out, at the trained size only (another `input_shape` is refused: `... is not the trained size (32, 32, 3) (height,
+  width, channels) of this pretrain model; its backbone takes only the size it was built at, so it is exported at that size and a
+  file of another size would be a new model`). Measured on the CPU on a 1-epoch run of each family at 32 px and patch 4 (Step 4 of
+  the plan): every file written is within 4.0e-7 of the predictor over the scale (`beit_mim` tflite 1.8e-7). One cell of the 8 is
+  refused before anything is written: `Invalid value for 'format': 'tflite' of a model of the 'et_mim' family is refused: the TFLite
+  converter of TensorFlow 2.18 mistranslates the Hopfield update of every energy-descent step (einsum, relu, einsum), so the file is
+  about 0.07 of the scale off after one step and 0.56 after 12, with built-in and with select operators alike, and the numeric check
+  would refuse it; choose keras, saved_model or onnx` (the check measured 0.935 against an allowed 0.000167, D-024). The
+  `energy_transformer` classifier's tflite is refused for the same cause, because its built-in file is written with no check (D-030):
+  `Invalid value for 'format': 'tflite' of a model of the 'energy_transformer' family is refused: the TFLite converter of TensorFlow
+  2.18 mistranslates the Hopfield update of every energy-descent step (einsum, relu, einsum), so the file is about 0.07 of the scale
+  off after one step and 0.56 after 12, with built-in and with select operators alike, and a classifier's built-in file is written
+  with no numeric check, so it would be wrong without a word (0.53 of the scale on et_tiny); choose keras, saved_model or onnx`.
 * **Limits of the task.**
   * No DINO: it has no `validation_data` (its centering is state that an evaluate pass mutates), a k-NN probe as its validation and EMA
     callbacks, so it needs a sequence variant of its own. Imagenette and CIFAR-10 only (`data.format` has the one value `builtin`).
-  * No record: no `predict`, `export` or `load_model` of a pretrain run, and no warm start of a classifier from a pretrained encoder
-    through `python -m train`: `init` is refused for this task, as a target ("pretrain does not start from earlier weights")
-    and as a source (a pretrain run has no `task.json`); the pretrain record is Phase 4h.
+  * The rename has no alias (plan 5c6cc105, D-002), and the runs made before it pay for it. `python -m train pretrain
+    model=energy_transformer/et_tiny` exits 2 before the claim with `Invalid value for 'model': the family 'energy_transformer'
+    trains image_classification, not 'pretrain'; the families of 'pretrain' are beit_mim, et_mim` (`beit/beit_tiny` the same with
+    `'beit'`). A pretrain run made before the rename wrote no `task.json`, so it is no `init` source (`Invalid value for 'init':
+    <run>/task.json does not exist; a source is a python -m train run, which writes it before its first epoch (legacy trainer runs
+    and runs made before their task wrote one have none)`) and cannot be predicted from or exported, and it cannot be resumed: its
+    command now names a classifier, and the same command with the new name is another request. Its `best_model.keras` still loads
+    in Keras.
   * The tokenizer is made by hand with the legacy script, and the floor rests on two tokenizers.
   * The recipe's learning rate and batch are doubted, not measured, and `run.log` says so (a recipe notice): ET lr 5e-4 is the paper's
     Table 4 value at a batch of 768, 24 times the batch here, and BEiT lr 1.5e-3 is the recipe's at a global batch of 2,048 (128 on 16
@@ -804,7 +829,8 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
     the first took 89.8 seconds on average in the final gate, model compute included, with the host's CPU loaded by other processes; 53.5 seconds in the earlier one);
     ET's stream costs 2.5 seconds per epoch. Measured on the CPU with the GPU hidden.
   * The exact-equality claims above were measured on the CPU only.
-* **Gate numbers** (plan 46e5318f, Step 17.11: the GPU measurement on the code that ships, commit 87083cf81 of the branch). Five runs on GPU 0, an RTX 4090, one job at a time (the two G4 rows are each a killed run and its resume), each
+* **Gate numbers** (plan 46e5318f, Step 17.11: the GPU measurement on the code that ships, commit 87083cf81 of the branch; the runs and the rows below name
+  the families as they were named then, `energy_transformer` for today's `et_mim` and `beit` for `beit_mim`). Five runs on GPU 0, an RTX 4090, one job at a time (the two G4 rows are each a killed run and its resume), each
   `python -m train pretrain` with `out`, `model`, `data.dataset` and `epochs` as the table gives them, `CUDA_VISIBLE_DEVICES=0` and no `--gpu`; the log of
   every run names the device and the worktree `src` as the origin of `dl_techniques` and `train`. The bar (D-017) was written before the first run: it is the
   bar of the section above (the best `val_loss` strictly below `min(baseline, epoch-zero)`), judged from each run's own fixed selection stream, and for the
@@ -828,9 +854,9 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   **Kill and resume (G4).** Each run was started with `checkpoint_args.backup_every_steps=300`, its PID recorded, and sent SIGKILL (that PID only) when the backup's metadata first read epoch 2 batch 299, that is after 2 CSV rows and 300 batches of the third epoch (the process exit status was 137); the same command with `resume_interrupted=true` then finished with exit 0 in ET and exit 0 in BEiT. The copy held 3112 optimizer steps (2 x 1,406 + 300), the final copy 5624 (4 x 1,406): no step lost or run twice after the copy. The CSV has one row per epoch (0 to 3) and the two rows written before the kill are unchanged. The learning rate the CSV records at each epoch start equals the run's own schedule evaluated at 0, 1,406, 3,112 and 4,218 steps, exactly, in both families: `optimizer.iterations == epoch * steps_per_epoch` at the starts of epochs 0, 1 and 3, and the epoch the kill landed in starts from the copy, at 2 x 1,406 + 300 (the documented behaviour of `backup_every_steps`), so for that one epoch the equation reads plus 300. The first three train batches of the resumed process were not read back from the real fit (it was not traced); the stream its stream seed gives (`with_stream(3112)`), digested the way the CPU resume test does on the real CIFAR-10 unaugmented, differs from epoch 0's stream at all three batches in both families.
 * **Follow-up plans**: starting a run from an earlier run's weights is in the code and its GPU gate has run (Phase 4g,
   `init`, "Starting from an earlier run" below, with the gate under "Measured: the `init` gate"; design and decisions in
-  `research/roadmap/20261117_train_api_init_from.md`). Named and not started: the
-  pretrain record next (Phase 4h: a `task.json` record with `predict` and `export` for pretrain, and
-  classifier families that a BEiT or Energy Transformer encoder can seed through `init`), then the language tasks (the
+  `research/roadmap/20261117_train_api_init_from.md`). The pretrain record with `predict` and `export`, and the `beit` and
+  `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code (Phase 4h, plan 5c6cc105); their GPU gate
+  goes under "Measured: the Phase 4h gate" below. Named and not started: the language tasks (the
   next user of `fit_kwargs` and `resume_stream`, after `time_series_forecasting` and `depth_estimation` below), DINO, the BEiT
   tokenizer as a method of its own (`beit_tokenizer`), and the Phase 5 wrappers (the repo map entry among them).
 
@@ -1340,7 +1366,7 @@ python -m train image_segmentation out=auto model=convunext/tiny data=<out>/data
 **The run directory**: `out=auto` makes `results/<timestamp>...`; an existing `out` is refused,
 nothing is overwritten or deleted. A run writes `config_requested.json` (what was asked),
 `config.json` (resolved), `run.log`, `training_log.csv`, `results_summary.json`, `task.json`
-(class names, input shape, mean and std: what a model needs to be used without its config; a segmentation, denoising, forecasting or depth run writes the keys of its own record, a `pretrain` run writes none),
+(class names, input shape, mean and std: what a model needs to be used without its config; a segmentation, denoising, forecasting, depth or `pretrain` run writes the keys of its own record),
 `best_model.keras`, `final_model.keras`, the figures and analysis, and `checkpoints/`
 (`backup/`, `fit_state.json`) and `run.lock` for resume. `run.lock` is a kernel `flock` held for the
 life of the run and released when the process ends, a SIGKILL included, so two resumes cannot both run
@@ -1382,15 +1408,15 @@ spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or 
 (no `data_fingerprint_scheme`).
 
 **Starting from an earlier run: `init`** (plan 0fd54b91, `train/api/init_from.py`; the design and its decisions are in
-`research/roadmap/20261117_train_api_init_from.md`). `init=<run directory>` names an earlier `python -m train` run whose
-weights start this one, for `image_classification`, `image_segmentation`, `image_denoising`, `time_series_forecasting` and
-`depth_estimation`; `pretrain` refuses it. A relative path starts at the repo root, as `out` does, and `train_<task>(init=...)`
+`research/roadmap/20261117_train_api_init_from.md`; pretrain and its two classifiers are plan 5c6cc105, below). `init=<run directory>`
+names an earlier `python -m train` run whose weights start this one, for every task (`pretrain` from a run of the same family
+only). A relative path starts at the repo root, as `out` does, and `train_<task>(init=...)`
 takes a str or a `Path`. It replaced `checkpoint`, which is gone with no alias: `checkpoint=` on the command line, in a
 `config=` file or in a YAML mapping is refused by name, and a Python call with `checkpoint=` is a `TypeError`. The run builds its
 own model from its own config, then, before `compile`, copies the source's `best_model.keras` into it one weight at a time,
 keyed by its Keras variable path without the model's root (its name, or the component every weight shares). Every weight of the new model is copied, resampled by a
-rule its family declares (one rule, `vit_pos_bicubic`: the ViT position table, torch's bicubic without antialiasing, to a
-larger grid only), or left fresh as a declared head or as a block a deeper variant adds; every source weight is used or
+rule its family declares (`vit_pos_bicubic`: the ViT position table and BEiT's optional absolute one, torch's bicubic without
+antialiasing; `beit_relpos_cubic`: BEiT's relative bias tables, below; each to a larger grid only), or left fresh as a declared head or as a block a deeper variant adds; every source weight is used or
 dropped as a declared head. Anything else is refused before the first weight is copied. The optimizer is always fresh, at the
 recipe's learning rates (no fine-tune rate is measured in this repository), and nothing is frozen.
 
@@ -1406,6 +1432,8 @@ python -m train image_classification out=results/convnext_c10 model=convnext_v1/
     transform_args.normalize=unit
 python -m train image_segmentation out=results/convnext_seg_pet model=convnext_seg/cifar10 data.dataset=oxford_pet \
     init=results/convnext_c10
+# a pretrain run's trunk into its classifier (the record's patch kept, the decoder dropped, the head fresh)
+python -m train image_classification out=results/beit_c10 model=beit/beit_tiny data.dataset=cifar10 init=results/beit_mim_c10
 # forecasting at a longer lookback
 python -m train time_series_forecasting out=results/tirex_336 model=tirex/tiny data.format=builtin data.lookback=336 \
     init=results/tirex_168
@@ -1425,9 +1453,30 @@ refuses it); `convnext_v1` into `convnext_seg` likewise needs equal `strides`: t
 two is refused after the claim unless the segmenter is given `model_args.strides=4`; `convunext/tiny` (segmentation) into
 `convunext_biased/tiny` (denoising) and back copies 156 and resets
 `final_output`; `tirex/tiny` from lookback 168 to 336 copies 47 of 47; `depth_anything/vit_s` at another size copies 235 of 235
-(the DINOv2 table is resampled inside the model at call time). Those are the four declared cross-task pairs (the ConvUNext
-pair counts once each way); any other pair, and a width change (`convnext_v2` atto to femto: 139 of 140 weights differ), are
-refused.
+(the DINOv2 table is resampled inside the model at call time). Those four and the two pretrain pairs below are the six declared
+cross-task pairs (the ConvUNext pair counts once each way); any other pair, and a width change (`convnext_v2` atto to femto: 139
+of 140 weights differ), are refused.
+
+**Pretrain and its two classifiers** (plan 5c6cc105). `beit_mim` (pretrain) seeds `beit` and `et_mim` seeds `energy_transformer`
+(image_classification): the trunk (`beit_backbone`, `et_backbone`) is copied, the decoder is dropped (`decoder_norm` and
+`decoder_head` or `decoder_proj`) and the classifier head is fresh: 220 copied, 4 reset and 4 dropped on `beit_tiny` at 32 px and
+patch 4, and 9, 4 and 4 on `et_tiny`. The classifier takes the source record's `patch_size` as a pin (D-036); a typed
+`model_args.patch_size` must repeat it. So a 64 px `beit` from a 32 px source keeps patch 4, has a 16x16 grid and resamples the
+relative position bias table of each of its 12 layers from (228, 3) to (964, 3) (208 copied). `model_args.use_mean_pooling=false`
+adds a trunk `beit_backbone/final_norm`: set on both runs the pair transfers (222 copied, 2 reset, 4 dropped); set on one only, the
+weight check refuses it (`2 of 224 weights of beit have no source weight of their shape and no declared rule: ...` on the
+classifier only, `2 of 226 weights of the source run are neither used nor dropped by a declared rule: ...` on the source only, D-031).
+`beit_relpos_cubic` is the rule BEiT's authors fine-tune with: unilm's `beit/run_class_finetuning.py`, lines 351-411 at commit
+`5255d52de86dad642810f5849dd357769346c1d7`, which fits, per head, a cubic spline through the source displacements set on a
+geometric grid and reads it at the integer target displacements, the 3 class-token rows copied. That code calls scipy's
+`interp2d`, which SciPy removed in 1.14.0 (`.venv` has 1.15.1), so the rule uses `RectBivariateSpline(kx=3, ky=3, s=0)`;
+`tests/test_train/test_api/data/beit_relpos_reference.npz` holds the output of unilm's lines run verbatim (by
+`tests/test_train/test_api/data/generate_beit_relpos_reference.py`, under scipy 1.13.1 and torch 2.7.0), and the rule is held to
+it at 1e-6 on 5 cases (measured 0.0, the 3 rows bit-equal). No reference resizes the Energy Transformer's position table, so an
+`energy_transformer` on another grid is refused (after the claim, below). `et_mim` and `beit_mim` take a run of their own family
+only, at the same `transform_args.image_size`, `data.patch_size` and channels (checked before the claim); their decoder is
+their head, copied when the two records' `tokenizer` agree (always for `et_mim`, whose `tokenizer` is null) and fresh otherwise
+(`beit_tiny` with another tokenizer: 220 copied, 4 reset).
 
 **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed):
 
@@ -1435,12 +1484,11 @@ refused.
 |---|---|
 | `checkpoint` given | `Unknown key 'checkpoint': it was replaced by 'init', which takes the directory of an earlier run (python -m train <task> help)` |
 | a resume of a run recorded with `checkpoint` | `Cannot resume <run>: the run was recorded before 'init' replaced 'checkpoint' (its config_requested.json holds 'checkpoint'), so it cannot be resumed. Start a new run with another 'out', and pass init=<run> if its weights are wanted (init reads its best_model.keras)` |
-| `init` on `pretrain` | `Invalid value for 'init': pretrain does not start from earlier weights: it writes no record, and no family of another task shares the BEiT or Energy Transformer trunk (follow-up: the pretrain record)` |
 | a file, not a directory | `Invalid value for 'init': <path> is a file; give the run directory that holds it (init reads task.json, config.json and best_model.keras)` |
-| no `task.json` | `Invalid value for 'init': <run>/task.json does not exist; a source is a python -m train run of a task that writes a record (pretrain runs and legacy trainer runs write none)` |
+| no `task.json` | `Invalid value for 'init': <run>/task.json does not exist; a source is a python -m train run, which writes it before its first epoch (legacy trainer runs and runs made before their task wrote one have none)` |
 | no `best_model.keras` | `Invalid value for 'init': <run> holds no best_model.keras (the run ended before its first epoch)` |
-| a pair not declared | `Invalid value for 'init': <family> (<task>) cannot seed <family> (<task>); <family> takes weights from <its declared sources>` |
-| a geometry the family sizes its weights by | `Invalid value for 'init': nbeats sizes its weights by data.lookback; the source trained at 168, this run asks for 336 (families of time_series_forecasting that keep every weight across a data.lookback change: ets, timestral, tirex, xlstm)` |
+| a pair not declared | `Invalid value for 'init': <family> (<task>) cannot seed <family> (<task>); <family> takes weights from <its declared sources>`, for example `beit (image_classification) cannot seed beit_mim (pretrain); beit_mim takes weights from beit_mim (pretrain)` |
+| a geometry the family sizes its weights by | `Invalid value for 'init': nbeats sizes its weights by data.lookback; the source trained at 168, this run asks for 336 (families of time_series_forecasting that keep every weight across a data.lookback change: ets, timestral, tirex, xlstm)`; every key that differs is named: `et_mim sizes its weights by transform_args.image_size and data.patch_size; the source trained at [32, 32] and 4, this run asks for [224, 224] and 16` |
 | another input scaling | `Invalid value for 'init': the source standardizes its input and this run takes its input in [0, 1] (transform_args.normalize)` |
 | a pinned argument changed | `Invalid value for 'model_args.patch_size': the source was built with patch_size=4 and init keeps the source's architecture` |
 | a classifier `model_args.pretrained` other than false | `Invalid value for 'model_args.pretrained': only false is offered, got True; a classifier is built with fresh weights (a path is not offered, and no official weights are read); init takes a run directory` |
@@ -1450,18 +1498,26 @@ After the claim, before any weight is copied (exit 2, the claimed directory is k
 'init': <n> of <m> weights of <family/variant> have no source weight of their shape and no declared rule: <the first 5 paths,
 both shapes> (+<k> more); nothing was copied (paths without the model's root)`, and the same for the other direction (`...
 of the source run are neither used nor dropped by a declared rule`); a smaller ViT grid, `vit pos_embed would shrink its grid
-from 16x16 to 8x8; only a larger grid is resampled (bicubic, no antialiasing)`. The archive is hashed before the claim and again
+from 16x16 to 8x8; only a larger grid is resampled (bicubic, no antialiasing)`; a smaller BEiT grid, `BEiT
+relative_position_bias_table would resample a grid of 16x16 patches to 8x8; only a larger grid is resampled (unilm's rule grows a
+grid; for a smaller one its search for the ratio stops at its lower bound)`; a BEiT source below 3x3 patches, `BEiT
+relative_position_bias_table (12, 3): 12 rows are not the (2W - 1)^2 + 3 of a square grid of W x W patches with W at least 3;
+only such a table is resampled`; other heads, `BEiT relative_position_bias_table (228, 3) cannot become (964, 4); only its number
+of rows (the grid of patches) may change`; an Energy Transformer grid, `the Energy Transformer position table (1, 64, 192) (8x8
+patches) cannot become (1, 256, 192) (16x16 patches): no reference rule resamples it (the Energy Transformer paper describes no
+fine-tuning at another resolution); train this run at the source's grid (its image_size and patch_size)`; a weight two resample
+keys match, `<path> matches <n> resample keys of the family (<keys>); a weight takes one rule`. The archive is hashed before the claim and again
 after the copy, and a run whose `best_model.keras` changed in between stops before it trains, naming both sha256.
 
 **The head** is copied only when the two `task.json` records say it means the same thing: classification and segmentation
 `class_names` equal as ordered lists (the same names in another order reset it), denoising `channels`, forecasting `horizon`,
-`head`, `quantile_levels` and `channels`; depth always copies (one output). Otherwise the family's declared head is fresh and
+`head`, `quantile_levels` and `channels`, pretrain `tokenizer`; depth always copies (one output). Otherwise the family's declared head is fresh and
 the source's is dropped; across tasks the head is always fresh. A channel change of the input is a stem change and refused,
 except for `timestral`, whose weights do not depend on it.
 
-**Pins and resume.** Where the recipe derives an architecture argument from the size or the dataset (vit `patch_size`, resnet
-`stem_type`, convnext_v1 and convnext_v2 `strides`), the target takes the source's value from the source's `config.json`
-(`used.model_args`); a `model_args` value equal to it is accepted, another is refused, so `vit_pico` at 64 px keeps patch 4.
+**Pins and resume.** Where the recipe derives an architecture argument from the size or the dataset (vit, beit and
+energy_transformer `patch_size`, resnet `stem_type`, convnext_v1 and convnext_v2 `strides`), the target takes the source's value from the source's `config.json`
+(`used.model_args`), or from a source of another task the value its record holds (a pretrain record's `patch_size`); a `model_args` value equal to it is accepted, another is refused, so `vit_pico` at 64 px keeps patch 4.
 Depth under `init`: the factory is called with `pretrained` false, the official weights are neither read nor checked, and the
 warm-start rate (5e-6, the DPT head at 10x) is kept. A resume, full or reporting-only, never reads the source (it may be moved
 or deleted): the pins come from the run's own `task.json` `init` block and the backup restores every weight. `init` is a
@@ -1471,7 +1527,7 @@ refused before the claim.
 **Split overlap is counted, never refused.** After the data is built, each task compares the source's training data with this
 run's selection and test data, by the source's own split keys, and records `split` in the `init` block: `same_split` (counts
 0), `different_data` (counts 0), `overlap` (`n_select_overlap`, `n_test_overlap`, and a reason naming the keys that would give
-0) or `unknown` (the reason). The unit is the task's: rows for classification and segmentation (both seeded cuts rebuilt with
+0) or `unknown` (the reason). The unit is the task's: rows for classification, segmentation and pretrain (both seeded cuts rebuilt with
 each run's own `seed`, `data.validation_split` and `data.max_samples`; the test rows are another split; another built-in
 dataset is `different_data`; Imagenette against ImageNet, ImageNet itself, and file data under other paths or of another
 fingerprint are `unknown`),
@@ -1490,10 +1546,11 @@ exit code changes.
 Classification, segmentation and denoising, whose bars a good source meets at epoch 0, also need the best success value
 strictly above the loaded weights' epoch-zero value (read from the fit sidecar, so a resume judges the same number), by more
 than 16 float32 steps (`forecast_run.tie_band(1)`); a fine-tune that only holds its source's score is a miss, exit 1.
-Forecasting and depth keep `min(..., epoch zero)`, whose epoch-zero term is now the loaded weights.
+Forecasting, depth and pretrain keep `min(..., epoch zero)`, whose epoch-zero term is now the loaded weights (pretrain's bar stays
+strictly below in float32, with no tie band).
 
 **What the run records.** `task.json` and `results_summary.json` carry the `init` block: `source` (absolute), `file`,
-`sha256`, `task`, `family`, `variant`, `geometry`, `relation` (`same_task` or `cross_task`), `pinned`, `transfer` (`copied`, a
+`sha256`, `task`, `family`, `variant`, `geometry` (with `patch_size` from a pretrain source), `relation` (`same_task` or `cross_task`), `pinned`, `transfer` (`copied`, a
 count; `resampled`, with path, rule and both shapes; `reset`, `grown`, `dropped`, path lists) and `split`. The summary adds
 `epoch_zero_of: "init"`, the three flags and, for classification, segmentation and denoising, `loaded_success_value` (the
 loaded weights' epoch-zero `accuracy`, `miou` or PSNR gain, the value the bar had to beat; forecasting and depth hold it in
@@ -1536,6 +1593,11 @@ test rows, so `selection_biased` is true and the success line ends in `(selectio
 that did not improve on its source, whose selection score the overlap inflates. That exit is the rule working, not a fault. The
 gate added only `p4g_gate_*` run directories to `results/`: 76 entries before, 85 after.
 <!-- init-gate:end -->
+
+<!-- pretrain-gate:begin -->
+**Measured: the Phase 4h gate** (plan 5c6cc105: the pretrain sources, the two classifiers from them and from scratch, pretrain
+from pretrain, the Energy Transformer refusal, `predict` and `export`). Not run yet: the numbers of the GPU gate on the final code go here.
+<!-- pretrain-gate:end -->
 
 **Figures, analysis and TensorBoard**: five keys decide what is written besides the models and the
 summary. The region between the markers below is read by
@@ -1604,8 +1666,8 @@ is the required end-of-run sequence that calls them. `src/train/AGENTS.md` has t
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is
 searched recursively. `out` must not exist. A segmentation run and a denoising run write a new directory of PNG
-files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above), a forecasting run takes a csv or a `.npy` or `.npz` of windows and writes one JSON file of forecasts (`time_series_forecasting` above), and a depth run writes a new directory of float32 `.npy` relative-disparity maps and an `index.json` (`depth_estimation` above). A `pretrain` run directory is
-refused (it has no `task.json`; `pretrain` above has the sentence), and so is its `export`. **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
+files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above), a forecasting run takes a csv or a `.npy` or `.npz` of windows and writes one JSON file of forecasts (`time_series_forecasting` above), a depth run writes a new directory of float32 `.npy` relative-disparity maps and an `index.json` (`depth_estimation` above), and a
+`pretrain` run a new directory of float32 `.npy` patch-token embeddings and an `index.json` (`pretrain` above). **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
 words, and so are the `class_names` of `task.json`. The loader sorts the 1,000 ids and takes the position as the class
 index; the devkit's `meta.mat` maps an id to its words:
 
@@ -1672,7 +1734,7 @@ told apart, and neither are two runs of one family and variant with the same cla
 of version 1 and only `schema_version` changed; a segmentation record has `input_size` as `[height, width]` (not
 necessarily square), `channels`, `ignore_index`, `mask_threshold` and `output` where a classification record has
 `input_shape` and `eval_transform`; a denoising record has `channels`, `size_multiple`, `data_range` and `output` and no class names,
-statistics or input size (see `image_denoising`); a forecasting record has `lookback`, `horizon`, `channels`, `value_cols`, `time_col`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and `data_sha256` and no class names, statistics or input size (see `time_series_forecasting`); a depth record has `input_size` (`[height, width]`, the size the model is built at), `channels` (3), `normalize` (`imagenet`) and `output` (`relative_disparity`) and no class names or statistics (see `depth_estimation`). `load_model` holds a forecasting record to its model: `lookback` and `channels` against the input the model was BUILT for (every family, a mismatch is a named error that names the field), and the decode row, head, levels, median, horizon and channels against what the model outputs; `time_col` is the time column the run checked, and `predict` of a csv checks the order with the loader's own function (null: the rows are the time order). `scale_floor` is not checked against the model: the model does not carry it, so a hand-edited value cannot be detected, and it changes every forecast (it is the flatness threshold of the standardization). A record of version 1 is refused, in one sentence that names the file and says the
+statistics or input size (see `image_denoising`); a forecasting record has `lookback`, `horizon`, `channels`, `value_cols`, `time_col`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and `data_sha256` and no class names, statistics or input size (see `time_series_forecasting`); a depth record has `input_size` (`[height, width]`, the size the model is built at), `channels` (3), `normalize` (`imagenet`) and `output` (`relative_disparity`) and no class names or statistics (see `depth_estimation`); a pretrain record has `input_size`, `channels` (3), `normalize` (`standardize`), `mean`, `std`, `patch_size`, `tokenizer` and `output` (`patch_embeddings`) and no class names (see `pretrain`). `load_model` holds a forecasting record to its model: `lookback` and `channels` against the input the model was BUILT for (every family, a mismatch is a named error that names the field), and the decode row, head, levels, median, horizon and channels against what the model outputs; `time_col` is the time column the run checked, and `predict` of a csv checks the order with the loader's own function (null: the rows are the time order). `scale_floor` is not checked against the model: the model does not carry it, so a hand-edited value cannot be detected, and it changes every forecast (it is the flatness threshold of the standardization). A record of version 1 is refused, in one sentence that names the file and says the
 run has to be trained again, by `predict`, by `export` and by `resume_interrupted=true` (the last before the data is
 loaded). There is no converter and no reader: a run directory made before this change cannot be predicted from, exported
 or resumed (its files are not touched, and `best_model.keras` still loads in Keras).
@@ -1681,7 +1743,7 @@ or resumed (its files are not touched, and `best_model.keras` still loads in Ker
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints
 only the path on stdout. Input contract: float32 `(batch, height, width, channels)` pixels scaled
 to `[0, 1]` then standardized, `(x - mean) / std`, with the mean and std in `<out>.task.json`;
-the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A forecasting run** exports raw windows `(batch, lookback, channels)` and returns the forecast in the series' own units, and refuses five of its 36 cells by name (`time_series_forecasting` above). **A depth run** exports all four formats at its trained size and refuses any other size by name in the three traced formats (a `keras` file is the trained model and ignores `input_shape`; `depth_estimation` above). **A segmentation run**
+the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A forecasting run** exports raw windows `(batch, lookback, channels)` and returns the forecast in the series' own units, and refuses five of its 36 cells by name (`time_series_forecasting` above). **A depth run** exports all four formats at its trained size and refuses any other size by name in the three traced formats (a `keras` file is the trained model and ignores `input_shape`; `depth_estimation` above). **A pretrain run** exports the backbone's patch-token embeddings at its trained size only and refuses `et_mim` tflite; an `energy_transformer` classifier refuses tflite (`pretrain` above). **A segmentation run**
 (D-081) exports the same four formats and the output is one score per class per pixel, `(batch, height, width, classes)`,
 at the `input_size` of `<out>.task.json` (a version 2 record, the run's own, byte for byte): height and width are fixed
 to it and may differ, only the batch is free, and the mask is the argmax over the last axis after the caller resizes the
@@ -1715,9 +1777,9 @@ without `train/` or `val/`, a devkit (`data.devkit_dir`, or `devkit/` under the 
 `ILSVRC2012_validation_ground_truth.txt`, and no `imagenette/320px-v2` records under `$TFDS_DATA_DIR` (or
 `~/tensorflow_datasets`) each exit 2 with a message that names the key and the path looked at.
 
-**Recipes on ImageNet and Imagenette**: each of the six families has an entry for `imagenet` and for
+**Recipes on ImageNet and Imagenette**: each of the eight classification families has an entry for `imagenet` and for
 `imagenette` in its recipe, so the notice `No recipe overlay for <family> on <dataset>` is printed only for a
-dataset a family has no entry for (`mnist` for `vit`, `resnet` and both cliffordnet families). What a run on one of
+dataset a family has no entry for (`mnist` for `vit`, `resnet`, both cliffordnet families, `beit` and `energy_transformer`). What a run on one of
 these pairs resolves to, with every value `auto`:
 
 | Family | Dataset | Epochs | Batch | Optimizer | Peak lr | Weight decay | Warmup epochs | Augment | Smoothing | Image size | Patience | Source |
@@ -1732,20 +1794,26 @@ these pairs resolves to, with every value `auto`:
 | cliffordnet | imagenette | 200 | 8 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy except the batch (legacy 128): `cliffordnet/train_cliffordnet.py:247-251,611,652-664,681`; batch measured, see Memory fit |
 | cliffordnet_hier | imagenet | 200 | 16 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy except the batch (legacy 128): same lines as `cliffordnet`; batch measured, see Memory fit |
 | cliffordnet_hier | imagenette | 200 | 16 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy except the batch (legacy 128): same lines as `cliffordnet`; batch measured, see Memory fit |
+| beit | imagenet | 50 | 128 | adamw | 5e-4 | 0.05 | 5 | none | 0 | 224 | 15 | the optimizer of `beit/train_classification.py`, the epochs and batch of `vit` (plan 5c6cc105 D-028) |
+| beit | imagenette | 200 | 128 | adamw | 5e-4 | 0.05 | 5 | none | 0 | 224 | 15 | the same |
+| energy_transformer | imagenet | 50 | 128 | adamw | 5e-4 | 0.05 | 2 | none | 0 | 224 | 15 | the optimizer of `energy_transformer/train_classification.py`, the epochs and batch of `vit` (D-028) |
+| energy_transformer | imagenette | 200 | 128 | adamw | 5e-4 | 0.05 | 2 | none | 0 | 224 | 15 | the same |
 
 "Augment none" adds nothing to the loader's own random-resized-crop and flip, which every ImageNet and Imagenette
 run has (`resnet` on ImageNet adds the loader's colour jitter through `imagenet_augment_color`, which the loader
 refuses for Imagenette). "Smoothing" is the label smoothing of the loss, 0 everywhere: the task builds a plain sparse
 cross-entropy, `vit` has no smoothing (`vit/train_vit.py:290`; its `label_smoothing` field, which only refused a nonzero value, is deleted with its flag), the `label_smoothing` field of `resnet/train_resnet.py`
 (default 0.1, never read by its loss) is deleted with its flag, and the other two trainers default to 0. "Image size" is the dataset's own 224 (`transform_args.image_size`
-can change it). Other values of the six recipes: ViT uses patch 16 at 224 with dropout 0.1 and attention dropout 0.1
+can change it). Other values of the recipes: ViT uses patch 16 at 224 with dropout 0.1 and attention dropout 0.1
 (`vit/train_vit.py:79-80,426-428`); the sgd weight decay of `resnet` is an L2 penalty on the model, of strength `wd / 2`
 because Keras' `L2(l)` has the gradient `2 * l * w` and He et al.'s SGD weight decay `wd` adds `wd * w` to it (before step 10e of plan 98b866fb
 the penalty was `L2(wd)`, twice the paper's decay), and it reaches convolution and dense kernels only, where torchvision's reference
 trainer decays every parameter by default (BatchNorm scale and shift and the dense bias, 0.09 percent of `resnet18`'s parameters, get none: Goyal et al. 2017, arXiv 1706.02677 section 4.2, apply no decay to the BatchNorm coefficients, and the "no bias decay" rule of Bag of Tricks, He et al. 2019, arXiv 1812.01187, decays only the weights of convolution and fully connected layers, which is this rule);
 `resnet` has no gradient clip (the legacy trainer's global clip of 1.0 is deleted from both arms: neither He et al. 2015 nor torchvision's
 reference trainer clips); adamw decays in the optimizer (the legacy `resnet` trainer under `--optimizer adamw` builds no penalty and hands the optimizer the typed `--weight-decay`, since step 13.2 of plan 98b866fb; before it built the `wd / 2` penalty as well and left the optimizer its own default 0.004); `convnext_v1` and `convnext_v2` use strides 4, drop path 0.1 and dropout 0 on both datasets; stochastic
-depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`. The cliffordnet batches are measured, not
+depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`; `beit` and `energy_transformer` use patch 16 at
+224, dropout 0, a global clip of 1.0 and drop path 0.1 (`beit`) or 12 energy steps (`energy_transformer`), and log one notice naming
+what no run measured (`recipes.recipe_notices_of`). The cliffordnet batches are measured, not
 legacy (Memory fit, below). The table is pinned, value by value, by
 `tests/test_train/test_api/test_the_imagenet_and_imagenette_recipes.py`, which also reads the legacy trainers'
 own defaults and compares.
@@ -1786,7 +1854,7 @@ has been made, so read them as starting points. Only `cliffordnet` has an Imagen
 | Weight decay, patience, dropout | the legacy values (`resnet`: `wd` 1e-4 applied as `L2(wd / 2)`, the paper's strength) | no cited recipe changes them with the size of the data |
 | M, `convnext` model arguments | strides 4, drop path 0.1, dropout 0 | the legacy table's only 224 px row (`convnext/common.py:155,160-165`), the ConvNeXt-T values; without an entry the factory would apply drop path 0 |
 
-**Memory fit** (measured, GPU 0): for the smallest variant of each of the six families on both datasets, for
+**Memory fit** (measured, GPU 0; `beit` and `energy_transformer` are not measured, and their recipe notice says so): for the smallest variant of each of the six other families on both datasets, for
 `cliffordnet/lite` (the factory's default variant) and `cliffordnet/cn_64_5` (its largest), and for `resnet/resnet50`
 (the legacy ImageNet trainer's default variant), 20 real train steps ran through `python -m train image_classification`
 on an RTX 4090 (24,564 MiB; 717 MiB in use when idle), with XLA as Keras sets it (`jit_compile` auto; the logs show the

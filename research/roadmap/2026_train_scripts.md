@@ -219,7 +219,7 @@ larger grid), or left fresh as a declared head or a new block of a deeper varian
 any weight is copied. Covered: a new image size or lookback where the family keeps its weights (depth, the spatial families,
 ViT through the rule; tirex, xlstm, ets, timestral), a new head (classes, horizon), a deeper variant (vit, resnet,
 resnet_seg), and four cross-task pairs (resnet and convnext_v1 classifiers into their segmenters, segmentation ConvUNext to
-and from biased denoising). Pretrain is refused as source and target until it writes a record. The run records the source,
+and from biased denoising). Pretrain is refused as source and target until it writes a record (lifted by 4h). The run records the source,
 its sha256, the pins, the transfer counts and the split relation in `task.json` and `results_summary.json`; a source whose
 training data reaches this run's selection or test data is accepted, counted and marks the verdict as biased; under `init`
 the classification, segmentation and denoising bars also need a strict improvement over the loaded weights' epoch-zero
@@ -227,12 +227,15 @@ score, and the forecasting and depth bars' epoch-zero term is the loaded weights
 supersedes item 8 of Section 1 and the `checkpoint` row of Section 4. Design, decisions and what changed on the way:
 `research/roadmap/20261117_train_api_init_from.md`; user-facing rules: `src/train/README.md`, "Starting from an earlier run".
 
-**Phase 4h: the pretrain record.** Straight after 4g and before the language tasks (user, 2026-11-17). The pretrain task
-writes a schema-v2 `task.json` with `predict` and `export` like the other tasks, and image_classification gains BEiT and
-Energy Transformer classifier families whose trunks match the pretrain models, so a pretrain run seeds a classifier
-through 4g's `init` (the family declares the pretrain source, its prefix map and the head reset; the BEiT relative
-position bias and the Energy Transformer position table get resample rules only where a reference check measures them).
-It lifts 4g's refusal of pretrain as a source and target. Planned in full when 4g closes, from 4g's transfer engine.
+**Phase 4h: the pretrain record. Code done, GPU gate pending** (branch `train-api/phase-4h`, plan 5c6cc105; the gate's numbers
+go into `src/train/README.md`, "Measured: the Phase 4h gate"). Straight after 4g and before the language tasks (user,
+2026-11-17). The pretrain rows are renamed `et_mim` and `beit_mim`, with no alias; a pretrain run writes a schema-v2 `task.json`
+(the sixth record kind), and `predict` and `export` give the backbone's patch-token embeddings (`et_mim` tflite refused:
+TensorFlow 2.18's converter mistranslates the Hopfield update). image_classification gains `beit` and `energy_transformer`, the
+library classifiers, which a pretrain run of the matching family seeds through `init` (six declared cross-task pairs now): the
+BEiT relative position bias is resampled by unilm's rule, checked against unilm's own code run verbatim, and the Energy
+Transformer table, which no reference resizes, is refused at another grid. Pretrain is an `init` target too, from its own family
+only. What changed against the 4g design: `research/roadmap/20261117_train_api_init_from.md`, Section 0.
 
 **Phase 5: `load_model`, `export`, `list_models`, `list_tasks`.**
 
