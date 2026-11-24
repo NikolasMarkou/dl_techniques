@@ -81,6 +81,8 @@ OPTIONAL_HOOKS = (
     "check_model_args",     # the refusals before the claim
     "epoch_line_metrics",   # the epoch line prints the token accuracy too
     "unjudged_note",        # why init_scale_warning is null
+    "init_identity",        # the vocabulary and the tokenizer's digest an init source must share (D-040)
+    "init_overlap",         # the source's train documents among this run's selection documents
 )
 
 

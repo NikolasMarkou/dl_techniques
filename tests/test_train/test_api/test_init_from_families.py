@@ -28,6 +28,10 @@ source seeds a class-token classifier with the README's counts, and a pooling mi
 the two pretrain rows (D-008): their own family only, the decoder their head, the size and the patch
 fixed; in the production order every weight is copied, another tokenizer resets exactly the decoder, and
 another image size is refused at the weight level, behind the refusal before the claim.
+
+plan-2026-11-24T092348-7806a290 Step 6 (D-005, D-040) holds the language-model row (``gpt2_lm``) the same way, at the end of this
+file: its own family only; in the production order every weight is copied, a window of another length changes no shape (so the
+length is not a ``fixed`` key), and another vocabulary is refused at the weight level, behind the refusal before the claim.
 """
 
 import dataclasses
@@ -42,15 +46,17 @@ from train.api import recipes, registry
 from train.api.args import AutoContext, OptimArgs
 from train.api.errors import ConfigError
 from train.api.forecast_models import FAMILIES as FORECAST_FAMILIES
-from train.api.init_from import _by_path, check, plan_transfer
+from train.api.init_from import GEOMETRY_NAMES, _by_path, check, plan_transfer
 from train.api.pretrain_args import BEIT as BEIT_MIM, ET as ET_MIM, GEOMETRY
+
+from ._text_world import ASCII_VOCAB, SEQ_LEN, TINY_MODEL_ARGS
 
 recipes.register_builtin_models()
 
 CLASSIFICATION, SEGMENTATION, DENOISING = "image_classification", "image_segmentation", "image_denoising"
 FORECASTING, DEPTH, PRETRAIN = "time_series_forecasting", "depth_estimation", "pretrain"
-#: The language-model task takes no ``init`` yet (its row declares the empty transfer); the census counts its one family.
-LANGUAGE_MODEL = "language_model_pretraining"
+#: The language-model task has one family, ``gpt2_lm``: censused at the end of the file, as the pretrain rows are.
+LANGUAGE_MODEL, GPT2_LM = "language_model_pretraining", "gpt2_lm"
 #: The tasks that take ``init``.
 INIT_TASKS = (CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH)
 
@@ -61,7 +67,7 @@ VARIANT = {
     "convnext_seg": "cifar10", "bfcnn": "tiny", "bfunet": "tiny", "bfconvunext": "tiny", "convunext_biased": "tiny",
     "scunet": "tiny", "nbeats": "tiny", "prism": "tiny", "tirex": "tiny", "xlstm": "tiny", "ets": "ANN",
     "timestral": "5M", "mdn": "tiny", "depth_anything": "vit_s", "beit": "beit_tiny", "energy_transformer": "et_tiny",
-    BEIT_MIM: "beit_tiny", ET_MIM: "et_tiny",
+    BEIT_MIM: "beit_tiny", ET_MIM: "et_tiny", GPT2_LM: "tiny",
 }
 #: The geometry a source of each task is built at.
 SOURCE = {
@@ -71,6 +77,7 @@ SOURCE = {
     FORECASTING: {"lookback": 168, "horizon": 24, "channels": 1},
     DEPTH: {"image_size": 112, "channels": 3},
     PRETRAIN: {"image_size": GEOMETRY["cifar10"][0], "channels": 3},
+    LANGUAGE_MODEL: {"seq_len": SEQ_LEN, "vocab": ASCII_VOCAB},
 }
 #: The changes the census makes, one key at a time: the key and its new value.
 CHANGES = {
@@ -87,12 +94,12 @@ HEAD_KEYS = {CLASSIFICATION: ("classes",), SEGMENTATION: ("classes",), DENOISING
 GROWN = {"vit": "vit_tiny", "resnet": "resnet34", "resnet_seg": "resnet34"}
 #: The dataset name a task's builds resolve their recipe for.
 DATASET = {CLASSIFICATION: "cifar10", SEGMENTATION: "folder", DENOISING: "folder", FORECASTING: "builtin",
-           DEPTH: "megadepth", PRETRAIN: "cifar10"}
+           DEPTH: "megadepth", PRETRAIN: "cifar10", LANGUAGE_MODEL: "synthetic"}
 #: The tokenizer codebook a ``beit_mim`` source is built with; its decoder head is dropped by the classifier pair.
 VOCAB = 64
 #: ``model_args`` a row is built with: depth from scratch (no official weights read); a resnet classifier at
 #: 32 px resolves the cifar stem, which resnet_seg never builds, so its cross-task source asks for the other.
-MODEL_ARGS = {"depth_anything": {"pretrained": False}}
+MODEL_ARGS = {"depth_anything": {"pretrained": False}, GPT2_LM: TINY_MODEL_ARGS}
 CROSS_SOURCE_ARGS = {"resnet": {"stem_type": "imagenet"}}
 
 _BUILT: Dict[Tuple[Any, ...], Tuple[keras.Model, Dict[str, Any]]] = {}
@@ -111,13 +118,15 @@ def build(family: str, variant: str, geometry: Mapping[str, Any],
     """Build through the real resolver path after ``clear_session``; return the model and its resolved kwargs."""
     spec = registry.MODELS[family]
     task = spec.tasks[0]
-    dataset, size, channels = DATASET[task], geometry.get("image_size"), geometry["channels"]
+    dataset, size, channels = DATASET[task], geometry.get("image_size"), geometry.get("channels")
     context = AutoContext(family=family, variant=variant, dataset=dataset, num_classes=geometry.get("classes"),
                           image_size=size if task == CLASSIFICATION else None, defaults=spec.recipe(dataset, variant))
     args = {**MODEL_ARGS.get(family, {}), **(model_args or {})}
     kwargs = spec.load_resolver()(context, OptimArgs().resolve_auto(context), args)
     if task == PRETRAIN:  # what the pretrain task adds (tasks/pretrain.py build_model): the data's patch, the codebook
         kwargs = {**kwargs, "patch_size": GEOMETRY[dataset][1], **({"vocab_size": VOCAB} if family == BEIT_MIM else {})}
+    if task == LANGUAGE_MODEL:  # what the language task adds (tasks/language_model_pretraining.py build_model): the tokenizer's vocabulary
+        kwargs = {**kwargs, "vocab_size": geometry["vocab"]}
     if task == FORECASTING:
         kwargs = {**kwargs, "horizon": geometry["horizon"]}
         if FORECAST_FAMILIES[family].static_batch:
@@ -125,6 +134,8 @@ def build(family: str, variant: str, geometry: Mapping[str, Any],
         shape: Tuple[Optional[int], ...] = (geometry["lookback"], channels)
     elif task == DENOISING:
         shape = (None, None, channels)
+    elif task == LANGUAGE_MODEL:
+        shape = (geometry["seq_len"],)
     else:
         shape = (size, size, channels)
     keras.backend.clear_session()
@@ -196,7 +207,7 @@ def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():
 
 def test_the_census_covers_every_row_and_measures_every_declaration():
     families = init_families()
-    assert sorted(set(VARIANT) - {BEIT_MIM, ET_MIM}) == families
+    assert sorted(set(VARIANT) - {BEIT_MIM, ET_MIM, GPT2_LM}) == families
     # 23 rows before plan 5c6cc105 Step 5, which adds the beit and energy_transformer classifiers.
     assert len(families) == 25
     assert sorted(GROWN) == sorted(f for f in families if registry.MODELS[f].transfer.grow)
@@ -570,3 +581,46 @@ def test_production_order_a_pretrain_row_at_another_size_is_refused_at_the_weigh
     loaded, target = loaded_beside(family, VARIANT[family], {**SOURCE[PRETRAIN], "image_size": 64}, {}, archives)
     got, plan, message = verdict(family, "image_size 32 to 64, production order", loaded, target, spec)
     assert got == "REFUSE" and "nothing was copied" in message and plan.missing, message
+
+
+# --- the language-model row (plan 7806a290 Step 6, D-005, D-040): its own family only, the vocabulary and the tokenizer fixed ---
+
+
+def test_the_language_row_takes_its_own_family_only_and_every_fixed_key_of_every_row_has_a_name_in_the_refusal():
+    spec = registry.MODELS[GPT2_LM].transfer
+    # No head (a source of this family has the same tokenizer, so an untied lm_head is copied like any weight), no rule, no pin: a
+    # different tokenizer is refused before the claim by the two fixed keys. The length is not one of them.
+    assert (spec.fixed, spec.head, dict(spec.sources), spec.pinned) == (("vocab_size", "tokenizer"), (), {}, ())
+    assert not spec.resample and spec.grow is None and not spec.positional
+    for family, row in registry.MODELS.items():  # a fixed key with no name is a KeyError where the refusal is worded
+        assert set(row.transfer.fixed) <= set(GEOMETRY_NAMES), (family, row.transfer.fixed)
+
+
+def language_pair(archives, **target: Any):
+    """``(loaded source, target)`` of ``gpt2_lm`` in the production order; ``target`` changes the target's geometry."""
+    return loaded_beside(GPT2_LM, VARIANT[GPT2_LM], {**SOURCE[LANGUAGE_MODEL], **target}, {}, archives)
+
+
+def test_production_order_a_language_row_copies_every_weight(archives):
+    loaded, target = language_pair(archives)
+    got, plan, message = verdict(GPT2_LM, "same, production order", loaded, target, registry.MODELS[GPT2_LM].transfer)
+    assert got == "PASS" and len(plan.copied) == plan.n_source == plan.n_target > 0, message
+    assert not (plan.reset or plan.dropped or plan.grown or plan.resampled)
+
+
+def test_production_order_a_language_row_at_another_length_copies_every_weight(archives):
+    """No weight depends on ``seq_len`` (the position table has ``max_seq_len`` rows), so it is no ``fixed`` key: a source trained
+    on shorter windows seeds a run on longer ones (D-040)."""
+    loaded, target = language_pair(archives, seq_len=2 * SEQ_LEN)
+    got, plan, message = verdict(GPT2_LM, f"seq_len {SEQ_LEN} to {2 * SEQ_LEN}, production order", loaded, target,
+                                 registry.MODELS[GPT2_LM].transfer)
+    assert got == "PASS" and len(plan.copied) == plan.n_source == plan.n_target > 0, message
+
+
+def test_production_order_a_language_row_at_another_vocabulary_is_refused_at_the_weight_level(archives):
+    """Behind the refusal before the claim (``fixed``): the embedding table has another number of rows; nothing is copied."""
+    loaded, target = language_pair(archives, vocab=ASCII_VOCAB + 19)
+    got, plan, message = verdict(GPT2_LM, "vocab 101 to 120, production order", loaded, target, registry.MODELS[GPT2_LM].transfer)
+    assert got == "REFUSE" and "nothing was copied" in message and plan.copied, message
+    assert len(plan.missing) == 1 and "word_embeddings/embeddings" in plan.missing[0]
+    assert f"target ({ASCII_VOCAB + 19}, 64)" in plan.missing[0] and f"source ({ASCII_VOCAB}, 64)" in plan.missing[0]

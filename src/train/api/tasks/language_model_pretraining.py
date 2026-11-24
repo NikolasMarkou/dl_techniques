@@ -37,6 +37,13 @@ Interface contract
     ``evaluate_and_report`` (:func:`train.common.pretrain_run.epoch_zero_val_loss`), never from an attribute, because a resume
     never evaluates the untrained model. Under ``debug_args.smoke`` no bar is applied.
 
+    ``init`` (plan-2026-11-24T092348-7806a290 D-005, D-040, D-042). A run starts from an earlier ``gpt2_lm`` run and from nothing else.
+    ``init_identity`` gives the vocabulary and the tokenizer's digest this run's record will hold, the family's two ``fixed`` keys, so a
+    source of another tokenizer is refused before the claim, naming both values (the window length is not one: no weight depends on
+    it). ``init_overlap`` counts the source's seeded train DOCUMENTS among this run's selection documents. Epoch zero is then the
+    LOADED weights' ``val_loss``, so the threshold is ``min(unigram, loaded)``, still strictly below; ``Evaluation.loaded`` stays
+    ``None`` (the other tasks' higher-is-better comparison with the loaded value would judge a loss backwards).
+
     ``task_record`` is the schema-v2 ``task.json`` (:func:`train.api.predictor.build_language_model_record`: the length and the tokenizer's
     fields, digest and file hashes), written before ``fit``; a resume compares its ``DATA_KEYS`` and leaves the file as it is.
 
@@ -97,6 +104,8 @@ from ..predictor import build_language_model_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..text_args import (
     GPT2_LM,
+    SYNTHETIC,
+    SYNTHETIC_TRAIN_DOCUMENTS,
     TASK,
     WATCH_METRIC,
     LanguageMetricArgs,
@@ -133,6 +142,21 @@ _CONFORMAL = (
     f"a conformal prediction set is a set of classes, which a {TASK} run does not produce; its output is a distribution over "
     "the next token"
 )
+
+
+def documents_read(dataset: str, cap: Optional[int], ours: Optional[int], read: int) -> Optional[int]:
+    """Return how many train documents a run capped at ``cap`` read of ``dataset``, or ``None`` when this run's cap hides it.
+
+    Interface contract: ``ours`` is the cap of THIS run (``data.max_samples``) and ``read`` the number of train documents it read. The
+    synthetic bank is as long as it is asked to be (the task's default when ``cap`` is null); a cap above a corpus reads all of it,
+    which this run's own read count gives when its cap did not bind; when it did, the corpus holds at least ``ours`` documents and a
+    source capped at most ``ours`` read exactly its cap. Pure; never raises.
+    """
+    if dataset == SYNTHETIC:
+        return SYNTHETIC_TRAIN_DOCUMENTS if cap is None else cap
+    if ours is None or read < ours:
+        return read if cap is None else min(cap, read)
+    return cap if cap is not None and cap <= ours else None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -285,6 +309,44 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
                 "raise model_args.max_seq_len"
             )
 
+    def init_identity(self, config: LanguageModelPretrainingConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the vocabulary and the tokenizer's digest this run's record will hold, for an ``init`` source."""
+        spec = tokenizer_spec(config.data.tokenizer)
+        return {"vocab_size": spec.vocab_size, "tokenizer": spec.digest}
+
+    def init_overlap(self, source: Any, config: LanguageModelPretrainingConfig, data: Any) -> Dict[str, Any]:
+        """The source's train documents (``split_documents`` of its seed, split and cap, rebuilt) against this run's selection
+        documents, counted; the test documents are the corpus's own, which no run trains on."""
+        import numpy as np
+
+        from train.common.text_data import split_documents
+
+        from .. import init_from
+
+        theirs, ours = source.config.get("data") or {}, config.data
+        if theirs.get("dataset") != ours.dataset:
+            return init_from.split_block("different_data", f"the source trained on {theirs.get('dataset')}, this run reads "
+                                                           f"{ours.dataset}", {"data.dataset": theirs.get("dataset")}, None, (0, 0))
+        keys = {"data.dataset": ours.dataset, "seed": source.config.get("seed"),
+                "data.validation_split": theirs.get("validation_split"), "data.max_samples": theirs.get("max_samples")}
+        if keys == {"data.dataset": ours.dataset, "seed": config.seed, "data.validation_split": ours.validation_split,
+                    "data.max_samples": ours.max_samples}:
+            return init_from.same_split("documents", keys)
+        # DECISION plan-2026-11-24T092348-7806a290/D-042
+        # The source's train documents are rebuilt with the SOURCE's seed, split and cap (its config.json), and this run's selection
+        # documents are the ones it holds. Do NOT rebuild both cuts from this run's keys (they would coincide and the count read 0),
+        # and do NOT guess how many documents a capped source read: `documents_read` says, or the split is `unknown`.
+        select = data.split.select_index
+        n_source = documents_read(ours.dataset, keys["data.max_samples"], ours.max_samples,
+                                  len(data.split.train_index) + len(select))
+        if n_source is None:
+            return init_from.split_block("unknown", f"this run caps data.max_samples at {ours.max_samples}, so how many "
+                                                    f"{ours.dataset} documents the source (data.max_samples "
+                                                    f"{keys['data.max_samples']}) read is not known: its split of them cannot be rebuilt")
+        trained = split_documents(n_source, keys["seed"], keys["data.validation_split"])[0]
+        return init_from.counted_split("documents", keys, np.intersect1d(trained, select).size, len(select), 0,
+                                       data.split.n_test_docs)
+
     # -- compile --------------------------------------------------------
 
     def metric_names(self, config: LanguageModelPretrainingConfig, facts: DataFacts) -> List[str]:
@@ -400,6 +462,7 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
 
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
+        zero = "the untrained model's" if config.init is None else "the loaded weights' (under `init`)"
         notes = [
             *([f"initial loss {baseline['loss']:.6g} is {ratio:.3g}x the unigram's val_loss ({self._baseline:.6g}) on the "
                f"{data.n_select} fixed selection windows: a plain evaluate in inference mode; see the `init_scale_warning` "
@@ -410,7 +473,7 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
             "across passes, epochs and a resume), and its exponential is the perplexity per token (`perplexity`)",
             "`success_value` is the lowest `val_loss` of the selection window; `success_threshold` is min(`baseline.val_loss`, "
             "`epoch_zero.val_loss`): the unigram's loss (the entropy of the selection targets: the best a model that ignores its "
-            "context can do, counted and never evaluated) and the untrained model's, read from the fit sidecar; the bar is "
+            f"context can do, counted and never evaluated) and {zero}, read from the fit sidecar; the bar is "
             "STRICTLY below, compared in float32 beyond `train.common.forecast_run.tie_band` float32 steps",
             "`test_metrics_best` is the reloaded best_model.keras and `test_metrics_final` the last epoch's weights, on the test "
             "windows (the corpus's own test documents), which never influenced selection",

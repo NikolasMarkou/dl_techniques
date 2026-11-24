@@ -291,8 +291,12 @@ def recipe_notices_of(family: str) -> List[Tuple[str, str]]:
 
 def builtin_text_models() -> Tuple[ModelSpec, ...]:
     """Return the text family specs, freshly built; see the module contract."""
-    # The empty transfer is the row's declaration (every built-in row has one): the task does not override `init_identity` yet, so
-    # a request with `init` is refused before the claim, naming the task.
+    # DECISION plan-2026-11-24T092348-7806a290/D-040
+    # `fixed` is the vocabulary and the tokenizer's digest: the embedding table has one row per id and says what each id means, so
+    # another vocabulary does not fit and another tokenizer would fit and be wrong; both are refused before the claim
+    # (`init_identity` of the task). The window length is NOT one: no weight depends on it (the position table is `max_seq_len`
+    # rows; measured: every weight copies from a source of another `seq_len`), so a source of shorter windows may seed longer ones.
+    # Do NOT add it (a refusal of a transfer that works), and do NOT add `sources` (the family takes its own family only).
     return (
         ModelSpec(
             family=GPT2_LM,
@@ -302,6 +306,6 @@ def builtin_text_models() -> Tuple[ModelSpec, ...]:
             defaults=LM_RECIPE,
             resolve_model_args=f"{_HERE}:resolve_text_args",
             observe=f"{_HERE}:observe_gpt2",
-            transfer=TransferSpec(),
+            transfer=TransferSpec(fixed=("vocab_size", "tokenizer")),
         ),
     )
