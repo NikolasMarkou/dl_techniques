@@ -211,12 +211,16 @@ left empty: see Section 4). Tests in `tests/test_train/test_api/`. No trainer to
 **Phase 2: pilot `image_classification` on ConvNeXt V1/V2.** Adapter builds `train.convnext.common.TrainingConfig` and
 calls `train.convnext.common.train`. Registry keys from `ConvNeXtV1.MODEL_VARIANTS` / `ConvNeXtV2.MODEL_VARIANTS`.
 Parity test: legacy argv and the equivalent API call produce field-for-field identical `TrainingConfig`.
+(As shipped: no adapter; `TaskTrainer` runs the legacy ConvNeXt sequence cut at its seams; parity: Section 7, item 8.)
 
 **Phase 3: rest of Pattern 1.** One trainer per commit: cliffordnet, vit, resnet, alexnet, mobilenet, ... For trainers
 whose body takes an argparse `Namespace` (e.g. `cliffordnet.train_model(args)`), first split into `config_from_args` +
-`train(config)` with no behaviour change, proven by the existing tests, then add the adapter.
+`train(config)` with no behaviour change, proven by the existing tests, then add the adapter. (As shipped: families of
+`image_classification`, not adapted trainers, eight by `list_models task=image_classification`, no alexnet or mobilenet.)
 
 **Phase 4: other tasks, one pattern at a time** in the order approved in Phase 0. Exemplars per `src/train/AGENTS.md`.
+(As shipped, with no Phase 0 inventory, Section 9: `image_segmentation`, `image_denoising`, `pretrain`,
+`time_series_forecasting`, `depth_estimation`, in that order; no detection or language task.)
 
 **Phase 4g: start from trained weights. Code done, GPU gate run** (branch `train-api/phase-4g`; the gate's numbers are
 in `src/train/README.md`, "Measured: the `init` gate": every claim held except the overlap arm's planned exit 0; it
@@ -248,11 +252,22 @@ BEiT relative position bias is resampled by unilm's rule, checked against unilm'
 Transformer table, which no reference resizes, is refused at another grid. Pretrain is an `init` target too, from its own family
 only. What changed against the 4g design: `research/roadmap/20261117_train_api_init_from.md`, Section 0.
 
-**Phase 5: `load_model`, `export`, `list_models`, `list_tasks`.**
+**Phase 5: `load_model`, `export`, `list_models`, `list_tasks`. Done** (plan 98c9aac5, branch `train-api/phase-5-6`):
+built inside Phases 1 to 4h (`api/predictor.py`, `api/exporting.py`, `api/registry.py`, `api/cli.py`), on `train.api`
+only, with one fix: `train.api.list_tasks` and `list_models` now register the built-in tasks and families themselves, so
+they answer in a fresh process (they returned empty until `main(...)` ran; plan 98c9aac5 D-013,
+`tests/test_train/test_api/test_cli_help_allocates_nothing.py`); `src/train/__init__.py` stays empty (plan a865fa08
+invariant 7, kept by the user 2026-11-24); Sections 3, 4, 7 and 9 now describe the shipped surface.
 
-**Phase 6: docs.** Section in root `README.md`; new section in `src/train/AGENTS.md` ("Front door: `train.api`") with
-the adapter rules from section 4; entry-points section of `REPO_MAP.md`. Paths cited in guides must exist
-(`tests/test_the_guides_cite_only_paths_that_exist.py`).
+**Phase 6: docs. Done** (plan 98c9aac5, branch `train-api/phase-5-6`): Quick Start item 7 of the root `README.md`;
+the section "Front door: `train.api` (`python -m train`)" of `src/train/AGENTS.md`, opening with the adapter rules as
+shipped, each with its code home and test; a **Front door.** paragraph in § Entry points of `REPO_MAP.md`; a pointer in
+the root `AGENTS.md`. Guards: `tests/test_the_guides_cite_only_paths_that_exist.py` checks the paths the two `GUIDE.md` cite;
+`tests/test_train/test_api/test_the_forecasting_docs_state_the_numbers_of_the_code.py` checks the cited paths of
+`src/train/README.md` and `src/train/AGENTS.md`; `tests/test_train/test_api/test_the_readme_commands_run_to_the_claim.py`
+reads the root `README.md` and `AGENTS.md` only for `init=` and forecasting commands, which item 7 has none of (its
+commands were checked by a plan probe, not a test); `REPO_MAP.md` is read only for its TopoLM numbers and sentence
+(`tests/test_models/test_topolm/test_topolm_docs_agree.py`); no test reads this roadmap.
 
 ---
 
