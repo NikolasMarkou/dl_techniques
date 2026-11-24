@@ -40,7 +40,7 @@ _LAZY: Dict[str, str] = {
     "register_model": ".registry",
     "register_task": ".registry",
     "parse_model_name": ".registry",
-    "list_models": ".cli",  # registers the built-ins first, then asks the registry
+    "list_models": ".cli",  # .cli, not .registry: the D-013 anchor above cli.list_tasks says why
     "list_tasks": ".cli",
     "resolve_out": ".run_dir",
     "open_run": ".run_dir",

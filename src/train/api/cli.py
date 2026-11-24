@@ -13,11 +13,6 @@ Commands are the rows of ``COMMANDS`` (``help``, ``list_tasks``,
 help word, prints its config keys; any other arguments go to ``run_task``.
 ``list_*`` commands list instead of printing help, even when given ``help``.
 
-``list_tasks()`` / ``list_models(task=None)``
-    The Python listings of ``train.api``: register the built-in families and tasks (as ``main``
-    does), then return :func:`train.api.registry.list_tasks` / :func:`~train.api.registry.list_models`
-    unchanged, with the registry's contract (``list_models`` imports the variants tables).
-
 ``export model= out= format=``
     Load the run (a run directory, or a ``.keras`` file beside its record) and write it with
     :func:`train.api.exporting.export`; the input shape comes from ``task.json``. ``format``

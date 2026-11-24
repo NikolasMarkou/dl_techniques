@@ -338,7 +338,7 @@ node_embeddings = gnn([node_features, adjacency_matrix])
 
 ### 7. Train, Predict and Export Through One Command Line
 
-`python -m train` trains, predicts and exports with `key=value` arguments checked against strict configs: an unknown or invalid key exits 2 before the run directory is created. Run it from the repo root.
+`python -m train` trains, predicts and exports with `key=value` arguments checked against strict configs: an unknown or invalid key exits 2 before the run directory is created. Run it from the repo root; on a headless machine prefix each command with `MPLBACKEND=Agg` (see Development Commands above).
 
 ```bash
 python -m train help                                   # commands and tasks

@@ -272,8 +272,8 @@ For the two nested families the module path carries an extra segment —
 predicts and exports through strict configs: `src/train/__main__.py` calls `main` in
 `src/train/api/cli.py`, and Python reaches the same functions with `from train.api import ...`
 (the lazy table in `src/train/api/__init__.py`; the package `train` itself exports nothing).
-`MPLBACKEND=Agg .venv/bin/python -m train help` prints the commands and the registered tasks;
-a relative `out=` starts at the repo root and `out=auto` names a run under `results/`. Read `src/train/README.md` to use it and the
+`MPLBACKEND=Agg .venv/bin/python -m train help` prints the commands and the registered tasks.
+Read `src/train/README.md` to use it and the
 "Front door" section of `src/train/AGENTS.md` to extend it.
 
 **Why it resolves from any working directory.** The editable install drops a `.pth` file

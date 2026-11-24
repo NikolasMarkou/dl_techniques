@@ -546,21 +546,21 @@ classification task calls the same `train.common.classification_run` helpers as 
 
 **Adapter rules, as shipped.** Each names its code home and a test that fails when the rule is broken (`file`::`test`); a rule no test holds is not listed.
 - **Hooks, never stages.** A task is a `TaskTrainer` subclass (`api/trainer.py`) that overrides every name in `REQUIRED_HOOKS`: `tests/test_train/test_api/test_task_trainer.py`::`test_a_task_that_forgets_a_required_hook_is_refused_when_built_and_the_hook_is_named`. It overrides none of `run`, `_resolve`, `_callbacks`, `_summary_head`, `_notes`, `_refuse_before_the_claim`, pinned for three tasks only: `test_the_task_does_not_name_a_stage` in `test_pretrain_task.py`, `test_forecast_task.py`, `test_depth_task.py`.
-- **One row per task and per family.** A task is a `TaskSpec` row in `api/tasks/__init__.py`, a family a `ModelSpec` that `recipes.register_builtin_models` registers, and a family trains only its `ModelSpec.tasks` (`registry.parse_model_name(name, task=)` refuses another): `tests/test_train/test_api/test_denoising_families.py`::`test_a_denoising_family_is_refused_under_another_task`.
+- **A family trains only its `ModelSpec.tasks`** (`registry.parse_model_name`, D-072 below): `tests/test_train/test_api/test_denoising_families.py`::`test_a_denoising_family_is_refused_under_another_task`.
 - **Every key is a field, every field is read.** A key is a field of a `StrictConfig` group (`api/config.py`), an unknown one refused by its dotted path: `tests/test_train/test_api/test_strict_config.py`::`test_an_unknown_key_names_its_dotted_path_and_suggests_a_sibling`; a field production never reads fails `tests/test_train/test_config_fields_are_live.py`::`test_config_declares_no_field_it_never_consumes` (its `REGISTERED` rows).
 - **A refusal is a `ConfigError` before the claim.** A request refused without loading data raises `ConfigError` (a `DLTrainError`: exit 2, no traceback) before the run directory is claimed: `tests/test_train/test_api/test_a_bad_request_is_refused_before_the_run_is_claimed.py`::`test_a_wrong_request_is_a_config_error_and_leaves_out_unclaimed`, `tests/test_train/test_api/test_the_cli_exit_codes.py`::`test_a_config_error_exits_two_with_the_message_and_no_traceback`.
 - **Optimizers through `api/optim.py` only**, which calls `dl_techniques.optimization.optimizer_builder`; no module under `api/` names `keras.optimizers`. `optim_args.clipnorm` becomes `gradient_clipping_by_norm_local`, `optim_args.global_clipnorm` `gradient_clipping_by_norm`, both together are refused: `tests/test_train/test_api/test_the_api_source_rules.py`::`test_the_api_source_obeys_the_rule[no_direct_optimizer]`, `tests/test_train/test_api/test_optim_mapping.py`::`test_clipnorm_clips_each_variable_and_not_the_whole`, `test_global_clipnorm_clips_the_whole_and_not_each_variable`, `test_both_clips_together_are_refused`.
 - **The checkpoint direction comes from the metric name.** `metric_args.watch_mode` left at `auto` is set by `train.common.callbacks.resolve_monitor_mode` (`api/args.py`): `tests/test_train/test_api/test_auto_resolution.py`::`test_watch_mode_is_read_from_the_metric_name`, which checks the mode of three metric names and not the call, so a hand-written rule that agrees on those three passes it.
 - **The help path stays light; the source rules hold.** No module under `api/` imports TensorFlow, Keras, yaml, `train.common` or `dl_techniques.models` at module scope, holds an `if __name__` block or a broad `except`, and `cli.py` catches only `DLTrainError`: `tests/test_train/test_api/test_the_api_source_rules.py`::`test_the_api_source_obeys_the_rule` (one parameter per rule), `tests/test_train/test_api/test_cli_help_allocates_nothing.py`::`test_the_help_of_every_command_and_task_leaves_no_heavy_library_in_sys_modules`.
 - **Every family declares a `TransferSpec`** (`ModelSpec.transfer`, read by `init` in `api/init_from.py`): `tests/test_train/test_api/test_init_from_families.py`::`test_every_row_declares_a_spec`.
-- **A record kind is a row of every table.** `task.json` is schema version 2, a task is known to `load_model`, `predict` and `export` only with a row in every table of `predictor.TASK_TABLES`, and version 1 has no reader: `tests/test_train/test_api/test_a_third_task_record_dispatches_by_table.py`::`test_the_real_tasks_have_a_row_in_every_table`, `test_a_task_missing_from_a_table_is_refused_naming_the_known_tasks`; `tests/test_train/test_api/test_task_json_schema_v2.py`::`test_a_record_of_version_1_with_every_key_valid_is_still_refused_there_is_no_reader`.
+- **A record kind is a row of every table.** A task is known to `load_model`, `predict` and `export` only with a row in every table of `predictor.TASK_TABLES`: `tests/test_train/test_api/test_a_third_task_record_dispatches_by_table.py`::`test_the_real_tasks_have_a_row_in_every_table`, `test_a_task_missing_from_a_table_is_refused_naming_the_known_tasks`.
 - **A seam of the shared sequence does nothing unless a task overrides it** (`TaskTrainer.compile_options`, `selection_start_epoch`, `config_stamps`, `fit_kwargs`): `tests/test_train/test_api/test_the_sequence_seams_default_to_nothing.py`::`test_the_hook_defaults_are_nothing`.
 
 - **Where the sequence lives** (D-070): `api/trainer.py:TaskTrainer` is the hooks, `run` (resolve, claim, lock,
   device) and the summary pieces; `api/run_sequence.py` is the sequence once the directory is claimed (`execute` and
   the stages `announce`, `load_data`, `build_model`, `epoch_zero`, `train_or_restore`, `report`); `api/resume_decisions.py`
   is what a resume refuses, proves and restores; `api/fit_callbacks.py` builds the callback list (`TaskTrainer._callbacks`
-  is its one-call seam). A task overrides hooks, never stages; `fit` and the diverged run's history write stay in
+  is its one-call seam). `fit` and the diverged run's history write stay in
   `train_or_restore` because the history-write census wants them in one function.
 - **One table drives dispatch and help**: `api/cli.py:COMMANDS` plus `api/registry.py:TASKS`.
   `convert <dataset>` is a `COMMANDS` row that imports `api/convert.py` only when it runs (D-005, D-017): the dataset
@@ -573,8 +573,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   from Python and `python -m train` are the same), and `__main__.py` is only
   `sys.exit(main(sys.argv[1:]))`. A new task is a `TaskSpec` row in `api/tasks/__init__.py` (strings,
   imported on use), and a new family a `ModelSpec` in `api/recipes.py`.
-- **A family trains the tasks in `ModelSpec.tasks`** (D-072): `registry.parse_model_name(name, task=)` refuses another
-  one, in both directions, before the variants table is imported, and `TaskTrainer.run` passes its `task` as its first
+- **`ModelSpec.tasks`** (D-072; the rule and its test are in Adapter rules above): `registry.parse_model_name(name, task=)`
+  refuses in both directions, before the variants table is imported, and `TaskTrainer.run` passes its `task` as its first
   act; `load_model` refuses a record whose family does not train the record's task. `ModelSpec.stride` (an int, or
   `"module:callable"` of `f(variant, model_args) -> int`, or `None` for the classifiers) is the multiple each side of a
   segmentation `image_size` must be; `api/segmentation_models.py` holds the adapters (`convunext`, `accunet`, and the
@@ -601,7 +601,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   sixth kind, plan 5c6cc105 D-009) has `input_size`, `channels`, `normalize`, `mean`, `std`, `patch_size`, `tokenizer` (the sha256 of
   the tokenizer file, null for `et_mim`) and `output` (`patch_embeddings`), and a resume compares the seven before `output`. A new task is a new row of both tables and a
   builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
-  `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`.
+  `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`
+  (`tests/test_train/test_api/test_task_json_schema_v2.py`::`test_a_record_of_version_1_with_every_key_valid_is_still_refused_there_is_no_reader`).
 - **The `image_denoising` task** (plan d483ffab): `api/tasks/image_denoising.py:ImageDenoisingTrainer` supplies hooks and no
   stage. Its groups (`DenoisingData`, `DenoiseTransformArgs`, `DenoiseMetricArgs`, `DenoiseLossArgs`, `DenoiseOptimArgs`) are in
   `api/denoising_args.py` (they cannot live in `api/args.py`, whose seven groups `tests/test_train/test_api/_groups.py` pins); the
@@ -623,9 +624,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   another size crashed the interpreter (exit -11 in `xnn_invoke_runtime`) where the stock graph returned wrong numbers; the float32
   branch emits one LEAKY_RELU, bit-equal to the `where` form at float32 (tested over 300,000 points) and to the base tflite file. Do not
   make the layer one code path again, and do not swap in `maximum(x, s * x)` (it lowers to LEAKY_RELU but its gradient at 0 is 1).
-- **Three seams of the shared sequence, and two fields of `Evaluation`** (D-004 for the two fields, D-011 for the stamps, D-012 for the compile options, D-013 for the selection start). Each is a no-op by
-  default, so a task that overrides none of them (the classification and segmentation tasks) runs the code it ran before (`test_the_sequence_seams_default_to_nothing.py` proves the default
-  of each and a positive arm for an override; the three goldens of the plan compared EXACT after every shared edit):
+- **Three seams of the shared sequence, and two fields of `Evaluation`** (D-004 for the two fields, D-011 for the stamps, D-012 for the compile options, D-013 for the selection start). A task that
+  overrides none of them (the classification and segmentation tasks) runs the code it ran before (no-op defaults: Adapter rules above; the test file
+  also has a positive arm for an override; the three goldens of the plan compared EXACT after every shared edit):
   `TaskTrainer.selection_start_epoch(config)` is the 0-based epoch from which the checkpoint saves and `EarlyStopping` counts
   (read once by `fit_callbacks.build_callbacks`; `run_summary.best_epoch` takes it as `first_epoch`, or the summary would name a
   best epoch no file holds); `TaskTrainer.compile_options(config, spec)` is spread into the ONE `compile` call of
@@ -727,13 +728,13 @@ classification task calls the same `train.common.classification_run` helpers as 
     another task the keys its record holds, plan 5c6cc105 D-036), `fixed` (`channels`, `lookback`, `horizon`, `input_size`,
     `patch_size`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask` of a target
     prefix and the dropped source head) and `positional` (top-level components whose weights pair by order, xlstm only, D-031).
-    A new family declares `transfer=TransferSpec(...)`: `transfer_reason` is gone (plan 5c6cc105 D-011), and a `None` spec, left
-    to test fixtures, gets one generic refusal. `ModelSpec` does not enforce this
+    `transfer_reason` is gone (plan 5c6cc105 D-011), and a `None` spec, left
+    to test fixtures, gets one generic refusal. `ModelSpec` does not enforce the declaration (Adapter rules above)
     (D-033): `tests/test_train/test_api/test_init_from_families.py` does, and builds each row's smallest variant (its `VARIANT`
     table) at the source geometry and at every change the spec names, requiring the engine's verdict to be the declared one, so a
     new row adds its variant there. It checks every row twice at the source geometry: after `clear_session`, and in the production
     order (the target built first, then the source's saved archive loaded beside it, its head naming a weight), the latter also
-    for one change of each kind and every cross-task pair. Every registered row declares a spec (27, counted from `registry.MODELS`).
+    for one change of each kind and every cross-task pair.
   - **Two hooks.** `TaskTrainer.init_identity(config, context)`, before the claim and without TensorFlow, returns the record keys
     this run will write about its input (`channels`, `lookback`, `horizon`, `normalize`, `data_range`, `input_size`, `patch_size`;
     those its record has), which `read_source` compares with the source's record; the base class refuses `init` naming the task
@@ -861,9 +862,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served)`: the shape `export` traces, the cells it refuses, the
   sentence it logs, and `served`, the function a file runs; see the forecasting bullet), collected in `TASK_TABLES`;
   `train.api.cli.PREDICT_WRITERS` is the table of what `predict` writes and `train.api.cli.DATA_LISTERS` the table of what `data=`
-  may name. A task
-  is known to the reader only when it has a row in EVERY table of `TASK_TABLES` (`record_problems` refuses another, naming the tasks
-  of the first table it is missing from), and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
+  may name. `record_problems` refuses a task missing from a table of `TASK_TABLES` (the rule is in Adapter rules above), naming the tasks
+  of the first table it is missing from, and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
   only for a task whose `RECORD_KEYS` hold those keys. A record kind is a row in each of the 10 tables of `TASK_TABLES` plus one in each of the
   2 cli tables, `PREDICT_WRITERS` and `DATA_LISTERS`;
   `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. All six tasks write a record, `pretrain`
@@ -871,19 +871,15 @@ classification task calls the same `train.common.classification_run` helpers as 
   not write a partial record for a new task, a record that exists makes `load_model` dispatch on the task's rows. Do not add an `elif task ==` to
   `load_model`, `input_shape_of`, `_run_on_zeros` or the predict command. The help text of `cli.PREDICT_OPTIONS` and
   `cli.EXPORT_NOTES` names every task's output; `test_export_per_family.py` pins phrases of it.
-- **The help path imports no TensorFlow, Keras or yaml and stays under 1 s**:
-  `tests/test_train/test_api/test_cli_help_allocates_nothing.py`. Heavy imports go inside functions.
-  A request that can be refused without loading data is refused before `setup_gpu` and before the
-  run directory is claimed (`TaskTrainer.run`'s docstring lists them).
+- **The help path stays under 1 s** (its import rule and the refusal before the claim are in Adapter rules above): heavy
+  imports go inside functions, and a refusal that needs no data also comes before `setup_gpu` (`TaskTrainer.run`'s docstring lists them).
 - **A group's file and its dotted keys are layers, in ONE place** (D-021 of plan 98b866fb): `cli.layer_command_line` merges
   the `config=` file, a path-form group's file (`data=<file>`, or `data: <file>` in the config file) and the dotted keys
   (`data.max_samples=100`, which win), and reads dotted keys that state no `format` as the file's (a `data.format=` that differs from the file's is refused naming both, D-025: the file's keys would stay in the group). `parse_task_arguments` is
   the one parser of a task's command line (`run_task` and the README guard both call it). Do NOT read a data file in
   `parse_dotlist`, coerce the dotted keys before the file is read, or let a dotted key replace the file's mapping.
-- **Exit codes**: `DLTrainError` (`ConfigError`, ...) is exit 2, a run with `success` false is 1,
-  anything else is a traceback. Do not widen the one `except DLTrainError` in `main`.
-- **Config fields must be live** applies to the API configs as well
-  (`tests/test_train/test_config_fields_are_live.py`, `REGISTERED` rows).
+- **Exit codes**: a run with `success` false is 1, anything else is a traceback (exit 2 for a `DLTrainError`: Adapter rules
+  above). Do not widen the one `except DLTrainError` in `main`.
 - **An export is not `model.export`**: `api/exporting.py` traces with `training=False`
   (a drop-path model is otherwise random in `serve`). `train.api.export` is the function, so the
   module is not named `export`.

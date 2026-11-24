@@ -265,8 +265,8 @@ shipped, each with its code home and test; a **Front door.** paragraph in § Ent
 the root `AGENTS.md`. Guards: `tests/test_the_guides_cite_only_paths_that_exist.py` checks the paths the two `GUIDE.md` cite;
 `tests/test_train/test_api/test_the_forecasting_docs_state_the_numbers_of_the_code.py` checks the cited paths of
 `src/train/README.md` and `src/train/AGENTS.md`; `tests/test_train/test_api/test_the_readme_commands_run_to_the_claim.py`
-reads the root `README.md` and `AGENTS.md` only for `init=` and forecasting commands, which item 7 has none of (its
-commands were checked by a plan probe, not a test); `REPO_MAP.md` is read only for its TopoLM numbers and sentence
+reads the root `README.md` and `AGENTS.md` only for `init=` and forecasting commands, which item 7 has none of (each of its
+commands was run on 2026-11-24, plan 98c9aac5, the training line up to the claim; no test reads item 7); `REPO_MAP.md` is read only for its TopoLM numbers and sentence
 (`tests/test_models/test_topolm/test_topolm_docs_agree.py`); no test reads this roadmap.
 
 ---

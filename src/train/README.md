@@ -22,9 +22,9 @@ python -m train image_classification out=auto model=vit/vit_pico data.dataset=ci
 ```
 
 ```python
-from train.api import main, train_image_classification, load_model, export
+from train.api import list_models, train_image_classification, load_model, export
 result = train_image_classification(out="auto", model="vit/vit_pico", data={"dataset": "cifar10"})
-main(["list_tasks"])      # the same as the command line; returns the exit code
+list_models(task="image_classification")  # "family/variant" names, "vit/vit_pico" among them
 ```
 
 **Commands**: `help`, `list_tasks`, `list_models`, `export`, `predict`, `convert`, and each registered task.
