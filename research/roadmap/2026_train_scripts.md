@@ -70,117 +70,129 @@ In LightlyTrain (clone to a scratch dir OUTSIDE the repo:
 | LightlyTrain behaviour                                                        | Rule here                                                                                                                                                                                                                                                                    |
 |-------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `overwrite=True` reuses/overwrites a non-empty `out`                          | **Do not implement.** Keep `refuse_existing_run`. Nothing under `results/` is ever overwritten or deleted.                                                                                                                                                                   |
-| Pydantic + OmegaConf                                                          | No new dependencies. Use stdlib `dataclasses` + a small validator. Existing AST guards read dataclass fields.                                                                                                                                                                |
-| Step-based loop, `steps`, `val_every_num_steps`                               | Keep Keras `fit` and epochs. `epochs` (+ optional `steps_per_epoch`) only. Respect the "repeat the dataset" rule.                                                                                                                                                            |
-| `accelerator`, `devices`, `strategy`, `num_nodes`                             | Single `gpu: int                                                                                                                                                                                                                                                             | None` through `train.common.setup_gpu` (D-110). No distributed scope. |
-| `precision="bf16-mixed"` strings                                              | `precision: "float32"                                                                                                                                                                                                                                                        | "mixed_float16" | "mixed_bfloat16"` through `setup_mixed_precision`; `LossScaleOptimizer` at the call site for fp16. |
+| Pydantic + OmegaConf                                                          | Neither. Stdlib `dataclasses` + a small validator; existing AST guards read dataclass fields. PyYAML is the optional `train` extra of `pyproject.toml`, read only for a `config=` or `data=` YAML file.                                                                       |
+| Step-based loop, `steps`, `val_every_num_steps`                               | Keep Keras `fit` and epochs. `epochs` only, plus `data.steps_per_epoch` in `depth_estimation` and `time_series_forecasting`. Respect the "repeat the dataset" rule.                                                                                                      |
+| `accelerator`, `devices`, `strategy`, `num_nodes`                             | One key, `devices`: an int GPU index, or `auto` or null for every visible GPU, through `train.common.setup_gpu` (D-110). No distributed scope.                                                                                                                            |
+| `precision="bf16-mixed"` strings                                              | `precision`: `float32`, `mixed_float16` or `mixed_bfloat16`, through `setup_mixed_precision`; `LossScaleOptimizer` at the call site for fp16.                                                                                                                              |
 | Default `seed=0`                                                              | `seed` defaults to `DEFAULT_SEED` from `train/common/seed.py`, applied via `set_seeds`.                                                                                                                                                                                      |
 | Output files `checkpoints/last.ckpt`, `exported_models/*.pt`, `metrics.jsonl` | Keep the existing contract: `config.json`, `run.log`, `training_log.csv`, `training_history.json`, `best_model.keras`, `final_model.keras`, `results_summary.json`, `visualizations/`, `model_analysis/`. `compare_runs` and guards read it. Only ADD files (see section 5). |
 | Telemetry (`tracker.track_training_started`)                                  | None.                                                                                                                                                                                                                                                                        |
-| `out` required                                                                | `out` optional; omitted means `results/<default_experiment_name(task, model)>`; relative paths anchored at repo root via the existing resolver.                                                                                                                              |
+| `out` required                                                                | `out` required too; `out=auto` names a new `results/<task>_<family>_<variant>_<timestamp>`; relative paths anchored at repo root via the existing resolver.                                                                                                                  |
 
 ---
 
-## 3. Target UX
+## 3. Target UX (as shipped)
+
+The front door is `train.api` and `python -m train`. The package `train` itself exports nothing: `src/train/__init__.py`
+is empty by ruling (plan a865fa08 invariant 7, legacy behaviour does not change; kept by the user 2026-11-24), so Python
+callers import from `train.api`.
 
 Python:
 
 ```python
-import train
+from train.api import train_image_classification, load_model, export, main
 
-train.train_image_classification(
-    out="results/convnext_c10_baseline",
-    data="cifar10",                         # or a dict / JSON path for a folder dataset
+result = train_image_classification(         # keyword-only; the keys `image_classification help` prints
+    out="results/convnext_c10_baseline",      # required; "auto" names a new directory under results/
     model="convnext_v1/cifar10",
-    epochs="auto",
-    batch_size=128,
-    gpu=0,
-    optim_args={"lr": 1e-3, "weight_decay": 0.05},
-    callback_args={"patience": 20, "epoch_analysis_every": 10},
+    data={"dataset": "cifar10"},              # a mapping, a data config object, or the path of a YAML file
+    epochs=100,
+    optim_args={"lr": 1e-3},
+    transform_args={"image_size": 32},
 )
 
-model = train.load_model("results/convnext_c10_baseline")   # run dir or .keras path
-probs = model.predict(images)
-train.list_models(task="image_classification")
+predictor = load_model("results/convnext_c10_baseline")   # a run directory, or a .keras file beside its task.json
+answer = predictor.predict("cat.png", top_k=5)            # {"labels", "scores"}; each task has its own predictor
+export(model=predictor.model, out="convnext_c10.keras", format="keras", record=predictor.record)
+main(["list_models", "task=image_classification"])      # the command line from Python; returns the exit code
 ```
 
-CLI:
+`list_tasks()` and `list_models()` are on `train.api` too, but they read the registries as they stand, and in a fresh
+process the built-in tasks and families are registered by the first `main(...)` call: before it, both return empty
+lists and `list_models(task=...)` raises `ConfigError` (measured 2026-11-24, plan 98c9aac5).
+
+CLI (every key is one the command's `help` prints):
 
 ```bash
 MPLBACKEND=Agg .venv/bin/python -m train help
 MPLBACKEND=Agg .venv/bin/python -m train image_classification help
 MPLBACKEND=Agg .venv/bin/python -m train image_classification \
-    out=results/convnext_c10_baseline data=cifar10 model=convnext_v1/cifar10 \
-    epochs=100 optim_args.lr=1e-3 transform_args.image_size="[32, 32]" gpu=0
+    out=results/convnext_c10_baseline model=convnext_v1/cifar10 data.dataset=cifar10 \
+    epochs=100 optim_args.lr=1e-3 transform_args.image_size=32
 MPLBACKEND=Agg .venv/bin/python -m train list_models task=image_classification
-MPLBACKEND=Agg .venv/bin/python -m train export run=results/convnext_c10_baseline format=keras
+MPLBACKEND=Agg .venv/bin/python -m train predict model=results/convnext_c10_baseline data=images/ out=predictions.json
+MPLBACKEND=Agg .venv/bin/python -m train export model=results/convnext_c10_baseline out=convnext_c10.keras format=keras
 ```
 
-Legacy entry points (`python -m train.convnext.train_convnext_v1 --dataset cifar10 ...`) stay and keep passing their
-tests.
+Legacy entry points (`python -m train.convnext.train_convnext_v1 --dataset cifar10 ...`) stay. The user guide is
+`src/train/README.md`.
 
 ---
 
 ## 4. Architecture
 
-New package `src/train/api/` (never a module named `train.py`):
+Package `src/train/api/` (never a module named `train.py`), as shipped. Not shipped, as first sketched here: a lazy
+`import train` with `train.load_model`, a `LoadedModel` with `.keras_model` and `.config`, the modules `api/load.py`,
+`api/export.py`, `api/help.py`, `dotlist.py`, `common_args.py` and `api/run.py`, a `train_args.json`, an
+`exported_models/` directory, `export run=results/... which=best`, and a per-task `run(config)` adapter onto each legacy
+trainer's own `train(config)`; the shipped design is a `TaskTrainer` sequence with task hooks.
 
-| Path                            | Responsibility                                                                                                                                                                                                                                                                                                                          |
-|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `src/train/__init__.py`         | Lazy public API via PEP 562 `__getattr__`. `import train` must not import TensorFlow or Keras.                                                                                                                                                                                                                                          |
-| `src/train/__main__.py`         | CLI dispatch: `help`, `list_models`, `list_tasks`, `export`, `<task>`. Non-zero exit on any failure.                                                                                                                                                                                                                                    |
-| `src/train/api/config.py`       | `StrictConfig` base (dataclass). `from_dict` rejecting unknown keys at every depth with suggestions; `AUTO = "auto"`; `has_auto()`, `assert_resolved()`; `to_dict()`; field help via `field(metadata={"help": ...})`.                                                                                                                   |
-| `src/train/api/dotlist.py`      | `a.b.c=value` tokens to nested dict. Values: `null`/`None`, `true`/`false`, numbers, `[..]`/`{..}` via `ast.literal_eval`, else string. Duplicate key raises.                                                                                                                                                                           |
-| `src/train/api/registry.py`     | `TASKS: {task_name: TaskSpec(config_cls, runner, models)}`. `MODELS` keys `"<family>/<variant>"` DERIVED from each model class's `MODEL_VARIANTS` (one fact, one home). `ModelDefaults` per family (`default_batch_size`, `default_epochs`, `default_image_size`, `default_lr`). Imports of model modules happen inside functions only. |
-| `src/train/api/common_args.py`  | Shared sub-configs: `OptimArgs`, `ScheduleArgs`, `TransformArgs`, `LoaderArgs`, `LoggerArgs`, `CallbackArgs`, `AnalysisArgs`, each with `resolve_auto(...)`.                                                                                                                                                                            |
-| `src/train/api/run.py`          | Shared run preamble: resolve `out`, `refuse_existing_run` (or resume checks), `attach_run_log`, log input args and resolved config (pretty JSON), `setup_gpu`, `set_seeds`, precision, write `train_args.json`.                                                                                                                         |
-| `src/train/api/tasks/<task>.py` | `<Task>Config(StrictConfig)` + `train_<task>(**kwargs)` + `run(config)` adapter that builds the EXISTING trainer's config and calls its existing `train(config)`.                                                                                                                                                                       |
-| `src/train/api/load.py`         | `load_model(path_or_run_dir)` returning a `LoadedModel` with `.predict(x, batch_size=...)`, `.keras_model`, `.config`, `.class_names`; preprocessing/normalization read from the run's `config.json`, never hardcoded.                                                                                                                  |
-| `src/train/api/export.py`       | `export(run, format="keras"                                                                                                                                                                                                                                                                                                             | "saved_model", which="best" | "final", out=None)` into `<run>/exported_models/`. ONNX only if a converter already exists in the repo. |
-| `src/train/api/help.py`         | Help text rendered from config dataclasses and registry.                                                                                                                                                                                                                                                                                |
+| Path | Role |
+|---|---|
+| `src/train/__init__.py` | Empty (0 bytes) by ruling, see Section 3. |
+| `src/train/__main__.py` | `python -m train`: `sys.exit(main(sys.argv[1:]))` with `main` from `src/train/api/cli.py`. |
+| `src/train/api/__init__.py` | The lazy surface (PEP 562, the `_LAZY` table): `import train.api` loads no submodule; `load_model`, `export`, `list_models`, `list_tasks`, `main`, each `train_<task>` and the config classes resolve on first read. |
+| `src/train/api/cli.py` | The commands (`help`, `list_tasks`, `list_models`, `export`, `predict`, `convert`, then each task), the `key=value` parser, `config=` files, help rendered from the config dataclasses; exit 0, 2 for a refused request (`DLTrainError`), 1 for a failed or unmet run. |
+| `src/train/api/config.py`, `src/train/api/errors.py` | `StrictConfig` (frozen dataclasses): unknown keys refused at every depth with the dotted path and a suggestion, `assert_resolved`, the JSON and YAML readers; the exception types. |
+| `src/train/api/args.py` | The seven argument groups (`OptimArgs`, `TransformArgs`, `MetricArgs`, `CheckpointArgs`, `LoggerArgs`, `AnalysisArgs`, `DebugArgs`) and how `auto` becomes a value. |
+| `src/train/api/registry.py`, `src/train/api/recipes.py` | `TaskSpec` and `ModelSpec` rows stored as `"module:attr"` strings, variants read from each family's `MODEL_VARIANTS`; `list_tasks`, `list_models`, `parse_model_name`; the image-classification families and their recipes. |
+| `src/train/api/trainer.py`, `src/train/api/run_sequence.py` | `TaskTrainer`: the one sequence every task runs; a task supplies hooks (`REQUIRED_HOOKS`). |
+| `src/train/api/run_dir.py`, `src/train/api/resume_decisions.py` | `resolve_out`, `open_run` (claims `out`, never overwrites), `run.lock`, the run files of Section 5; what a resume may do. |
+| `src/train/api/fit_callbacks.py`, `src/train/api/optim.py` | The callback list in the order resume needs; `OptimArgs` to an optimizer through `optimizer_builder`. |
+| `src/train/api/tasks/` | One module per task: its config, its `TaskTrainer` subclass and the keyword-only `train_<task>(...)`. |
+| `api/<task>_args.py`, `_models.py`, `_predictor.py` | Per task (denoising, depth, forecast, pretrain, segmentation; classification uses `data_args.py`, `recipes.py` and `predictor.py`): the data and argument groups, the families with their refusals and recipes, the predictor and export rules. |
+| `src/train/api/predictor.py` | `load_model(path)`: a run directory or a `.keras` file beside its `task.json`, returning the task's predictor (`PREDICTORS`) with `.model`, `.record` and `.predict(x, ...)`; the schema-v2 `task.json` and the per-task tables (`TASK_TABLES`). |
+| `src/train/api/exporting.py` | `export(*, model, out, format, input_shape=None, record=None)`: writes `out`, which must not exist, as `keras`, `saved_model`, `tflite` or `onnx` (onnx needs `tf2onnx` importable), and `<out>.task.json` beside it when `record` is given. |
+| `src/train/api/init_from.py` | `init`: start a run from an earlier run's weights (Phase 4g). |
+| `src/train/api/convert.py` | `python -m train convert`: ADE20K and COCO as index masks and listings. |
 
-Config field set for every task (task configs add their own):
+Config fields every task has (from `python -m train <task> help` of all six; a task adds its own, such as `loss_args`
+or `jit_compile`):
 
-| Field                                                                                                                         | Type   | Default                                                |
-|-------------------------------------------------------------------------------------------------------------------------------|--------|--------------------------------------------------------|
-| `out`                                                                                                                         | `str   | None`                                                  | `None` (timestamped under `results/`) |
-| `data`                                                                                                                        | `str   | dict                                                   | path` | required |
-| `model`                                                                                                                       | `str`  | required (`family/variant` or `.keras` path)           |
-| `epochs`                                                                                                                      | `int   | "auto"`                                                | `"auto"` |
-| `batch_size`                                                                                                                  | `int   | "auto"`                                                | `"auto"` |
-| `steps_per_epoch`                                                                                                             | `int   | None`                                                  | `None` |
-| `seed`                                                                                                                        | `int`  | `DEFAULT_SEED`                                         |
-| `gpu`                                                                                                                         | `int   | None`                                                  | `None` |
-| `precision`                                                                                                                   | `str`  | `"float32"`                                            |
-| `resume_interrupted`                                                                                                          | `bool` | `False`                                                |
-| `checkpoint`                                                                                                                  | `str   | None`                                                  | `None` |
-| `smoke`                                                                                                                       | `bool` | `False` (maps to existing smoke presets where present) |
-| `model_args`, `optim_args`, `schedule_args`, `transform_args`, `loader_args`, `logger_args`, `callback_args`, `analysis_args` | `dict  | None`                                                  | `None` |
+| Field | Type | Default |
+|---|---|---|
+| `out` | `str` | required; `auto` names a new directory under `results/` |
+| `model` | `str` | required, `family/variant` (`python -m train list_models`) |
+| `data` | a mapping, a data config, or the path of a YAML file | required; its keys are the task's |
+| `epochs`, `batch_size` | `int` | `auto` (the family's recipe) |
+| `seed` | `int` | `42` |
+| `devices` | `int` or null | `auto` |
+| `precision` | `float32`, `mixed_float16` or `mixed_bfloat16` | `float32` |
+| `resume_interrupted` | `bool` | `False` |
+| `init` | `str` or null | `None` |
+| `model_args` | a mapping | `{}` |
+| `optim_args`, `transform_args`, `metric_args`, `checkpoint_args`, `logger_args`, `analysis_args`, `debug_args` | the seven groups of `src/train/api/args.py` (a task may give its own transform, metric or optimizer group) | per field, printed by `<task> help` |
 
-Rules for the adapter layer:
-
-- An adapter MAPS fields; it never re-implements data loading, callbacks, evaluation or figures.
-- Every front-door field must reach a field of the underlying trainer config, or be consumed in `run.py`. A field the
-  target trainer does not support raises `ConfigError` naming the field and task/model, never a silent no-op.
-- Optimizers go through `dl_techniques.optimization.optimizer_builder()`. Map `optim_args.clipnorm` to
-  `gradient_clipping_by_norm_local` and `optim_args.global_clipnorm` to `gradient_clipping_by_norm` explicitly (the
-  builder silently ignores a literal `clipnorm`). Never combine `AdamW(weight_decay)` with an L2 regularizer.
-- Monitor direction always via `resolve_monitor_mode`.
-- No eager TF op at module scope anywhere under `src/train/api/` or `src/train/common/`.
+Rules for a task: written in shipped terms, each with the test that enforces it, in one place: `src/train/AGENTS.md`,
+section "Front door: `train.api`" (Phase 6). This roadmap does not keep a second copy.
 
 ## 5. Run directory contract (additions only)
 
-Existing files are untouched in name and schema. Add:
+Existing files are untouched in name and schema. As shipped (`src/train/api/run_dir.py`), a `python -m train` run adds:
 
-- `train_args.json`:
-  `{"task": ..., "input": <kwargs as passed>, "resolved": <front-door config after auto resolution>, "trainer_config_class": "<module.Class>"}`.
-- `run.log` gains two blocks at the top: `Input args:` and `Resolved config:` (pretty JSON), then system info (TF/Keras
-  versions, visible GPUs, precision).
-- `exported_models/` only when `export` is called.
+- `config_requested.json`: the request as the caller gave it, `auto` values kept. It is created empty with `O_EXCL` to
+  claim `out`, then filled. `config.json` holds the config after `auto` resolution, plus what the run was built with
+  beyond its fields under the key `used`.
+- `task.json`: the schema-v2 record a model needs to be used without its config (`src/train/api/predictor.py`).
+- `run.lock`: the run lock, held for the life of the run.
+- `run.log` gains the blocks `Args:`, `Resolved args:` and `Used args:` (`src/train/api/run_sequence.py`).
 
-`resume_interrupted=True`: requires an existing run at `out`, loads its `train_args.json`, refuses if any resolved field
-other than `resume_interrupted`/`epochs` differs, resumes from the trainer's existing step/epoch checkpoint mechanism.
-If the target trainer has no resume support, raise `ConfigError`; do not invent one in this task.
+`export` has no default place in a run: it writes its `out`, which must not exist, and `<out>.task.json` beside it.
+
+`resume_interrupted=True`: needs `checkpoints/backup` under the same `out`; compares this request with the run's
+`config_requested.json` and refuses, naming the keys, any difference outside `RESUME_UNCOMPARED_KEYS`
+(`resume_interrupted`, `out`, `devices`, `analysis_args.eval_batch_size`); a finished run (with `results_summary.json`)
+is refused. Every task takes the key; none refuses resume as unsupported.
 
 ---
 
@@ -196,8 +208,9 @@ name. Propose the task list (expected: `image_classification`, `semantic_segment
 `object_detection`, `language_model_pretraining`, `text_classification`, `time_series_forecasting`, plus "not migrated"
 with reason). Wait for approval.
 
-**Phase 1: infrastructure only.** `config.py`, `dotlist.py`, `registry.py` (empty task table), `common_args.py`,
-`run.py`, `help.py`, `__main__.py`, lazy `__init__.py`. Tests in `tests/test_train/test_api/`. No trainer touched.
+**Phase 1: infrastructure only.** The strict config, the `key=value` parser, the registry (empty task table), the shared
+argument groups, the run preamble, the help and `__main__.py` (shipped under other names and with `src/train/__init__.py`
+left empty: see Section 4). Tests in `tests/test_train/test_api/`. No trainer touched.
 
 **Phase 2: pilot `image_classification` on ConvNeXt V1/V2.** Adapter builds `train.convnext.common.TrainingConfig` and
 calls `train.convnext.common.train`. Registry keys from `ConvNeXtV1.MODEL_VARIANTS` / `ConvNeXtV2.MODEL_VARIANTS`.
@@ -249,29 +262,52 @@ the adapter rules from section 4; entry-points section of `REPO_MAP.md`. Paths c
 
 ## 7. Required tests (`tests/test_train/test_api/`)
 
+Each item as written first, then what covers it now (every file named is under `tests/test_train/test_api/` unless its
+path says otherwise).
+
 1. `dotlist`: nesting, types, `null`, lists, quoted strings, duplicate key error, malformed token error.
+   Covered: `tests/test_train/test_api/test_dotlist_parser.py` (the parser lives in `src/train/api/cli.py`).
 2. Strict validation: unknown top-level and nested keys raise with dotted path and suggestion; wrong type raises.
+   Covered: `tests/test_train/test_api/test_strict_config.py`.
 3. `"auto"`: every auto field resolved before the runner is called (`assert_resolved`), from the model's
-   `ModelDefaults`.
+   `ModelDefaults`. Covered: `tests/test_train/test_api/test_auto_resolution.py`; the defaults are the family's recipe
+   on its `ModelSpec` (no `ModelDefaults` class shipped).
 4. CLI contract, same three traps as `_cli_contract.py`: every key drives a NON-default value, the row table equals the
    config's field set (completeness), values distinct across rows. Assert on the resulting trainer config object, never
-   on exit codes or help text.
+   on exit codes or help text. Covered: `tests/test_train/test_api/test_every_cli_key_reaches_the_config.py` (on the
+   task config) and `tests/test_train/test_api/test_function_and_cli_agree.py` (the same `config.json` bytes either way).
 5. Dead fields: extend `test_config_fields_are_live.py` coverage to front-door configs (a serialized field is not a
-   consumed field).
+   consumed field). Covered: `tests/test_train/test_api/test_the_api_fields_are_read_in_production.py` (a field must
+   be read by production code outside its own class); `tests/test_train/test_config_fields_are_live.py` lists the
+   `api/args.py` groups too.
 6. Import hygiene: `python -m train help` and `import train` in a subprocess leave `tensorflow` and `keras` out of
-   `sys.modules` and set no GPU state.
+   `sys.modules` and set no GPU state. Covered for `python -m train help`, every command's and task's help, and
+   `import train.api`: `tests/test_train/test_api/test_cli_help_allocates_nothing.py`. Not built for `import train`:
+   it imports an empty package. GPU state has no test of its own beyond TensorFlow not being imported.
 7. Registry: `MODELS` keys equal the union of the wired families' `MODEL_VARIANTS` keys; unknown model string raises
-   with suggestions.
-8. Parity per migrated trainer (legacy argv vs API kwargs gives identical trainer config).
+   with suggestions. Covered: `tests/test_train/test_api/test_registry.py` (`MODELS` is keyed by family, its variants
+   read from `MODEL_VARIANTS` through `ModelSpec.variants_attr`; an unknown family or variant gets a suggestion).
+8. Parity per migrated trainer (legacy argv vs API kwargs gives identical trainer config). Not built as written: no task
+   builds a legacy trainer's config. Parity is of recipes and builds against the legacy trainers instead:
+   `tests/test_train/test_api/test_every_family_builds_from_its_defaults.py` and the `legacy` tests of
+   `test_denoising_families.py`, `test_image_segmentation_task.py`, `test_depth_task.py`, `test_pretrain_families.py`
+   and `test_forecast_families.py`.
 9. Failure: a stubbed raise inside the runner gives non-zero exit through the CLI and a raised exception through the
-   API.
-10. Output location: all writes under `out` (`tmp_path`, absolute). Never write under `results/` in tests.
-11. Resume: mismatched parameters refused; unsupported trainer refused.
-12. One CPU smoke per task (tiny `max_samples`, 1 epoch), marked `slow`.
+   API. Covered: `tests/test_train/test_api/test_a_failed_api_run_exits_nonzero.py`,
+   `tests/test_train/test_api/test_the_cli_exit_codes.py`.
+10. Output location: all writes under `out` (`tmp_path`, absolute). Never write under `results/` in tests. Covered:
+   `tests/test_train/test_api/test_existing_run_is_refused.py` (`test_a_new_run_writes_only_inside_its_run_directory`)
+   and `tests/test_train/test_api/test_function_and_cli_agree.py` (`test_a_run_adds_no_entry_to_the_repo_results_directory`).
+11. Resume: mismatched parameters refused; unsupported trainer refused. Covered: `tests/test_train/test_api/test_resume_interrupted.py`
+   (`test_a_changed_request_is_refused_naming_the_key`), `tests/test_train/test_api/test_resume_hardening.py` and the
+   depth, forecast, pretrain and denoising resume files. Not built: an unsupported-trainer refusal (every task resumes).
+12. One CPU smoke per task (tiny `max_samples`, 1 epoch), marked `slow`. Covered by a short run per task in
+   `test_image_classification_end_to_end.py`, `test_image_segmentation_task.py`, `test_image_denoising_task.py`,
+   `test_depth_task.py`, `test_forecast_task.py` and `test_pretrain_task.py`; none is marked `slow` (no file under
+   `tests/test_train/test_api/` uses the marker, and `pyproject.toml` says the marker deselects nothing).
 
-Run only the scoped suites:
-`.venv/bin/python -m pytest tests/test_train/test_api/ tests/test_train/test_<touched_trainer>/ -q`. Never the full
-suite unless asked.
+Run only the test files of what changed, one file or node id per command: never the full suite unless asked (root
+`AGENTS.md`, Quick Reference), nor the whole `tests/test_train/test_api/` (the user's rule, plan 98c9aac5 D-009).
 
 ---
 
@@ -290,21 +326,33 @@ suite unless asked.
 
 ## 9. Definition of done
 
-- `python -m train help` lists tasks; `python -m train <task> help` lists every field with type and live default.
+What shipped, bullet by bullet:
+
+- `python -m train help` lists tasks; `python -m train <task> help` lists every field with type and live default. Shipped.
 - Every migrated trainer is reachable by API and CLI, its legacy entry point still passes its existing tests, and parity
-  tests pass.
-- Unknown keys, unsupported fields and failed runs fail loudly.
-- `train_args.json` and the run log carry input and resolved config; all existing artifacts unchanged.
-- `load_model(run_dir).predict(x)` works for every migrated task.
-- Inventory marks every entry point as migrated or "not migrated: <reason>".
+  tests pass. Shipped by task and family, not by trainer: the tasks `python -m train list_tasks` prints, each with the
+  families `list_models task=<task>` prints; the legacy entry points stay; parity is Section 7, item 8.
+- Unknown keys, unsupported fields and failed runs fail loudly. Shipped: Section 7, items 2, 5 and 9.
+- The request and the resolved config are recorded: `config_requested.json`, and `config.json` with `used` (Section 5),
+  and the run log's `Args:`, `Resolved args:` and `Used args:` blocks.
+- `load_model(run_dir).predict(x)` works for every task: `load_model` picks the task's predictor from
+  `predictor.PREDICTORS`, which has one row per task.
+- Inventory marks every entry point as migrated or "not migrated: <reason>". Not done: no Phase 0 inventory exists under
+  `plans/` (searched 2026-11-24); the task list grew phase by phase instead.
 
 ## 10. Decisions to confirm with the user before Phase 1
 
-Ask once, with these defaults:
+Ask once, with these defaults (each now answered by what shipped):
 
 1. Package location `src/train/api/` with CLI `python -m train` (default), vs. moving the front door into the shipped
-   `dl_techniques` package (would need `train.common` relocated).
+   `dl_techniques` package (would need `train.common` relocated). Shipped: `src/train/api/` and `python -m train`;
+   `train/` is not part of the redistributable wheel (`pyproject.toml`).
 2. No pydantic/omegaconf/pyyaml (default); data configs as dict or JSON. YAML accepted only if `yaml` is importable.
-3. `out` optional with timestamped default (default) vs. required as in LightlyTrain.
-4. Task list and migration order from the Phase 0 inventory.
-5. Whether `export` should target ONNX (only if a converter is already a dependency).
+   Shipped: no pydantic or omegaconf; PyYAML is the optional `train` extra, read only for a `config=` or `data=` YAML
+   file, and a missing PyYAML is a `ConfigError` naming the extra.
+3. `out` optional with timestamped default (default) vs. required as in LightlyTrain. Shipped: required; `out=auto`
+   names a new timestamped directory under `results/`.
+4. Task list and migration order from the Phase 0 inventory. Shipped without the inventory: the tasks were chosen
+   phase by phase (Section 6).
+5. Whether `export` should target ONNX (only if a converter is already a dependency). Shipped: `format=onnx`, which needs
+   `tf2onnx` importable (it is not a dependency in `pyproject.toml`); otherwise a `ConfigError`.
