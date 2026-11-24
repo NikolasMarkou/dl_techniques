@@ -952,12 +952,12 @@ def test_a_sample_replaces_the_check_batch_and_is_asked_for_the_shape_of_the_bat
     assert asked == [(2, *EXPORT_SHAPE)] and len(seen) == 1 and np.array_equal(seen[0], marker)
 
 
-def test_an_export_rule_names_no_sample_unless_it_is_the_language_rule():
+def test_an_export_rule_names_no_sample_unless_it_is_a_text_rule():
     from train.api import predictor
 
     assert predictor.ExportRule._field_defaults["sample"] is None, "the default is a no-op: today's random float batch"
     with_sample = sorted(task for task, rule in predictor.EXPORT_RULES.items() if rule.sample is not None)
-    assert with_sample == ["language_model_pretraining"], "every earlier task's export check still feeds random floats"
+    assert with_sample == ["language_model_pretraining", "text_classification"], "every earlier task's export check still feeds random floats"
     assert sorted(predictor.EXPORT_RULES) == sorted(predictor.TASK_TABLES["RECORD_KEYS"])
 
 
@@ -993,19 +993,19 @@ BEFORE_THE_SEAM = (
 )
 
 
-def test_every_earlier_tasks_input_spec_sentence_is_the_one_it_always_was_and_the_language_rank_names_its_own():
+def test_every_earlier_tasks_input_spec_sentence_is_the_one_it_always_was_and_the_text_rank_names_its_own():
     from train.api import exporting, predictor
 
     ranks = {task: len(rule.shape_of(SHAPE_RECORD)) for task, rule in predictor.EXPORT_RULES.items()}
     assert ranks == {
         "image_classification": 3, "image_segmentation": 3, "image_denoising": 3, "time_series_forecasting": 2,
-        "depth_estimation": 3, "pretrain": 3, "language_model_pretraining": 1,
+        "depth_estimation": 3, "pretrain": 3, "language_model_pretraining": 1, "text_classification": 1,
     }
     for task, rank in ranks.items():
         bad = (0,) * rank
         with pytest.raises(ConfigError) as caught:
             exporting._input_spec(None, bad, rank=rank)
-        if task != "language_model_pretraining":
+        if task not in ("language_model_pretraining", "text_classification"):
             wanted = "(height, width, channels)" if rank == 3 else "(lookback, channels)"
             assert str(caught.value) == BEFORE_THE_SEAM.format(wanted=wanted, given=bad), task
         else:

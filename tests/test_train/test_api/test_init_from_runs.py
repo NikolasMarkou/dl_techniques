@@ -158,6 +158,13 @@ def language_record(tokenizer: str = "ascii95", seq_len: int = 32) -> Dict[str, 
         tokenizer=tokenizer_spec(tokenizer).record())
 
 
+def text_classification_record(tokenizer: str = "ascii95", seq_len: int = 32) -> Dict[str, Any]:
+    """A text-classification record of the named tokenizer."""
+    return predictor.build_text_classification_record(
+        model="gpt2/tiny", family="gpt2", variant="tiny", seq_len=seq_len, tokenizer=tokenizer_spec(tokenizer).record(),
+        class_names=["neg", "pos"])
+
+
 def write_source(root: Path, record: Optional[Dict[str, Any]], used: Optional[Dict[str, Any]] = None, *,
                  config: bool = True, best: bool = True) -> Path:
     """A fake run directory: ``task.json`` (``record``; ``None`` writes none), ``config.json`` and a placeholder archive."""
@@ -1599,7 +1606,7 @@ def test_record_a_fine_tuned_run_loads_predicts_and_exports_at_its_size_with_its
     np.testing.assert_allclose(again["scores"], answer["scores"], atol=1e-5)
 
 
-#: One record of each of the seven kinds, built by the predictor's own builders.
+#: One record of each of the eight kinds, built by the predictor's own builders.
 RECORD_KINDS = {
     "image_classification": classification_record,
     "image_segmentation": segmentation_record,
@@ -1609,6 +1616,7 @@ RECORD_KINDS = {
     "depth_estimation": depth_record,
     "pretrain": pretrain_record,
     "language_model_pretraining": language_record,
+    "text_classification": text_classification_record,
 }
 
 

@@ -1,10 +1,13 @@
-"""Predict and export for the language-model task: :class:`LanguageModelPredictor`, the ``.txt`` and ``.jsonl`` reader and JSON writer
-of ``predict``, and the export row of ``language_model_pretraining``.
+"""Predict and export for the two text tasks: :class:`LanguageModelPredictor` and :class:`TextClassifierPredictor`, the ``.txt`` and
+``.jsonl`` reader and the JSON writers of ``predict``, and the export rows of ``language_model_pretraining`` and ``text_classification``.
 
 ``train.api.predictor.load_model`` returns a :class:`LanguageModelPredictor` when the run's ``task.json`` says
-``language_model_pretraining`` (schema in :mod:`train.api.predictor`). A language model takes ``seq_len`` token ids and returns the
+``language_model_pretraining`` and a :class:`TextClassifierPredictor` when it says ``text_classification`` (schema in
+:mod:`train.api.predictor`). A language model takes ``seq_len`` token ids and returns the
 logits of the id after each: ``predict`` answers what the model thinks of a document (how surprised it is, and what it expects
-next), the quantities the run's ``val_loss`` is made of, and does not generate text.
+next), the quantities the run's ``val_loss`` is made of, and does not generate text. A text classifier takes a row of ``seq_len`` ids
+(``[CLS]``, the head of the document, pad: the row the run trained on) and returns one logit per class: ``predict`` answers the class
+names best first with their softmax probabilities, as the image classifier does.
 
 Scoring rule (D-035). A document is its ids followed by the end-of-text id, as the training stream has it. The ids are cut into
 consecutive windows of ``seq_len + 1`` (the last one shorter); a window predicts every id after its first from the ones before it
@@ -31,19 +34,38 @@ Interface contract
     :raises ConfigError: for an empty list, an item that is not a text, a text with no id, a score that is not finite (a
         mean_nll whose exponential overflows included) and a tokenizer that cannot be opened.
 
+``TextClassifierPredictor(model, record)``
+    :param model: the loaded Keras model; its input is ``(batch, seq_len)`` float32 ids and its output ``(batch, classes)`` logits.
+    :param record: a text-classification record that passed :func:`train.api.predictor.check_record`.
+    :raises ConfigError: for a record of another task; the tokenizer is opened on the first ``predict``, as the language model's is.
+
+``TextClassifierPredictor.predict(x)``
+    :param x: one text (``str``) or a list or tuple of texts.
+    :return: ``{"labels", "scores"}``: for one text both are flat lists, the record's class names best first (ties keep class order)
+        and their softmax probabilities as plain floats; for a list, one such list per text. A text is made a row as the run made it
+        (:func:`train.common.text_data.encode_rows`): ``[CLS]``, its first ``seq_len - 1`` ids (a longer text loses its TAIL) and pad ids.
+        Rows run :data:`ROWS` at a time and a row's answer does not depend on the others.
+    :raises ConfigError: as the language model's, for an empty list, an item that is not a text, a text with no id and a tokenizer that
+        cannot be opened.
+
 ``list_data(data)`` / ``read_documents(path)``
     The command's input: ``list_data`` returns ``[data]`` for a ``.txt`` or a ``.jsonl`` file and refuses a directory and any other
     suffix by name; ``read_documents`` returns the documents, one per line (``.txt``: the line; ``.jsonl``: the ``"text"`` of a JSON
     object), a final newline making no extra one. :raises ConfigError: for a file that cannot be read as UTF-8, one with no line,
     an empty line, a line of a ``.jsonl`` that is not JSON or has no ``"text"`` string; each names its line.
 
+``write_labels(predictor, documents, out)``
+    Writes ``[{"index", "labels", "scores"}, ...]``, one entry per document and the shape of ``predict``'s image list, as one JSON file
+    into the new path ``out`` (nothing is overwritten, and the file is written LAST, in one piece). :raises ConfigError: for any error of
+    ``predict``.
+
 ``write_predictions(predictor, file, documents, out)``
     Writes ``{"task", "model", "data", "seq_len", "tokenizer", "scoring", "documents"}`` as one JSON file into the new path ``out``
     (nothing is overwritten, and the file is written LAST, in one piece), ``documents`` holding ``{"index", ...}`` per document.
     :raises ConfigError: for any error of ``predict``.
 
-``served(model, record)`` / ``sample_ids(record, shape)`` / ``check_export(record, format, shape)`` / ``export_note(record)``
-    The export row of this task (:class:`train.api.predictor.ExportRule`): ``served`` is the function every file runs, the model with
+``served(model, record)`` / ``sample_ids(record, shape)`` / ``check_export(record, format, shape)`` / ``export_note(record)`` / ``classifier_export_note(record)``
+    The export row of these tasks (:class:`train.api.predictor.ExportRule`; a classifier's differs from the language model's in its note): ``served`` is the function every file runs, the model with
     ``training=False`` (D-032); ``sample_ids`` the seeded batch of valid ids the tflite check is fed (D-008); ``check_export`` raises a
     named :class:`ConfigError`, before anything is written, for a length other than the record's and a vocabulary a float32 cannot
     number; ``export_note`` is the sentence logged beside a file. Every other cell converts and matches the model on valid ids
@@ -62,12 +84,15 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import ConfigError
 from .exporting import check_free
-from .predictor import LANGUAGE_MODEL, check_record
+from .predictor import LANGUAGE_MODEL, TEXT_CLASSIFICATION, check_record
 from .run_dir import TASK_FILE
 from .text_tokenizer import tokenizer_spec
 
 #: Rows (windows) run through the model at a time: a row is ``seq_len x vocab_size`` floats of logits (51 MB at 256 and 50,261).
 CHUNK = 4
+
+#: Rows (documents) a classifier runs through the model at a time: a row is ``seq_len`` ids and its answer is a few logits.
+ROWS = 32
 
 #: How many next tokens ``predict`` lists.
 TOP_K = 5
@@ -136,19 +161,20 @@ def read_documents(path: Path) -> List[str]:
 # ---------------------------------------------------------------------
 
 
-class LanguageModelPredictor:
-    """A loaded language model and the tokenizer its run trained with; see the module contract.
+class _TextPredictor:
+    """What the two text predictors share: the checked record, the tokenizer reopened from it and the texts of a call; see the module contract.
 
     :param model: the Keras model.
-    :param record: a language-model record that passed :func:`train.api.predictor.check_record`.
+    :param record: a record of this class's :attr:`task` that passed :func:`train.api.predictor.check_record`.
+    :cvar task: the task word of the records this class serves.
     """
+
+    task = ""
 
     def __init__(self, model: Any, record: Mapping[str, Any]) -> None:
         check_record(dict(record), "<given>")
-        if record["task"] != LANGUAGE_MODEL:
-            raise ConfigError(
-                f"Invalid {TASK_FILE} <given>: the task is {record['task']!r} but this predictor serves {LANGUAGE_MODEL!r} only"
-            )
+        if record["task"] != self.task:
+            raise ConfigError(f"Invalid {TASK_FILE} <given>: the task is {record['task']!r} but this predictor serves {self.task!r} only")
         self.model = model
         self.record = dict(record)
         self._tokenizer: Any = None
@@ -185,14 +211,10 @@ class LanguageModelPredictor:
                 raise ConfigError(f"Invalid document {number}: document {number} is a {type(text).__name__}, not a text")
         return list(x)
 
-    def predict(self, x: Any) -> Dict[str, Any]:
-        """Return ``{"documents": [...]}`` for ``x``; see the module contract."""
-        import numpy as np
-        from scipy.special import log_softmax
-
+    def _encode(self, x: Any) -> Tuple[Any, List[List[int]]]:
+        """Return ``(tokenizer, one id list per text of x)``; a text with no id is refused by its number."""
         texts = self._texts_of(x)
         tokenizer = self.tokenizer()
-        length, eot, pad = self.record["seq_len"], self.record["eot_id"], self.record["pad_id"]
         documents = [tokenizer.encode(text) for text in texts]
         for number, ids in enumerate(documents):
             if not ids:
@@ -200,6 +222,21 @@ class LanguageModelPredictor:
                     f"Invalid document {number}: the text has no token (it is empty, or {self.record['encoding']} reads none of "
                     "its characters), so there is nothing to score"
                 )
+        return tokenizer, documents
+
+
+class LanguageModelPredictor(_TextPredictor):
+    """A loaded language model and the tokenizer its run trained with; see the module contract."""
+
+    task = LANGUAGE_MODEL
+
+    def predict(self, x: Any) -> Dict[str, Any]:
+        """Return ``{"documents": [...]}`` for ``x``; see the module contract."""
+        import numpy as np
+        from scipy.special import log_softmax
+
+        tokenizer, documents = self._encode(x)
+        length, eot, pad = self.record["seq_len"], self.record["eot_id"], self.record["pad_id"]
         # DECISION plan-2026-11-24T092348-7806a290/D-035
         # The rule is the TRAINING windows': consecutive windows of ``length + 1`` ids with the end-of-text id after the document, the
         # first id of each context only, a short last window padded and scored on its real positions. So a document that is exactly one
@@ -245,6 +282,52 @@ class LanguageModelPredictor:
         return {"documents": answers}
 
 
+class TextClassifierPredictor(_TextPredictor):
+    """A loaded text classifier and the tokenizer its run trained with; see the module contract."""
+
+    task = TEXT_CLASSIFICATION
+
+    def predict(self, x: Any) -> Dict[str, Any]:
+        """Return ``{"labels", "scores"}`` for ``x``; see the module contract."""
+        import numpy as np
+        from scipy.special import softmax
+
+        from train.common import text_data
+
+        tokenizer, documents = self._encode(x)
+        # DECISION plan-2026-11-24T092348-7806a290/D-064
+        # The row the run trained on, made by the function that made it (``[CLS]``, the head, pad): a text longer than the row loses
+        # its TAIL. Do NOT cut or pad here by hand (a second rule for the row would drift from the training rows), do NOT keep the end of
+        # a long text (the training rows keep its head), and do NOT answer a list of texts with the language model's per-document
+        # dicts: a classifier answers the image predictor's ``{labels, scores}``.
+        rows, _ = text_data.encode_rows(documents, tokenizer.spec, self.record["seq_len"])
+        logits = np.concatenate([
+            np.asarray(self.model(rows[start:start + ROWS].astype(np.float32), training=False), np.float64)
+            for start in range(0, len(rows), ROWS)])
+        probabilities = softmax(logits, axis=-1)
+        order = np.argsort(-probabilities, axis=-1, kind="stable")
+        names = self.record["class_names"]
+        labels = [[names[index] for index in row] for row in order]
+        scores = [[float(chances[index]) for index in row] for chances, row in zip(probabilities, order)]
+        return {"labels": labels[0], "scores": scores[0]} if isinstance(x, str) else {"labels": labels, "scores": scores}
+
+
+def _write_json(out: Path, payload: Any) -> None:
+    """Write ``payload`` as one JSON file into the new path ``out`` (``"x"``: nothing is overwritten)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "x") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+
+
+def write_labels(predictor: TextClassifierPredictor, documents: Sequence[str], out: Path) -> None:
+    """Write the class names and scores of ``documents`` as one JSON list into the new path ``out``."""
+    check_free(out, "out", "predict")
+    answer = predictor.predict(list(documents))
+    _write_json(out, [{"index": number, "labels": labels, "scores": scores}
+                      for number, (labels, scores) in enumerate(zip(answer["labels"], answer["scores"]))])
+
+
 def write_predictions(predictor: LanguageModelPredictor, file: Path, documents: Sequence[str], out: Path) -> None:
     """Write the answers for ``documents`` (read from ``file``) as one JSON file into the new path ``out``."""
     check_free(out, "out", "predict")
@@ -259,10 +342,7 @@ def write_predictions(predictor: LanguageModelPredictor, file: Path, documents: 
         "scoring": SCORING_NOTE,
         "documents": [{"index": number, **answer} for number, answer in enumerate(answers)],
     }
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "x") as handle:
-        json.dump(document, handle, indent=2)
-        handle.write("\n")
+    _write_json(out, document)
 
 
 # ---------------------------------------------------------------------
@@ -294,7 +374,7 @@ def check_export(record: Mapping[str, Any], format: str, shape: Sequence[Optiona
     wanted = (record["seq_len"],)
     if tuple(shape) != wanted:
         raise ConfigError(
-            f"Invalid value for 'input_shape': {tuple(shape)} is not the trained length {wanted} (seq_len) of this {LANGUAGE_MODEL} "
+            f"Invalid value for 'input_shape': {tuple(shape)} is not the trained length {wanted} (seq_len) of this {record['task']} "
             "model; its position table and graph are built for that length, so it is exported at that length and a file of another "
             "length would be a new model"
         )
@@ -313,4 +393,16 @@ def export_note(record: Mapping[str, Any]) -> str:
         f"float (3.0, not 3) from the {record['encoding']} tokenizer (vocab_size {vocab}, pad id {record['pad_id']}: right-pad a shorter "
         "text with it and read only the real positions, which the padding after them cannot change); it returns the raw next-token "
         f"logits (batch, {length}, {vocab}), the row at position i scoring the id after the i-th"
+    )
+
+
+def classifier_export_note(record: Mapping[str, Any]) -> str:
+    """Return the sentence logged beside an exported text classifier."""
+    length, names = record["seq_len"], record["class_names"]
+    return (
+        f"the exported model takes float32 token ids (batch, {length}), the trained length only, each id a whole number written as a "
+        f"float (3.0, not 3) from the {record['encoding']} tokenizer (vocab_size {record['vocab_size']}); a row is the [CLS] id "
+        f"{record['cls_id']}, the first {length - 1} ids of the text and the pad id {record['pad_id']} up to the length (a longer text "
+        "is cut at its end, a shorter one right-padded; the model derives the padding from the pad id); it returns the raw logits "
+        f"(batch, {len(names)}), one per class in the order {', '.join(names)}"
     )

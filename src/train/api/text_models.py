@@ -410,6 +410,14 @@ def observe_bert(model: Any) -> Optional[Dict[str, Any]]:
     return _observe(model, "BERT", BERT_TABLE_KEYS)
 
 
+def vocabulary_of(model: Any) -> Optional[int]:
+    """Return the ``vocab_size`` of the GPT-2 or BERT layer ``model`` holds, ``None`` for a model without one."""
+    for layer in getattr(model, "layers", None) or []:
+        if type(layer).__name__ in ("GPT2", "BERT"):
+            return layer.get_config()["vocab_size"]
+    return None
+
+
 def language_loss_and_metrics() -> Tuple[Any, List[Any]]:
     """Return ``(loss, metrics)`` of ``compile``; see the module contract."""
     import keras

@@ -35,8 +35,9 @@ Interface contract
 
     ``init``. A ``gpt2`` run starts from an earlier ``gpt2_lm`` run (the decoder copied path for path, the head fresh), a ``bert`` run
     from none (an encoder cannot start from a causal decoder); identity and split count are the language task's
-    (:func:`~train.api.text_args.tokenizer_identity`, :func:`~train.api.text_args.documents_overlap`). The task writes no ``task.json``
-    yet (its record is the next step's), so the ``init`` block lives in the summary.
+    (:func:`~train.api.text_args.tokenizer_identity`, :func:`~train.api.text_args.documents_overlap`). The run writes ``task.json``
+    before ``fit`` (:func:`~train.api.predictor.build_text_classification_record`, the eighth record kind), which holds the ``init`` block, so
+    a classifier run is itself an ``init`` source of its own family and can be predicted with and exported.
 
 ``train_text_classification(*, out, model, data, ...)``
     :param model: ``"bert/variant"`` or ``"gpt2/variant"``, e.g. ``"gpt2/tiny"``; ``python -m train list_models
@@ -82,6 +83,7 @@ from ..config import (
     validate,
 )
 from ..data_args import DataFacts
+from ..predictor import build_text_classification_record, overrides_of_variant
 from ..text_args import (
     BERT,
     CLASS_NAMES,
@@ -240,6 +242,19 @@ class TextClassificationTrainer(TaskTrainer):
             f"Baseline (the majority class of the {data.n_select} fixed selection rows, counted): val_accuracy {self._majority:.6g}; "
             f"a model that answers one class to every row scores it, and the bar is strictly above it")
         return data
+
+    def task_record(self, config: TextClassificationConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
+        """Return the ``text_classification`` ``task.json`` record (schema in :mod:`train.api.predictor`).
+
+        The length is ``data.input_shape`` (``build_model`` builds the model at it), the tokenizer the data's spec and the classes the
+        corpus's own. Nothing of the model is needed, so a resume asks for it before ``build_model`` and compares it with the file.
+        """
+        table = registry.MODELS[context.family].load_variants()
+        return build_text_classification_record(
+            model=config.model, family=context.family, variant=context.variant, seq_len=data.input_shape[0],
+            tokenizer=data.spec.record(), class_names=CLASS_NAMES,
+            variant_overrides=overrides_of_variant(table[context.variant], self._model_kwargs(config, context)),
+        )
 
     def input_check(self, facts: DataFacts, data: Any) -> None:
         if data.num_classes != facts.num_classes:

@@ -602,7 +602,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   sixth kind, plan 5c6cc105 D-009) has `input_size`, `channels`, `normalize`, `mean`, `std`, `patch_size`, `tokenizer` (the sha256 of
   the tokenizer file, null for `et_mim`) and `output` (`patch_embeddings`), and a resume compares the seven before `output`; a language-model record (the seventh kind, plan 7806a290) has `seq_len`, `encoding`, `n_vocab`,
   `vocab_size`, `eot_id`, `pad_id`, `tokenizer` (the digest of the tokenizer's fields and file hashes), `tokenizer_files` and `output`
-  (`next_token_logits`), and a resume compares `seq_len`, `encoding`, `vocab_size` and `tokenizer`. A new task is a new row of both tables and a
+  (`next_token_logits`), and a resume compares `seq_len`, `encoding`, `vocab_size` and `tokenizer`; a text-classification record (the eighth kind) is the
+  language model's with `cls_id`, `class_names`, `layout` (`cls_head_pad`: `[CLS]`, the head of the document, pad) and `output` (`logits`),
+  and a resume compares the same four and `class_names`. A new task is a new row of both tables and a
   builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
   `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`
   (`tests/test_train/test_api/test_task_json_schema_v2.py`::`test_a_record_of_version_1_with_every_key_valid_is_still_refused_there_is_no_reader`).
@@ -898,9 +900,10 @@ classification task calls the same `train.common.classification_run` helpers as 
   of the first table it is missing from, and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
   only for a task whose `RECORD_KEYS` hold those keys. A record kind is a row in each of the 10 tables of `TASK_TABLES` plus one in each of the
   2 cli tables, `PREDICT_WRITERS` and `DATA_LISTERS`;
-  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. All seven tasks write a record, `pretrain`
-  the sixth (plan 5c6cc105 D-009; its predictor, served function and export check are `api/pretrain_predictor.py`, D-013) and
-  `language_model_pretraining` the seventh (plan 7806a290: `api/text_predictor.py`): do
+  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. All eight tasks write a record, `pretrain`
+  the sixth (plan 5c6cc105 D-009; its predictor, served function and export check are `api/pretrain_predictor.py`, D-013),
+  `language_model_pretraining` the seventh (plan 7806a290: `api/text_predictor.py`) and `text_classification` the eighth (the same
+  module, whose two predictors share a base class and the language model's export functions): do
   not write a partial record for a new task, a record that exists makes `load_model` dispatch on the task's rows. Do not add an `elif task ==` to
   `load_model`, `input_shape_of`, `_run_on_zeros` or the predict command. The help text of `cli.PREDICT_OPTIONS` and
   `cli.EXPORT_NOTES` names every task's output; `test_export_per_family.py` pins phrases of it.

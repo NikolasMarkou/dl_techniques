@@ -19,7 +19,8 @@ the real models in the PRODUCTION ORDER (the target built first, then the source
 Step 10 (the ``text_classification`` task exists): the same refusals come from the real task before the claim (exit 2, ``out``
 unclaimed), and a real tiny ``gpt2_lm`` run seeds a real ``gpt2`` run (``cross_task``): copied is every weight of the source (derived
 by counting the archive), reset is the 8 variables of the head, the run's own epoch zero is the loaded weights' accuracy and the bar
-must beat it. The classifier record, and with it a classifier as a SOURCE, is Step 11's.
+must beat it. Step 11 (the classifier writes ``task.json``): the ``init`` block is in the record and a resume keeps it; a classifier run
+as a SOURCE is in ``test_text_classification_predictor_and_export.py``.
 
 Tests write only under ``tmp_path``.
 """
@@ -347,6 +348,24 @@ def test_a_gpt2_run_starts_from_a_language_model_run_and_the_counts_are_the_arch
     assert decoder == sorted(source)
     for path in decoder:
         np.testing.assert_array_equal(target[path], source[path], err_msg=path)
+
+
+def test_the_init_block_is_in_the_record_and_a_resumed_run_reports_it_without_opening_the_source(still, tmp_path):
+    record = json.loads((still.out / "task.json").read_text())
+    assert predictor.record_problems(record) == [] and record["task"] == TASK and record["init"] == still.summary["init"]
+    run_dir = tmp_path / "run"
+    shutil.copytree(still.out, run_dir)
+    (run_dir / "results_summary.json").unlink()  # a run whose reporting died: resumed to report, its block read from its own record
+    moved = still.source.with_name("moved_away")
+    still.source.rename(moved)
+    try:
+        keras.backend.clear_session()
+        train_text_classification(**classifier_request(run_dir, FAMILY, init=str(still.source), epochs=1, optim_args=STILL,
+                                                      resume_interrupted=True))
+    finally:
+        moved.rename(still.source)
+    resumed = json.loads((run_dir / "results_summary.json").read_text())
+    assert resumed["reporting_resumed"] is True and resumed["init"] == still.summary["init"] and json.loads((run_dir / "task.json").read_text()) == record
 
 
 def test_the_two_synthetic_banks_are_other_texts_so_the_split_is_different_data(still):

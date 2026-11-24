@@ -661,6 +661,12 @@ HEAD_KEYS: Dict[str, Tuple[str, ...]] = {
     # `head_differs` indexes this table by task, so the language task needs its row, but the key never fires: the tokenizer is a
     # `fixed` key of the family (a source of another tokenizer is refused before the claim), so a same-task head always agrees.
     "language_model_pretraining": ("tokenizer",),
+    # DECISION plan-2026-11-24T092348-7806a290/D-062
+    # A text classifier's head means its CLASS NAMES (the same two outputs under other names, or in another order, are another head), so a
+    # same-task source whose record names others has its head reset. The tokenizer is no key here: it is `fixed` by both families, so a
+    # source of another one is refused before the claim. Do NOT add "tokenizer" "for symmetry" (it never fires) and do NOT drop the row:
+    # `head_differs` indexes this table for every same-task transfer, which a classifier run now is (a source of its own family).
+    "text_classification": ("class_names",),
 }
 
 #: The source record's keys the ``init`` block keeps as its geometry (those its task's record has). The language record's

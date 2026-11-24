@@ -24,7 +24,8 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     and returns the raw denoised image (``EXPORT_RULES`` of ``train.api.predictor``, which also
     refuses the cells of its table that do not hold); a forecasting model takes RAW windows ``(batch, lookback, channels)``
     and returns the forecast in the series' units (``ExportRule.served``, :func:`train.api.forecast_predictor.served`); a language
-    model takes float32 token ids ``(batch, seq_len)`` and returns the next-token logits (:func:`train.api.text_predictor.export_note`);
+    model takes float32 token ids ``(batch, seq_len)`` and returns the next-token logits (:func:`train.api.text_predictor.export_note`),
+    a text classifier the same ids and returns its class logits (:func:`train.api.text_predictor.classifier_export_note`);
     ``<out>.task.json`` is written beside it and
     the log says so. Exit 0 and ONLY the written path on stdout (whatever Keras prints while
     exporting goes to stderr, failed runs too), else 2.
@@ -72,7 +73,9 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     For a LANGUAGE-MODEL run ``data`` is one ``.txt`` file (one document per line) or one ``.jsonl`` file (a ``{"text": ...}``
     object per line), and ``out`` is a new JSON file with one ``{"index", "n_tokens", "mean_nll", "perplexity", "next_tokens"}``
     per document (:func:`train.api.text_predictor.write_predictions`); a file that cannot be read as documents is refused before the
-    model is loaded.
+    model is loaded. For a TEXT-CLASSIFICATION run ``data`` is the same file and ``out`` is a new JSON list with one
+    ``{"index", "labels", "scores"}`` per document, the class names best first and their probabilities, as for an image
+    (:func:`train.api.text_predictor.write_labels`).
 
 ``convert <dataset> key=value ...``
     Writes a source dataset as index masks and CSV listings the segmentation task reads, outside the
@@ -193,7 +196,7 @@ from .errors import ConfigError, ConfigValidationError, DLTrainError
 from .forecast_predictor import FLAT_WINDOW_EXPORT_NOTE
 from .predictor import (
     CLASSIFICATION, CLASSIFICATION_EXPORT_REFUSALS, DENOISING, DEPTH, FORECASTING, LANGUAGE_MODEL, PRETRAIN, SEGMENTATION,
-    known_tasks_line, record_beside,
+    TEXT_CLASSIFICATION, known_tasks_line, record_beside,
 )
 from .pretrain_predictor import EXPORT_REFUSALS as PRETRAIN_EXPORT_REFUSALS
 
@@ -363,11 +366,17 @@ EXPORT_NOTES = (
     "a shorter text with the pad id and read the real positions only (the model is causal, so the padding cannot change them).",
     "Every format is written; measured on valid ids against the model (untrained: a tiny one, and one at the 50,261-id vocabulary) the",
     "files differ by at most 5e-7 of the largest logit (tflite is written with built-in operators, keras is exact).",
+    "",
+    "a text classifier takes float32 token ids (batch, seq_len) at the seq_len in <out>.task.json only, as a language model does (each id a",
+    "whole number written as a float, from the tokenizer in that file): a row is the [CLS] id, the first seq_len - 1 ids of the text and the pad",
+    "id up to the length, and the model derives its padding mask from the pad id. It returns the raw logits (batch, classes), one per class",
+    "name in that file, in that order (no softmax). Every format is written; measured on valid rows against the model (untrained, bert and gpt2",
+    "at the tiny scale and at the 50,261-id vocabulary, logits of 0.05 to 0.4) the files differ by at most 2e-7 (tflite: built-in operators).",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
-    Option("data", "an image file, or a directory of images (searched recursively); a forecasting model takes a csv file or a .npy or .npz array of windows; a language model a .txt file (one document per line) or a .jsonl file (a {\"text\": ...} object per line)"),
-    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts; a depth model a directory of float32 .npy relative-disparity maps and an index.json; a pretrain model a directory of float32 .npy patch-token embeddings (N, width) and an index.json; a language model one JSON file with n_tokens, mean_nll, perplexity and the five most likely next tokens of each document)"),
+    Option("data", "an image file, or a directory of images (searched recursively); a forecasting model takes a csv file or a .npy or .npz array of windows; a language model or a text-classification model a .txt file (one document per line) or a .jsonl file (a {\"text\": ...} object per line)"),
+    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts; a depth model a directory of float32 .npy relative-disparity maps and an index.json; a pretrain model a directory of float32 .npy patch-token embeddings (N, width) and an index.json; a language model one JSON file with n_tokens, mean_nll, perplexity and the five most likely next tokens of each document; a text-classification model one JSON list of the class names and scores of each document)"),
 )
 
 
@@ -634,8 +643,20 @@ def _predict_documents(model_path: Path, record: Mapping[str, Any], files: List[
     return 0
 
 
+def _predict_labelled_documents(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the class names and scores of the documents of the one file ``files`` holds as one JSON list into the new path ``out``."""
+    from .predictor import load_model
+    from .text_predictor import read_documents, write_labels
+
+    documents = read_documents(files[0])  # a file that cannot be read is refused before the model is loaded
+    write_labels(load_model(model_path), documents, out)
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
 #: What ``predict`` lists from ``data=``, per task: ``lister(data) -> files``. The image tasks list images (recursively); a
-#: forecasting run takes one csv or numpy file and a language run one ``.txt`` or ``.jsonl`` file. The keys are those of :data:`PREDICT_WRITERS`.
+#: forecasting run takes one csv or numpy file and a language or text-classification run one ``.txt`` or ``.jsonl`` file. The keys are those of
+#: :data:`PREDICT_WRITERS`.
 DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
     CLASSIFICATION: _image_files,
     SEGMENTATION: _image_files,
@@ -644,6 +665,7 @@ DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
     DEPTH: _image_files,
     PRETRAIN: _image_files,
     LANGUAGE_MODEL: _text_files,
+    TEXT_CLASSIFICATION: _text_files,
 }
 
 #: What ``predict`` writes, per task: ``writer(model_path, record, files, out) -> exit code``. A task
@@ -658,6 +680,7 @@ PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path],
     DEPTH: _predict_disparity,
     PRETRAIN: _predict_embeddings,
     LANGUAGE_MODEL: _predict_documents,
+    TEXT_CLASSIFICATION: _predict_labelled_documents,
 }
 
 
