@@ -1,6 +1,6 @@
 # Phase 4g: start a run from an earlier run's weights (`init`), for every task and family
 
-Status: shipped (plan 0fd54b91, branch `train-api/phase-4g`, 2026-11-18), its GPU gate run (numbers in `src/train/README.md`); extended by Phase 4h (plan 5c6cc105, branch `train-api/phase-4h`, 2026-11-23: pretrain as source and target, the `beit` and `energy_transformer` classifiers; code done, its GPU gate run, numbers in `src/train/README.md` under "Measured: the Phase 4h gate"), whose changes close Section 0. Sections 1 to 11 are the design as written before the plan; Section 0 says what shipped where it differs, each change named by the plan's decision (D-NNN of plan 0fd54b91). The user-facing rules and the shipped refusal messages are in `src/train/README.md` ("Starting from an earlier run: `init`"), the contributor's side in `src/train/AGENTS.md`. Placement: after Phase 4f (`depth_estimation`, branch `train-api/phase-4f`) and before the language tasks. Origin: the user asked whether a trained depth model can be reused to fine-tune at a higher resolution, then asked for a general phase instead of a depth-only patch (4f D-020).
+Status: shipped (plan 0fd54b91, branch `train-api/phase-4g`, 2026-11-18), its GPU gate run (numbers in `src/train/README.md`); extended by Phase 4h (plan 5c6cc105, branch `train-api/phase-4h`, 2026-11-23: pretrain as source and target, the `beit` and `energy_transformer` classifiers; code done, its GPU gate run, numbers in `src/train/README.md` under "Measured: the Phase 4h gate"), whose changes close Section 0 up to Phase 4h. Phase 4i (plan 7806a290, branch `train-api/phase-4i`, first half: code done, no GPU gate yet, `text_classification` not built) adds the language model as a source and a target of its own family only (Section 0, "Phase 4i"). Sections 1 to 11 are the design as written before the plan; Section 0 says what shipped where it differs, each change named by the plan's decision (D-NNN of plan 0fd54b91). The user-facing rules and the shipped refusal messages are in `src/train/README.md` ("Starting from an earlier run: `init`"), the contributor's side in `src/train/AGENTS.md`. Placement: after Phase 4f (`depth_estimation`, branch `train-api/phase-4f`) and before the language tasks. Origin: the user asked whether a trained depth model can be reused to fine-tune at a higher resolution, then asked for a general phase instead of a depth-only patch (4f D-020).
 
 Evidence. The numbers in this design were measured while Phase 4f was planned, by three read-only passes: a shape matrix of 156 rows (each family's smallest variant built at a source setting and at a changed size, head, channel count, lookback, horizon, variant or task, its weights compared path by path and shape by shape; CPU only, about 6 minutes, nothing written under `results/`), a read of the existing warm-start code (the `checkpoint` key, `load_weights_from_checkpoint`, the legacy trainers' flags, what a run directory holds), and a pass over cross-task pairs, split overlap, bars, the optimizer and prior art. Those notes are planning scratch outside the repository, so every fact this design rests on is stated where it is used; a `file:line` reference points into `src/` as it was at writing time.
 
@@ -84,6 +84,17 @@ D-020, 4g-D17 D-021, load cost D-022. Kept as designed: 4g-D2, 4g-D5, 4g-D8, 4g-
 - **Two premises of 4g-D17 were false.** "No local reference to check it against": unilm's `beit/run_class_finetuning.py` is the
   reference, run verbatim into a test fixture (D-004). "Nothing in 4g's engine changes for it": `HEAD_KEYS`, `GEOMETRY_KEYS`,
   `GEOMETRY_NAMES`, the resample lookup and the cross-task pins changed (D-005, D-008, D-036, D-038).
+
+**Phase 4i, first half (plan 7806a290; D-NNN below are that plan's).** The language model is an `init` source and target of its own family:
+
+- **`gpt2_lm` declares `fixed=("vocab_size", "tokenizer")` and nothing else (D-040).** The tokenizer's digest and the vocabulary are
+  `GEOMETRY_NAMES`, so a source of another tokenizer is refused before the claim naming both; `seq_len` is not fixed (no weight depends on
+  it: a source of 32 positions seeds a run of 64 with 30 of 30 weights copied), and the row has no head and no source of another family.
+  `GEOMETRY_KEYS` gains `seq_len` and `vocab_size` but not `tokenizer`, because the pretrain record has a key of that name and every
+  earlier `init` block would change (D-041); `HEAD_KEYS` has a language row that never fires.
+- **The split unit is documents (D-042) and the bar keeps `min(unigram, loaded)` as pretrain's does (4h D-012).** `init_overlap` rebuilds the
+  source's train documents from its `config.json` (seed, split, cap, dataset); `Evaluation.loaded` stays `None`, so a loss is not judged as
+  a score. The seventh record kind is the language record; a `gpt2` classifier started from it is the plan's second half, not built.
 
 ---
 
@@ -255,7 +266,7 @@ Relations recorded: `same_split`, `different_data` (other builtin dataset, anoth
 | Input-channel adaptation (timm's `adapt_input_conv`, RGB to grey) | No consumer: segmentation, depth and pretrain fix RGB, a grey denoiser would be the only one | Not planned; refused by name as a stem change |
 | Width or block-type variant changes | Under 8 percent of weights fit | Not planned; refused by the weight-level check |
 | Cross-family pairs beyond the four declared | No shared architecture in the registry | A new family row declares its `sources` |
-| DINO (v1), language tasks, Phase 5 wrappers | Not tasks yet | Their own phases |
+| DINO (v1), `text_classification`, Phase 5 wrappers | Not tasks yet (`language_model_pretraining` shipped in Phase 4i, first half) | Their own phases |
 
 ---
 

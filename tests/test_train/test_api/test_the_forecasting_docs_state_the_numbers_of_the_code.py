@@ -68,6 +68,10 @@ def test_the_number_of_tasks_is_the_registrys_in_both_documents(world):
     sentence = f"It has {words[len(registry.TASKS)]} tasks"
     assert FORECASTING in registry.TASKS
     assert sentence in README.read_text() and sentence in AGENTS.read_text()
+    # two more sentences count the tasks: the file form of the data group is every task's, and every task writes a record
+    count = words[len(registry.TASKS)]
+    assert f"holds for all {count} tasks" in " ".join(README.read_text().split())
+    assert f"All {count} tasks write a record" in " ".join(AGENTS.read_text().split())
 
 
 def test_every_other_n_tasks_phrase_counts_the_tasks_of_the_registry_but_one(world):
@@ -242,6 +246,69 @@ def test_the_readme_gate_section_names_the_code_head_it_ran_on_and_says_the_firs
     assert "the first gate, run on HEAD `1904f07a8`" in gate and "is superseded and every number below replaces its numbers" in gate
     assert "PENDING" not in text and "NOT YET MEASURED" not in text
     assert gate.count("| G1 |") == 1 and gate.count("| G2 |") == 1 and gate.count("| G3 |") == 1 and gate.count("| G4 |") == 1
+
+
+def test_the_language_section_states_the_numbers_of_the_code():
+    """Plan 7806a290 step 7: the variants, the recipe, the vocabularies, the id limit and the pinned files of the language section are the code's."""
+    import inspect
+
+    from dl_techniques.models.language.gpt2.gpt2 import GPT2
+    from train.api import text_args, text_models, text_predictor, text_tokenizer as tt
+    from train.api.exporting import TFLITE_CHECK_RTOL
+    from train.api.trainer import SMOKE_MAX_SAMPLES
+
+    text = " ".join(README.read_text().split())
+    table = GPT2.MODEL_VARIANTS
+    tiny, bigger = table["tiny"], sorted((name for name in table if name != "tiny"), key=lambda name: table[name]["embed_dim"])
+    rows = [f"`{name}` ({table[name]['embed_dim']:,}, {table[name]['depth']}, {table[name]['num_heads']})" for name in bigger]
+    assert len({table[name]["max_seq_len"] for name in bigger}) == 1, "the README says the last four share one position table"
+    assert (f"`tiny` ({tiny['embed_dim']} wide, {tiny['depth']} blocks, {tiny['num_heads']} heads, a position table of {tiny['max_seq_len']} rows), "
+            f"{', '.join(rows[:-1])} and {rows[-1]}, the last four with {table[bigger[0]]['max_seq_len']:,} rows") in text
+    recipe, optim = text_models.LM_RECIPE, text_models.LM_RECIPE["optim_args"]
+    assert (optim["optimizer"], optim["decay_over"]) == ("adamw", "total")
+    assert (f"AdamW at {optim['lr']:.0e}".replace("e-0", "e-") + f", weight decay {optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epoch, "
+            f"cosine decay over the whole run, a global gradient clip of {optim['global_clipnorm']:.1f}, batch {recipe['batch_size']}, "
+            f"{recipe['epochs']} epochs, patience {recipe['checkpoint_args']['early_stopping_patience']}.") in text
+    ascii95, gpt2 = tt.tokenizer_spec(tt.ASCII95), tt.tokenizer_spec(tt.GPT2)
+    assert (gpt2.cls_id, gpt2.sep_id, gpt2.pad_id, gpt2.mask_id) == tuple(range(gpt2.n_vocab, gpt2.n_vocab + 4))
+    assert f"a character tokenizer: {ascii95.vocab_size} ids, no file" in text
+    assert (f"{gpt2.n_vocab:,} ids, the end-of-text id {gpt2.eot_id:,} among them, then `cls`, `sep`, `pad` and `mask` at {gpt2.cls_id:,} to "
+            f"{gpt2.mask_id:,}, so `vocab_size` is {gpt2.vocab_size:,}") in text
+    assert f"the library's default of {inspect.signature(GPT2.__init__).parameters['vocab_size'].default:,}" in text
+    assert f"exact below 2^24 = {text_predictor.FLOAT_ID_LIMIT:,}" in text and text_predictor.FLOAT_ID_LIMIT == 2 ** 24
+    assert text_predictor.TOP_K == 5 and "the five most likely ids" in text
+    assert f"export check and its tests allow {TFLITE_CHECK_RTOL:.0e}".replace("e-0", "e-") in text
+    assert f"64 float32 steps at those 183 batches" in text and forecast_run.tie_band(183) == 64
+    assert f"synthetic: {text_args.SYNTHETIC_TRAIN_DOCUMENTS} train and {text_args.SYNTHETIC_TEST_DOCUMENTS} test when null" in text
+    assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in text and f"`data.max_samples` {SMOKE_MAX_SAMPLES} when it is null" in text
+    assert all(name in text for name, _ in tt.GPT2_FILES) and tt.DEFAULT_TOKENIZER_DIR in text
+
+
+def test_the_agents_counts_about_the_tasks_their_hooks_and_the_language_record_are_the_codes(world):
+    """Plan 7806a290 step 7: five sentences that counted something no test read (a plant of each was green before this test)."""
+    import importlib
+    import inspect
+
+    from train.api.trainer import TaskTrainer
+
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    agents, readme = " ".join(AGENTS.read_text().split()), " ".join(README.read_text().split())
+    trainers = []
+    for spec in BUILTIN_TASKS:
+        module = importlib.import_module(spec.config_class.partition(":")[0])
+        trainers.append(next(v for v in vars(module).values() if inspect.isclass(v) and issubclass(v, TaskTrainer) and v.__module__ == module.__name__))
+    users = [trainer for trainer in trainers if {"fit_kwargs", "resume_stream"} <= set(vars(trainer))]
+    assert f"Both hooks have {words[len(users)]} users today" in agents
+    staged = [path for path in (ROOT / "tests/test_train/test_api").glob("test_*_task.py") if "def test_the_task_does_not_name_a_stage" in path.read_text()]
+    assert f"pinned for {words[len(staged)]} tasks only" in agents
+    assert f"`ExportRule({', '.join(predictor.ExportRule._fields)})`" in agents
+    ordinal = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")[list(predictor.RECORD_KEYS).index("language_model_pretraining")]
+    start = agents.index(f"a language-model record (the {ordinal} kind")
+    keys = [key for key in predictor.RECORD_KEYS["language_model_pretraining"] if key not in ("schema_version", "task", "model", "family", "variant")]
+    assert all(f"`{key}`" in agents[start:start + 700] for key in keys) and f"the {ordinal} record kind" in readme
+    compared = predictor.DATA_KEYS["language_model_pretraining"]
+    resume = "a resume compares " + ", ".join(f"`{key}`" for key in compared[:-1]) + f" and `{compared[-1]}`"
+    assert resume in agents[start:start + 900] and resume in readme, "the keys a resume compares"
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")
