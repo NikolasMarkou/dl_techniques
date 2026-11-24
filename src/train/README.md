@@ -1412,7 +1412,9 @@ result = train_language_model_pretraining(out="auto", model="gpt2_lm/tiny", data
   IMDB at the defaults (gpt2, `seq_len` 256, batch 16, seed 42): 22,502 train and 2,498 selection reviews, 26,328 train windows (1,645 steps
   an epoch), 2,920 selection windows (183 batches), 28,581 test windows. A resume CONTINUES the stream at the settled step, also from a copy
   taken inside an epoch: its first batch is the one the unkilled run reads there (a test kills a run twice and compares digests of the
-  batches `fit` reads), where the other stream tasks derive a new stream seed.
+  batches `fit` reads), where the other stream tasks derive a new stream seed. The shared sentences about a resume from such a copy (the
+  help of `resume_interrupted` and of `checkpoint_args.backup_every_steps`, the `Resume:` log line, the summary note) say the batches come
+  "from a fresh pass of the data" and that examples repeat or are missed: wrong for this task, and a known open defect of the shared sequence.
 * **The bar and its two baselines.** `success_value` is the lowest `val_loss` of the selection windows and `success_threshold` the smaller of
   two numbers: the UNIGRAM, the entropy of the selection targets (what a model that ignores its context can do; counted from the token
   counts and never evaluated, since a constant model over 50,261 ids is 0.4 GB of logits a forward; 7.1161 nats, perplexity 1,231.6, on the

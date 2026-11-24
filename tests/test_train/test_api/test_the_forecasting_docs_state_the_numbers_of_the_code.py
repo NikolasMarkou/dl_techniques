@@ -282,6 +282,13 @@ def test_the_language_section_states_the_numbers_of_the_code():
     assert f"synthetic: {text_args.SYNTHETIC_TRAIN_DOCUMENTS} train and {text_args.SYNTHETIC_TEST_DOCUMENTS} test when null" in text
     assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in text and f"`data.max_samples` {SMOKE_MAX_SAMPLES} when it is null" in text
     assert all(name in text for name, _ in tt.GPT2_FILES) and tt.DEFAULT_TOKENIZER_DIR in text
+    # the open defect the stream bullet names stays named while the shared sentences still say it (D-049): a fix turns this RED
+    from train.api.args import CheckpointArgs
+    from train.api.config import BACKUP_HELP
+
+    assert "wrong for this task, and a known open defect of the shared sequence" in text
+    assert all("from a fresh pass of the data" in sentence for sentence in (
+        BACKUP_HELP, {f.name: f for f in dataclasses.fields(CheckpointArgs)}["backup_every_steps"].metadata["help"]))
 
 
 def test_the_agents_counts_about_the_tasks_their_hooks_and_the_language_record_are_the_codes(world):
