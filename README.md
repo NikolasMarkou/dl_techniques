@@ -93,9 +93,9 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>5. Enterprise-Grade Training & Deployment Infrastructure</b></summary>
 <p>
 
-- **Accelerated Development with Training Pipelines**: **~70 ready-to-use `train_*.py` entry points across ~74 trainer directories** (`src/train/`, plus the shared `src/train/common/` library and 2 family containers `train/language/`, `train/time_series/`), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
+- **Accelerated Development with Training Pipelines**: **97 ready-to-use `train_*.py` entry points across 75 trainer directories** (`src/train/`, plus the shared `src/train/common/` library and 2 family containers `train/language/`, `train/time_series/`), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
 - **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager (`VisualizationManager`), and enhanced model serialization with custom object support.
-- **Assured Reliability**: An extensive **1,558-module test suite** (`tests/`) ensures the correctness and stability of every component, with dedicated fixtures for mixed-precision and TF32-sensitive regressions. It mirrors `src/dl_techniques/` directory-for-directory, with the deliberate exception of `tests/test_models/`, which stays flat rather than following the model family nesting.
+- **Assured Reliability**: An extensive **1,775-module test suite** (`tests/`, counted as `test_*.py` files) ensures the correctness and stability of every component, with dedicated fixtures for mixed-precision and TF32-sensitive regressions. It mirrors `src/dl_techniques/` directory-for-directory, with the deliberate exception of `tests/test_models/`, which stays flat rather than following the model family nesting.
 - **Verified Against the Source**: Where a reference implementation exists, ports are checked against it numerically — several packages commit the reference itself as an executable oracle (e.g. `src/dl_techniques/layers/matching/` against `tests/lightglue_reference_numpy.py`) rather than asserting parity in prose.
 </p>
 </details>
@@ -168,6 +168,7 @@ Training scripts need a non-interactive matplotlib backend on headless machines:
 
 ```bash
 MPLBACKEND=Agg python -m train.<pipeline>.train_<script> [args]
+MPLBACKEND=Agg python -m train help    # the train.api command line, Quick Start item 7
 ```
 
 > **No trained weights ship with this repository.** Training outputs live under `results/`, which is gitignored, so a fresh clone contains source, tests and prose only. Any `results/<run>/final_model.keras` path quoted in a trainer default, a paper or an application is a local artifact — you train it yourself first. See `REPO_MAP.md` § *What a fresh clone actually contains*.
@@ -335,6 +336,34 @@ adjacency_matrix = keras.Input(shape=(None, None))
 node_embeddings = gnn([node_features, adjacency_matrix])
 ```
 
+### 7. Train, Predict and Export Through One Command Line
+
+`python -m train` trains, predicts and exports with `key=value` arguments checked against strict configs: an unknown or invalid key exits 2 before the run directory is created. Run it from the repo root.
+
+```bash
+python -m train help                                   # commands and tasks
+python -m train list_tasks
+python -m train list_models task=image_classification
+python -m train image_classification help              # every key, its type and default
+python -m train image_classification out=results/vit_pico_c10 model=vit/vit_pico data.dataset=cifar10 epochs=10
+python -m train predict model=results/vit_pico_c10 data=images/ out=predictions.json
+python -m train export model=results/vit_pico_c10 out=vit_pico_c10.keras format=keras
+```
+
+The same steps from Python (an `out` already used is refused, so run one form or the other):
+
+```python
+from train.api import train_image_classification, load_model, export
+
+train_image_classification(out="results/vit_pico_c10", model="vit/vit_pico",
+                           data={"dataset": "cifar10"}, epochs=10)
+predictor = load_model("results/vit_pico_c10")         # .model, .record and .predict
+answer = predictor.predict("images/cat.png", top_k=5)  # answer["labels"], answer["scores"]
+export(model=predictor.model, out="vit_pico_c10.keras", format="keras", record=predictor.record)
+```
+
+[`src/train/README.md`](./src/train/README.md) covers every task, its keys, resume, `init`, predict and export; [`src/train/AGENTS.md`](./src/train/AGENTS.md) covers adding a task or a model family.
+
 ---
 
 ## In-Depth Documentation
@@ -418,10 +447,10 @@ dl_techniques/
 │   ├── initializers/          # Structured initializers (Gabor, Haar, orthonormal, KAN)
 │   ├── constraints/           # Weight constraints
 │   └── utils/                 # Core utilities, loggers, masking, and data handlers
-├── src/train/                 # ~70 train_*.py entry points across ~74 trainer directories
+├── src/train/                 # 97 train_*.py entry points across 75 trainer directories
 ├── src/applications/          # Deployable apps (today: bias_free_denoiser, Streamlit)
 ├── research/                  # 120+ in-depth articles, guides, and LaTeX papers
-├── tests/                     # 1,558 test modules mirroring src/dl_techniques/
+├── tests/                     # 1,775 test modules mirroring src/dl_techniques/
 └── REPO_MAP.md
 ```
 
