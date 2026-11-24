@@ -1,45 +1,65 @@
-r"""Geodesic normalization (GeoNorm), in :class:`GeoNorm`: the residual update of a
-transformer sublayer taken as a step along a geodesic of the hypersphere, not as
-``Norm(x + s)``.
+r"""
+Geodesic normalization (:class:`GeoNorm`) for hyperspherical residual updates.
 
-Post-Norm computes ``Proj(x + alpha * s)``, a projected-gradient step: the sublayer
-output ``s`` is an estimated gradient direction, the residual add leaves the
-sphere, and the normalization projects back. Projection distorts the step and
-puts kinks in the trajectory of the hidden state. GeoNorm instead projects ``s``
-onto the tangent space at ``x`` and moves along the great circle through ``x`` in
-that direction, which stays on the sphere of radius ``||x||`` by construction::
+In a standard Post-Norm transformer sublayer, ``Norm(x + alpha * s)`` acts as a
+projected-gradient step: the residual addition ``x + alpha * s`` leaves the
+hypersphere, and normalization projects back onto it, distorting the step
+direction and introducing kinks in the hidden-state trajectory. :class:`GeoNorm`
+replaces both the residual addition and the normalization with a single geodesic
+step along the great circle of radius ``||x||`` in the tangent direction of
+``s``::
 
-    v     = s - (x . s) / ||x||^2 * x                    tangent projection
-    theta = alpha_k * min(||v|| / ||x||, clamp)          rotation angle
+    v     = s - ((x . s) / ||x||^2) * x                 # tangent projection
+    theta = alpha_k * min(||v|| / ||x||, clamp)         # rotation angle
     out   = cos(theta) * x + ||x|| * sin(theta) * v / ||v||
 
-Norms run per token over the last axis. ``out`` has the same norm as ``x`` and the
-layer has no trainable weights. ``alpha_k = alpha * decay(k)`` follows the paper's
-layer-wise step decay, with ``k`` the 0-based ``layer_idx`` of the transformer
-block (both sublayers of one block share it)::
+Norms are computed per token along the last axis. By construction, ``out`` lies
+on the same sphere as ``x`` (``||out|| == ||x||``) when ``||x||`` and ``||v||``
+exceed ``epsilon``, and the layer owns no trainable weights.
 
-    harmonic   1 / (k + 1)          (the paper's best)
+Transformer Block Usage
+-----------------------
+Inside block ``k`` (0-based ``layer_idx``), both the attention and FFN sublayers
+replace ``Norm(x + sublayer(x))`` with::
+
+    x = geo_norm([x, attention(x)], layer_idx=k)
+    x = geo_norm([x, ffn(x)], layer_idx=k)
+
+Unlike LayerNorm or RMSNorm, ``GeoNorm`` neither centers features across the
+hidden dimension nor rescales ``||x||`` to ``sqrt(d)`` or ``1``. Whatever L2
+norm each token has upon entering the first block is preserved across depth, so
+input embeddings (or an initial stem norm) set the operating sphere radius.
+
+Step-Size Decay and Clamping
+----------------------------
+The effective step scale ``alpha_k = alpha * decay(k)`` decays with block depth
+``k`` (shared by both sublayers of block ``k``; defaults to ``k = 0`` if omitted)::
+
+    harmonic   1 / (k + 1)          (paper default / best)
     sqrt       1 / sqrt(k + 1)
-    linear     (T - k) / T          T = total_layers
+    linear     (T - k) / T          (requires T = total_layers; expects 0 <= k < T)
 
-The clamp (default ``pi / 4``, the paper's best) is applied to the raw ratio
-``||v|| / ||x||`` BEFORE the decay, so under the harmonic schedule the largest
-rotation at block ``k`` is ``alpha * clamp / (k + 1)``. ``clamp=None`` disables it.
+The angular ``clamp`` (default ``pi / 4``, the paper's best) caps the raw ratio
+``||v|| / ||x||`` *before* multiplying by ``alpha_k``. Under ``harmonic`` decay,
+the maximum rotation at block ``k`` is therefore ``alpha * clamp / (k + 1)``.
+Setting ``clamp=None`` disables clamping.
 
-This is a two-input layer, ``call([x, s], layer_idx)``, so it is not a key of
-:func:`~dl_techniques.layers.norms.factory.create_normalization_layer`, whose
-contract is one tensor in and one out. :class:`PolarWeightNorm` is the other
-norm in this package that is not a factory type.
+Factory Exclusion & Paper Notes
+-------------------------------
+Because ``call([x, s], layer_idx)`` takes two tensors instead of one,
+:class:`GeoNorm` is not registered in
+:func:`~dl_techniques.layers.norms.factory.create_normalization_layer` (alongside
+:class:`PolarWeightNorm`, which also breaks the single-tensor norm contract).
 
-Differences from the paper's Appendix D listing, which does not run as printed:
-its ``clamp`` constructor argument is ignored, its harmonic branch assigns to
-``theta_attn`` so no decay applies, its default method name is misspelled, and it
-creates integer ``scale`` and ``bias`` parameters although the text states that
-GeoNorm adds no trainable parameters. This layer follows the text.
+This implementation follows the paper's prose rather than its Appendix D code
+listing, which does not run as printed (its ``clamp`` argument is unused, its
+harmonic branch assigns to ``theta_attn`` so no decay applies, its default
+method name is misspelled, and it creates integer ``scale``/``bias`` parameters
+despite the text stating that GeoNorm adds no trainable parameters).
 
 References:
-    - Zheng et al., 2026. GeoNorm: Unify Pre-Norm and Post-Norm with Geodesic
-      Optimization. (https://arxiv.org/abs/2601.22095)
+    - Zheng et al., 2026. *GeoNorm: Unify Pre-Norm and Post-Norm with Geodesic
+      Optimization*. https://arxiv.org/abs/2601.22095
 """
 
 import math
