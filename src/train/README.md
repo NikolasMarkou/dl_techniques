@@ -861,7 +861,9 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code and their GPU gate has run (Phase 4h,
   plan 5c6cc105, with the gate under "Measured: the Phase 4h gate" below). Named and not started: the language tasks (the
   next user of `fit_kwargs` and `resume_stream`, after `time_series_forecasting` and `depth_estimation` below), DINO, the BEiT
-  tokenizer as a method of its own (`beit_tokenizer`), and the Phase 5 wrappers (the repo map entry among them).
+  tokenizer as a method of its own (`beit_tokenizer`). `load_model`, `export`, `list_models` and `list_tasks` were built in
+  the earlier phases and stay on `train.api` (since plan 98c9aac5 `list_tasks` and `list_models` register the built-in tasks
+  and families themselves, so they answer in a fresh process), and the repo map entry is `REPO_MAP.md`, section "Entry points".
 
 **`time_series_forecasting`** (plan 3a8319ef): trains a forecaster on windows of a series, either a synthetic bank of the library's
 generator patterns or one csv of your own. `out`, `model` and `data` are required (every key of `data` has a default, but the group `data` itself must be named: `data.format=builtin` is the synthetic bank); `data.lookback` and `data.horizon` come from the family's recipe. The family chooses the model. Every series is cut BY TIME into a training slice, a slice that selects the best epoch and a

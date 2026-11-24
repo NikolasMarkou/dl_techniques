@@ -218,7 +218,8 @@ research harness (numbered experiment scripts plus its own `PAPER.md`), and
 `src/train/rms_variants_train/` is a normalization-layer ablation sweep (`sweep.py`,
 `RESULTS.md`), and `src/train/mean_shift/` is the harness for the Mode Pooling and MeanShift
 Attention experiments (a gated subprocess per cell, `rows.jsonl`, `report.py`, `README.md`).
-`src/train/common/` is a shared library, not a trainer. Read `src/train/` as
+`src/train/common/` is a shared library, not a trainer. `src/train/api/` is the front door
+(`python -m train`, below), not a trainer. Read `src/train/` as
 "runnable pipelines", not "one directory per model".
 
 **3. `models/time_series/` is the one family whose `__init__.py` re-exports its children.**
@@ -266,6 +267,14 @@ or `MPLBACKEND=Agg .venv/bin/python -m train.convunext.train_convunext_segmentat
 For the two nested families the module path carries an extra segment —
 `-m train.time_series.nbeats.train_nbeats`, `-m train.language.colbert.train_colbert_v1`.
 `MPLBACKEND=Agg` is mandatory; matplotlib's interactive backend crashes headless.
+
+**Front door.** Beside the per-model scripts, `python -m train <command|task> key=value` trains,
+predicts and exports through strict configs: `src/train/__main__.py` calls `main` in
+`src/train/api/cli.py`, and Python reaches the same functions with `from train.api import ...`
+(the lazy table in `src/train/api/__init__.py`; the package `train` itself exports nothing).
+`MPLBACKEND=Agg .venv/bin/python -m train help` prints the commands and the registered tasks;
+a relative `out=` starts at the repo root and `out=auto` names a run under `results/`. Read `src/train/README.md` to use it and the
+"Front door" section of `src/train/AGENTS.md` to extend it.
 
 **Why it resolves from any working directory.** The editable install drops a `.pth` file
 into the virtualenv's `site-packages` whose sole content is the absolute path of this repo's
@@ -426,6 +435,7 @@ GUIDE files; the map's job is to route you to the right one, not to paraphrase i
 | Which family is a model in, and what else is in it? | `src/dl_techniques/models/README.md`, then that family's `__init__.py` docstring |
 | How are model packages meant to be structured? | `src/dl_techniques/models/AGENTS.md` |
 | How do I add or run a trainer? | `src/train/AGENTS.md`, then that trainer's own `README.md` |
+| How do I train, predict or export through `python -m train`? | `src/train/README.md`, then the "Front door" section of `src/train/AGENTS.md` |
 | How do the Streamlit apps split GUI from core? | `src/applications/AGENTS.md` |
 | Which loss / metric / optimizer should I use? | the `AGENTS.md` in `src/dl_techniques/losses/`, `.../metrics/`, `.../optimization/` |
 | Which callback should I use — or where is it? | *Where the callbacks actually are*, above, **first**; only then `src/dl_techniques/callbacks/AGENTS.md`, which documents that one package and not the callbacks outside it |

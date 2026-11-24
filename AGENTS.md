@@ -91,6 +91,9 @@ Always set matplotlib to non-interactive mode to avoid X11 crashes on headless/r
 MPLBACKEND=Agg .venv/bin/python -m train.<model>.train_<script> [args]
 ```
 
+The key=value front door over the registered tasks is `MPLBACKEND=Agg .venv/bin/python -m train help`
+(Python: `from train.api import ...`); `src/train/README.md` is its user guide.
+
 ## Core Conventions
 
 - Keras 3 patterns: `@keras.saving.register_keras_serializable()`, `keras.ops` for backend-agnostic ops

@@ -1,7 +1,8 @@
 # Training Scripts
 
 Training pipelines for models in `dl_techniques/models/`. One directory per runnable pipeline; the
-grouped families `time_series/`, `language/`, `vision/`, `vision_language/`, `world_models/`, `experiments/`, keep their trainers one level further down.
+two family containers `time_series/` and `language/` keep their trainers one level further down. The key=value
+front door, `python -m train` and `from train.api import ...`, lives in `api/`: see "Front door" below.
 `REPO_MAP.md` maps the model/trainer/test triangle, including the trainers whose directory name
 differs from the model package they train.
 
@@ -534,7 +535,7 @@ with that reader (file and function) in `READ_BACK_FROM_THE_SAVED_CONFIG` or
 `READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS`. Add a row when you add a config class; never add
 an exemption to green a newly dead field.
 
-## `python -m train` and `train.api`
+## Front door: `train.api` (`python -m train`)
 
 `src/train/api/` is a key=value command line and a Python function over strict configs, beside the
 per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
@@ -542,6 +543,18 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
 `time_series_forecasting` and `depth_estimation` (`python -m train list_tasks` prints them), each
 a `TaskTrainer` subclass in `api/tasks/` (`api/trainer.py:TaskTrainer` holds the hooks and the shared sequence). The
 classification task calls the same `train.common.classification_run` helpers as `train.convnext.common` in the same order.
+
+**Adapter rules, as shipped.** Each names its code home and a test that fails when the rule is broken (`file`::`test`); a rule no test holds is not listed.
+- **Hooks, never stages.** A task is a `TaskTrainer` subclass (`api/trainer.py`) that overrides every name in `REQUIRED_HOOKS`: `tests/test_train/test_api/test_task_trainer.py`::`test_a_task_that_forgets_a_required_hook_is_refused_when_built_and_the_hook_is_named`. It overrides none of `run`, `_resolve`, `_callbacks`, `_summary_head`, `_notes`, `_refuse_before_the_claim`, pinned for three tasks only: `test_the_task_does_not_name_a_stage` in `test_pretrain_task.py`, `test_forecast_task.py`, `test_depth_task.py`.
+- **One row per task and per family.** A task is a `TaskSpec` row in `api/tasks/__init__.py`, a family a `ModelSpec` that `recipes.register_builtin_models` registers, and a family trains only its `ModelSpec.tasks` (`registry.parse_model_name(name, task=)` refuses another): `tests/test_train/test_api/test_denoising_families.py`::`test_a_denoising_family_is_refused_under_another_task`.
+- **Every key is a field, every field is read.** A key is a field of a `StrictConfig` group (`api/config.py`), an unknown one refused by its dotted path: `tests/test_train/test_api/test_strict_config.py`::`test_an_unknown_key_names_its_dotted_path_and_suggests_a_sibling`; a field production never reads fails `tests/test_train/test_config_fields_are_live.py`::`test_config_declares_no_field_it_never_consumes` (its `REGISTERED` rows).
+- **A refusal is a `ConfigError` before the claim.** A request refused without loading data raises `ConfigError` (a `DLTrainError`: exit 2, no traceback) before the run directory is claimed: `tests/test_train/test_api/test_a_bad_request_is_refused_before_the_run_is_claimed.py`::`test_a_wrong_request_is_a_config_error_and_leaves_out_unclaimed`, `tests/test_train/test_api/test_the_cli_exit_codes.py`::`test_a_config_error_exits_two_with_the_message_and_no_traceback`.
+- **Optimizers through `api/optim.py` only**, which calls `dl_techniques.optimization.optimizer_builder`; no module under `api/` names `keras.optimizers`. `optim_args.clipnorm` becomes `gradient_clipping_by_norm_local`, `optim_args.global_clipnorm` `gradient_clipping_by_norm`, both together are refused: `tests/test_train/test_api/test_the_api_source_rules.py`::`test_the_api_source_obeys_the_rule[no_direct_optimizer]`, `tests/test_train/test_api/test_optim_mapping.py`::`test_clipnorm_clips_each_variable_and_not_the_whole`, `test_global_clipnorm_clips_the_whole_and_not_each_variable`, `test_both_clips_together_are_refused`.
+- **The checkpoint direction comes from the metric name.** `metric_args.watch_mode` left at `auto` is set by `train.common.callbacks.resolve_monitor_mode` (`api/args.py`): `tests/test_train/test_api/test_auto_resolution.py`::`test_watch_mode_is_read_from_the_metric_name`, which checks the mode of three metric names and not the call, so a hand-written rule that agrees on those three passes it.
+- **The help path stays light; the source rules hold.** No module under `api/` imports TensorFlow, Keras, yaml, `train.common` or `dl_techniques.models` at module scope, holds an `if __name__` block or a broad `except`, and `cli.py` catches only `DLTrainError`: `tests/test_train/test_api/test_the_api_source_rules.py`::`test_the_api_source_obeys_the_rule` (one parameter per rule), `tests/test_train/test_api/test_cli_help_allocates_nothing.py`::`test_the_help_of_every_command_and_task_leaves_no_heavy_library_in_sys_modules`.
+- **Every family declares a `TransferSpec`** (`ModelSpec.transfer`, read by `init` in `api/init_from.py`): `tests/test_train/test_api/test_init_from_families.py`::`test_every_row_declares_a_spec`.
+- **A record kind is a row of every table.** `task.json` is schema version 2, a task is known to `load_model`, `predict` and `export` only with a row in every table of `predictor.TASK_TABLES`, and version 1 has no reader: `tests/test_train/test_api/test_a_third_task_record_dispatches_by_table.py`::`test_the_real_tasks_have_a_row_in_every_table`, `test_a_task_missing_from_a_table_is_refused_naming_the_known_tasks`; `tests/test_train/test_api/test_task_json_schema_v2.py`::`test_a_record_of_version_1_with_every_key_valid_is_still_refused_there_is_no_reader`.
+- **A seam of the shared sequence does nothing unless a task overrides it** (`TaskTrainer.compile_options`, `selection_start_epoch`, `config_stamps`, `fit_kwargs`): `tests/test_train/test_api/test_the_sequence_seams_default_to_nothing.py`::`test_the_hook_defaults_are_nothing`.
 
 - **Where the sequence lives** (D-070): `api/trainer.py:TaskTrainer` is the hooks, `run` (resolve, claim, lock,
   device) and the summary pieces; `api/run_sequence.py` is the sequence once the directory is claimed (`execute` and
