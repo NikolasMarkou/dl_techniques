@@ -34,6 +34,7 @@ from train.api.predictor import (
     SCHEMA_VERSION,
     build_depth_record,
     build_forecast_record,
+    build_language_model_record,
     build_pretrain_record,
     build_segmentation_record,
     build_task_record,
@@ -53,6 +54,7 @@ DENOISING = "image_denoising"
 FORECASTING = "time_series_forecasting"
 DEPTH = "depth_estimation"
 PRETRAIN = "pretrain"
+LANGUAGE = "language_model_pretraining"
 
 #: The keys and order of a version 1 classification record, written out (not read from the module).
 V1_KEYS = [
@@ -108,6 +110,16 @@ def pretrain(**changes):
     return value
 
 
+def language(**changes):
+    from train.api.text_tokenizer import tokenizer_spec
+
+    value = build_language_model_record(
+        model="gpt2_lm/tiny", family="gpt2_lm", variant="tiny", seq_len=256, tokenizer=tokenizer_spec("gpt2").record(),
+    )
+    value.update(changes)
+    return value
+
+
 def without(value, *keys):
     value = dict(value)
     for key in keys:
@@ -120,9 +132,9 @@ def without(value, *keys):
 # ---------------------------------------------------------------------
 
 
-def test_the_version_is_two_and_the_tables_are_the_six_tasks():
+def test_the_version_is_two_and_the_tables_are_the_seven_tasks():
     assert SCHEMA_VERSION == 2
-    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH, PRETRAIN])
+    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH, PRETRAIN, LANGUAGE])
     assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
     assert OPTIONAL_RECORD_KEYS == ("variant_overrides", "init")
 
@@ -186,8 +198,19 @@ def test_a_pretrain_record_has_its_own_keys_the_patch_the_tokenizer_and_no_class
     assert not {"class_names", "input_shape", "lookback"} & set(record)
 
 
-@pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth, pretrain],
-                         ids=[CLASSIFICATION, SEGMENTATION, FORECASTING, DEPTH, PRETRAIN])
+def test_a_language_model_record_has_its_own_keys_the_tokenizer_and_no_class_names_or_statistics():
+    record = language()
+    assert list(record) == list(RECORD_KEYS[LANGUAGE]) == [
+        "schema_version", "task", "model", "family", "variant", "seq_len", "encoding", "n_vocab", "vocab_size", "eot_id", "pad_id",
+        "tokenizer", "tokenizer_files", "output",
+    ]
+    assert (record["task"], record["seq_len"], record["encoding"], record["vocab_size"]) == (LANGUAGE, 256, "gpt2", 50261)
+    assert (record["output"], len(record["tokenizer_files"]), len(record["tokenizer"])) == ("next_token_logits", 2, 64)
+    assert not {"class_names", "mean", "std", "normalize", "input_shape", "input_size", "lookback"} & set(record)
+
+
+@pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth, pretrain, language],
+                         ids=[CLASSIFICATION, SEGMENTATION, FORECASTING, DEPTH, PRETRAIN, LANGUAGE])
 def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp_path):
     record = make()
     check_record(record, "<built>")
@@ -197,7 +220,7 @@ def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp
 
 
 def test_the_optional_key_rides_on_every_task():
-    for make in (classification, segmentation, forecasting, depth, pretrain):
+    for make in (classification, segmentation, forecasting, depth, pretrain, language):
         with_overrides = make(variant_overrides={"depth": 4})
         check_record(with_overrides, "<built>")
     assert "variant_overrides" not in segmentation()

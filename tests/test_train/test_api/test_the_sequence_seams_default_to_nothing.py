@@ -30,6 +30,10 @@ closed key set (``lr_multipliers`` only) into the builder's config. The default 
 seam (f6f15bedf); the positive arm gets an ``LRMultiplierAdamW`` holding the task's table; another key,
 or a table with an optimizer other than adamw, is refused by name.
 
+Plan 7806a290 step 5 (D-008) adds the two seams the language task's export needs, both defaulting to what every earlier task did:
+``ExportRule.sample`` (default ``None``: the tflite check feeds the random float batch it always fed) and the rank-keyed sentence of
+``exporting._input_spec`` (ranks 3 and 2 keep their words, rank 1 names ``(seq_len,)``). Each has its own test over EVERY task's row.
+
 Every seam is proved twice, because a default that is "almost" nothing moves a byte in a golden and a
 seam that does nothing passes every default test: the default arm is a real fit of ``vit/vit_pico`` on
 fake CIFAR-10 arrays whose compile call, callback list, ``config.json`` keys and summary keys are read
@@ -882,3 +886,126 @@ def test_a_task_naming_an_unknown_optimizer_option_stops_the_run_before_fit(worl
     with pytest.raises(ConfigError, match="layer_rates"):
         Unknown(config_for(run_dir, epochs=1)).run()
     assert not (run_dir / "training_log.csv").exists(), "refused before fit"
+
+
+# ---------------------------------------------------------------------
+# The two export seams of the language task (plan 7806a290 step 5, D-008)
+# ---------------------------------------------------------------------
+
+EXPORT_SHAPE = (4, 4, 3)
+
+
+def tflite_blob_of_a_dense_model(bias_shift: float = 0.0) -> tuple:
+    """``(model, blob, spec)`` of a dense model over ``EXPORT_SHAPE`` and its TFLite file (built-in operators)."""
+    import tensorflow as tf
+
+    keras.utils.set_random_seed(0)
+    model = keras.Sequential([keras.layers.Input(EXPORT_SHAPE), keras.layers.Flatten(), keras.layers.Dense(5)])
+    return model, tf.lite.TFLiteConverter.from_keras_model(model).convert(), tf.TensorSpec((None, *EXPORT_SHAPE), tf.float32)
+
+
+def what_the_check_runs_the_file_on(monkeypatch, *arguments, **keywords):
+    """The batches ``exporting._tflite_logits`` is given while ``_check_tflite_against_keras(*arguments, **keywords)`` runs."""
+    from train.api import exporting
+
+    real, seen = exporting._tflite_logits, []
+
+    def spy(blob, batch):
+        seen.append(batch.copy())
+        return real(blob, batch)
+
+    monkeypatch.setattr(exporting, "_tflite_logits", spy)
+    exporting._check_tflite_against_keras(*arguments, **keywords)
+    return seen
+
+
+def test_the_tflite_check_feeds_the_random_float_batch_it_always_fed_when_no_sample_is_given(monkeypatch, tmp_path):
+    import numpy as np
+
+    model, blob, spec = tflite_blob_of_a_dense_model()
+    seen = what_the_check_runs_the_file_on(monkeypatch, blob, model, spec, tmp_path / "a.tflite")
+    # written out, not read from the module: the literal of the check before the seam existed (a free batch is two rows)
+    assert len(seen) == 1 and np.array_equal(seen[0], np.random.default_rng(0).random((2, *EXPORT_SHAPE)).astype(np.float32))
+    import tensorflow as tf
+
+    fixed = tf.TensorSpec((3, *EXPORT_SHAPE), tf.float32)
+    seen = what_the_check_runs_the_file_on(monkeypatch, blob, model, fixed, tmp_path / "a.tflite", None, None)
+    assert np.array_equal(seen[0], np.random.default_rng(0).random((3, *EXPORT_SHAPE)).astype(np.float32))
+
+
+def test_a_sample_replaces_the_check_batch_and_is_asked_for_the_shape_of_the_batch(monkeypatch, tmp_path):
+    import numpy as np
+
+    model, blob, spec = tflite_blob_of_a_dense_model()
+    asked, marker = [], np.full((2, *EXPORT_SHAPE), 0.25, np.float32)
+
+    def sample(shape):
+        asked.append(shape)
+        return marker
+
+    seen = what_the_check_runs_the_file_on(monkeypatch, blob, model, spec, tmp_path / "a.tflite", None, sample)
+    assert asked == [(2, *EXPORT_SHAPE)] and len(seen) == 1 and np.array_equal(seen[0], marker)
+
+
+def test_an_export_rule_names_no_sample_unless_it_is_the_language_rule():
+    from train.api import predictor
+
+    assert predictor.ExportRule._field_defaults["sample"] is None, "the default is a no-op: today's random float batch"
+    with_sample = sorted(task for task, rule in predictor.EXPORT_RULES.items() if rule.sample is not None)
+    assert with_sample == ["language_model_pretraining"], "every earlier task's export check still feeds random floats"
+    assert sorted(predictor.EXPORT_RULES) == sorted(predictor.TASK_TABLES["RECORD_KEYS"])
+
+
+def test_export_hands_the_rules_sample_to_the_tflite_writer_bound_to_the_record_and_hands_nothing_for_a_rule_without_one(
+        monkeypatch, tmp_path):
+    import numpy as np
+
+    from train.api import exporting, predictor
+    from train.api.text_models import create_gpt2_lm
+    from train.api.text_tokenizer import tokenizer_spec
+
+    task = "language_model_pretraining"
+    model = create_gpt2_lm(variant="tiny", input_shape=(16,), vocab_size=101, embed_dim=32, depth=1, num_heads=2)
+    record = predictor.build_language_model_record(
+        model="gpt2_lm/tiny", family="gpt2_lm", variant="tiny", seq_len=16, tokenizer=tokenizer_spec("ascii95").record())
+    handed = []
+    monkeypatch.setattr(exporting, "_export_tflite", lambda *args: handed.append(args))
+    exporting.export(model=model, out=tmp_path / "a.tflite", format="tflite", input_shape=(16,), record=record)
+    sample = handed[0][4]
+    assert callable(sample) and np.array_equal(sample((2, 16)), predictor.EXPORT_RULES[task].sample(record, (2, 16)))
+    monkeypatch.setitem(predictor.EXPORT_RULES, task, predictor.EXPORT_RULES[task]._replace(sample=None))
+    handed.clear()
+    exporting.export(model=model, out=tmp_path / "b.tflite", format="tflite", input_shape=(16,), record=record)
+    assert handed[0][4] is None, "a rule that names no sample hands the writer none"
+
+
+#: ``input_shape`` is asked of a rule in the shape its own ``shape_of`` returns; a record that serves every row's ``shape_of``.
+SHAPE_RECORD = {"input_shape": [8, 8, 3], "input_size": [8, 8], "channels": 3, "lookback": 8, "seq_len": 8}
+#: The sentence of ``_input_spec`` before the rank seam existed: rank 3 named the image shape, any other rank the series shape.
+BEFORE_THE_SEAM = (
+    "Invalid value for 'input_shape': expected {wanted} of positive ints, got {given!r} (a height or width may be None only for a "
+    "model that itself takes any size)"
+)
+
+
+def test_every_earlier_tasks_input_spec_sentence_is_the_one_it_always_was_and_the_language_rank_names_its_own():
+    from train.api import exporting, predictor
+
+    ranks = {task: len(rule.shape_of(SHAPE_RECORD)) for task, rule in predictor.EXPORT_RULES.items()}
+    assert ranks == {
+        "image_classification": 3, "image_segmentation": 3, "image_denoising": 3, "time_series_forecasting": 2,
+        "depth_estimation": 3, "pretrain": 3, "language_model_pretraining": 1,
+    }
+    for task, rank in ranks.items():
+        bad = (0,) * rank
+        with pytest.raises(ConfigError) as caught:
+            exporting._input_spec(None, bad, rank=rank)
+        if task != "language_model_pretraining":
+            wanted = "(height, width, channels)" if rank == 3 else "(lookback, channels)"
+            assert str(caught.value) == BEFORE_THE_SEAM.format(wanted=wanted, given=bad), task
+        else:
+            assert str(caught.value) == BEFORE_THE_SEAM.format(wanted="(seq_len,)", given=bad)
+    spec = exporting._input_spec(None, (8,), rank=1)
+    assert tuple(spec.shape) == (None, 8) and spec.dtype.name == "float32"
+    with pytest.raises(ConfigError, match=r"expected \(seq_len,\) of positive ints"):
+        exporting._input_spec(None, (8, 8), rank=1)

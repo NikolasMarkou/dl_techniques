@@ -47,6 +47,11 @@ Interface contract
         named :data:`ACCURACY` (``METRIC_NAMES`` is the names alone, for the hook that must build nothing). The model returns
         logits, so the loss takes logits: one module holds both halves of that contract.
 
+``observe_gpt2(model)``
+    The ``ModelSpec.observe`` of the row: the variant-table keys the backbone layer of a loaded functional model shows
+    (``embed_dim``, ``depth``, ``num_heads``, ``max_seq_len``), ``None`` for a model with no GPT-2 layer. The model is a functional
+    wrapper, not a ``GPT2``, so ``predict`` and ``export`` check a file against its record through this, not through ``isinstance``.
+
 ``recipe_notices_of(family)``
     :return: ``[(level, text)]``, the recipe's numbers that no run measured, the task's ``recipe_notices`` hook prints them.
 
@@ -75,6 +80,9 @@ GPT2_MODULE = "dl_techniques.models.language.gpt2.gpt2"
 
 #: The name of the library backbone inside the functional model: the layer a warm start transfers its weights by.
 BACKBONE_NAME = "gpt2_backbone"
+
+#: The keys of ``GPT2.MODEL_VARIANTS`` a built backbone reports in its config (the table's ``description`` is text, not a setting).
+TABLE_KEYS = ("embed_dim", "depth", "num_heads", "max_seq_len")
 
 #: The compiled metric, by name only (``metric_names`` must build nothing); ``language_loss_and_metrics`` builds it under this name.
 ACCURACY = "accuracy"
@@ -196,6 +204,19 @@ def create_gpt2_lm(
     return keras.Model(inputs, logits, name=GPT2_LM)
 
 
+def observe_gpt2(model: Any) -> Optional[Dict[str, Any]]:
+    """Return the variant keys the GPT-2 layer of ``model`` shows, ``None`` for a model without one; see the module contract."""
+    # DECISION plan-2026-11-24T092348-7806a290/D-036
+    # The loaded model is a functional wrapper, so the family check reads the backbone layer it holds (the segmentation and
+    # pretrain rows do the same). Do NOT test ``isinstance(model, GPT2)``: it refuses every honest file; and do NOT compare the whole
+    # config (``dropout_rate`` and the rest are free ``model_args``, the record's ``variant_overrides`` hold only the table keys).
+    for layer in getattr(model, "layers", None) or []:
+        if type(layer).__name__ == "GPT2":
+            config = layer.get_config()
+            return {key: config[key] for key in TABLE_KEYS}
+    return None
+
+
 def language_loss_and_metrics() -> Tuple[Any, List[Any]]:
     """Return ``(loss, metrics)`` of ``compile``; see the module contract."""
     import keras
@@ -280,6 +301,7 @@ def builtin_text_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=LM_RECIPE,
             resolve_model_args=f"{_HERE}:resolve_text_args",
+            observe=f"{_HERE}:observe_gpt2",
             transfer=TransferSpec(),
         ),
     )

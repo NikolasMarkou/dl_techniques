@@ -998,7 +998,9 @@ def test_the_classification_and_segmentation_note_is_the_one_it_was():
     note = "the exported model takes inputs standardized with the run's mean and std (pixels in [0, 1], then (x - mean) / std) and returns raw logits"
     for task in (predictor.CLASSIFICATION, predictor.SEGMENTATION):
         assert predictor.EXPORT_RULES[task].note({}) == note
-        predictor.EXPORT_RULES[task].check({}, "tflite", (8, 8, 3))  # no cell of theirs is refused
+        # The only classification cell refused is the energy transformer's tflite (plan 5c6cc105 D-030), whose row reads the family: a vit
+        # and a convunext refuse none. (This line passed `{}` from the plan that wrote the refusal table on, and raised KeyError: 'family'.)
+        predictor.EXPORT_RULES[task].check({"family": "vit"}, "tflite", (8, 8, 3))
 
 
 # ---------------------------------------------------------------------

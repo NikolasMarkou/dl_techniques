@@ -37,6 +37,9 @@ Interface contract
     ``evaluate_and_report`` (:func:`train.common.pretrain_run.epoch_zero_val_loss`), never from an attribute, because a resume
     never evaluates the untrained model. Under ``debug_args.smoke`` no bar is applied.
 
+    ``task_record`` is the schema-v2 ``task.json`` (:func:`train.api.predictor.build_language_model_record`: the length and the tokenizer's
+    fields, digest and file hashes), written before ``fit``; a resume compares its ``DATA_KEYS`` and leaves the file as it is.
+
     The epoch-0 check is the untrained model's loss over the unigram's (``initial_loss_ratio``); no verdict on the initialization
     is given (``unjudged_note`` says why); a non-finite loss is refused.
 
@@ -90,6 +93,7 @@ from ..config import (
 )
 from ..data_args import DataFacts
 from ..errors import ConfigError
+from ..predictor import build_language_model_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..text_args import (
     GPT2_LM,
@@ -246,6 +250,19 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
     def _model_kwargs(config: LanguageModelPretrainingConfig, context: AutoContext) -> Dict[str, Any]:
         """Return the family adapter's keywords: the recipe's, then the caller's (the resolver refuses the rest)."""
         return registry.MODELS[context.family].load_resolver()(context, config.optim_args, config.model_args)
+
+    def task_record(self, config: LanguageModelPretrainingConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
+        """Return the ``language_model_pretraining`` ``task.json`` record (schema in :mod:`train.api.predictor`).
+
+        The length is ``data.input_shape`` (``build_model`` builds the model at it), the tokenizer the data's spec. Nothing of the model
+        is needed, so a resume asks for it before ``build_model`` and compares it with the file (``DATA_KEYS``).
+        """
+        table = registry.MODELS[context.family].load_variants()
+        return build_language_model_record(
+            model=config.model, family=context.family, variant=context.variant, seq_len=data.input_shape[0],
+            tokenizer=data.spec.record(),
+            variant_overrides=overrides_of_variant(table[context.variant], self._model_kwargs(config, context)),
+        )
 
     def used_arguments(self, config: LanguageModelPretrainingConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run was built with, for ``config.json``: the model keywords."""

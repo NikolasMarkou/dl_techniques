@@ -17,9 +17,9 @@ and a ``domain`` text, no class names, no statistics) in every table, in the tes
   key, writer;
 * removing the fake's row from any ONE table refuses the record, naming the tasks that table knows,
   and the same for the ``predict`` writer table;
-* the six real tasks have a row in every table (the tables agree on their keys; the fourth, forecasting, the fifth,
-  depth estimation, and the sixth, pretrain, arrived with their predictors; none of their records has class names, and
-  only pretrain's has statistics);
+* the seven real tasks have a row in every table (the tables agree on their keys; the fourth, forecasting, the fifth,
+  depth estimation, the sixth, pretrain, and the seventh, language_model_pretraining, arrived with their predictors; none of
+  their records has class names, and only pretrain's has statistics);
 * a task whose data has no classes (D-005): ``DataFacts`` and ``AutoContext`` take ``num_classes=None``
   and the run summary has no ``num_classes`` key, while a classifier's still has it.
 
@@ -44,6 +44,7 @@ from train.api.predictor import (
     DENOISING,
     DEPTH,
     FORECASTING,
+    LANGUAGE_MODEL,
     PREDICTORS,
     PRETRAIN,
     SCHEMA_VERSION,
@@ -179,7 +180,7 @@ def test_the_fake_has_a_row_for_every_table():
     assert set(FAKE_ROWS) == set(TASK_TABLES)
 
 
-REAL_TASKS = [CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH, PRETRAIN]
+REAL_TASKS = [CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH, PRETRAIN, LANGUAGE_MODEL]
 
 
 @pytest.mark.parametrize("name", sorted(TASK_TABLES))
@@ -187,8 +188,8 @@ def test_the_real_tasks_have_a_row_in_every_table(name):
     assert sorted(TASK_TABLES[name]) == sorted(REAL_TASKS), name
 
 
-def test_the_predict_writers_and_the_data_listers_are_the_six_tasks_that_can_predict():
-    # Denoising's writer arrived with its predictor, forecasting's, depth's and pretrain's with their own: one row
+def test_the_predict_writers_and_the_data_listers_are_the_seven_tasks_that_can_predict():
+    # Denoising's writer arrived with its predictor, forecasting's, depth's, pretrain's and the language task's with their own: one row
     # per task that can be predicted, in the writers and in the listers of what ``data=`` names (D-012).
     assert sorted(cli.PREDICT_WRITERS) == sorted(REAL_TASKS)
     assert sorted(cli.DATA_LISTERS) == sorted(REAL_TASKS)
@@ -294,6 +295,7 @@ def test_the_real_tasks_keep_their_predictors():
     assert PREDICTORS[FORECASTING].__name__ == "_forecasting_predictor"
     assert PREDICTORS[DEPTH].__name__ == "_depth_predictor"
     assert PREDICTORS[PRETRAIN].__name__ == "_pretrain_predictor"
+    assert PREDICTORS[LANGUAGE_MODEL].__name__ == "_language_model_predictor"
 
 
 def test_export_reaches_the_tasks_rule_for_its_shape_its_refusals_and_its_note(run_dir, tmp_path, monkeypatch):
