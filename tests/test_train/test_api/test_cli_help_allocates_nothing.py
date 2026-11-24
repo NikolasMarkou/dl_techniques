@@ -226,6 +226,29 @@ def test_importing_train_api_leaves_no_heavy_library_and_no_dl_techniques_module
     assert found == [], found
 
 
+_LISTING_BODY = """
+from train.api import list_models, list_tasks
+
+print("TASKS", [spec.name for spec in list_tasks()])
+census()
+names = list_models(task="image_classification")
+print("MODELS", len(names), "vit/vit_pico" in names)
+"""
+
+
+def test_the_python_listings_answer_in_a_fresh_process_and_list_tasks_loads_nothing_heavy(tmp_path):
+    """``train.api.list_tasks``/``list_models`` register the built-ins themselves (D-013); no ``main`` call first."""
+    code, out, err, found = heavy_after(_LISTING_BODY, tmp_path)
+    assert code == 0, err[-2000:]
+    expected = sorted(spec.name for spec in BUILTIN_TASKS)
+    assert len(expected) == 6 and f"TASKS {expected!r}" in out, out[-800:]
+    # Registering and listing the tasks stays off TensorFlow and Keras; ``list_models`` then imports
+    # the families' variants tables (the exemption above), so the census is taken before it.
+    assert found == [], found
+    match = re.search(r"^MODELS (\d+) (True|False)$", out, re.MULTILINE)
+    assert match is not None and int(match.group(1)) > 0 and match.group(2) == "True", out[-800:]
+
+
 def test_the_census_flags_numpy_pandas_and_a_dl_techniques_module_when_they_really_load(tmp_path):
     """Control: the same driver names numpy, pandas and a dl_techniques layer module that is really imported."""
     body = "import numpy, pandas\nimport dl_techniques.layers\ncensus()\n"

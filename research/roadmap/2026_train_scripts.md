@@ -90,7 +90,7 @@ callers import from `train.api`.
 Python:
 
 ```python
-from train.api import train_image_classification, load_model, export, main
+from train.api import train_image_classification, load_model, export, list_models
 
 result = train_image_classification(         # keyword-only; the keys `image_classification help` prints
     out="results/convnext_c10_baseline",      # required; "auto" names a new directory under results/
@@ -104,12 +104,8 @@ result = train_image_classification(         # keyword-only; the keys `image_cla
 predictor = load_model("results/convnext_c10_baseline")   # a run directory, or a .keras file beside its task.json
 answer = predictor.predict("cat.png", top_k=5)            # {"labels", "scores"}; each task has its own predictor
 export(model=predictor.model, out="convnext_c10.keras", format="keras", record=predictor.record)
-main(["list_models", "task=image_classification"])      # the command line from Python; returns the exit code
+names = list_models(task="image_classification")        # sorted "family/variant" names, e.g. "vit/vit_pico"
 ```
-
-`list_tasks()` and `list_models()` are on `train.api` too, but they read the registries as they stand, and in a fresh
-process the built-in tasks and families are registered by the first `main(...)` call: before it, both return empty
-lists and `list_models(task=...)` raises `ConfigError` (measured 2026-11-24, plan 98c9aac5).
 
 CLI (every key is one the command's `help` prints):
 
