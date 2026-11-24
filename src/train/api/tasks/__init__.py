@@ -53,6 +53,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.depth_estimation:train_depth_estimation",
         summary="train a relative-depth model on MegaDepth, scored against a constant and the average layout",
     ),
+    registry.TaskSpec(
+        name="language_model_pretraining",
+        config_class="train.api.tasks.language_model_pretraining:LanguageModelPretrainingConfig",
+        function="train.api.tasks.language_model_pretraining:train_language_model_pretraining",
+        summary="train a GPT-2 as a causal language model on a text corpus, scored against the unigram of its selection targets",
+    ),
 )
 
 

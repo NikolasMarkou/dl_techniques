@@ -126,9 +126,14 @@ FORECAST = "time_series_forecasting"
 #: in ``test_depth_task.py``.
 DEPTH_VARIANTS = {"depth_anything": ["vit_b", "vit_l", "vit_s"]}
 DEPTH = "depth_estimation"
+
+#: The one language-model family (plan-2026-11-24T092348-7806a290 step 4); it reads the library GPT2's own ``MODEL_VARIANTS``.
+#: Its adapter, recipe and refusals are in ``test_language_model_pretraining_families.py``.
+LANGUAGE_VARIANTS = {"gpt2_lm": ["large", "medium", "small", "tiny", "xl"]}
+LANGUAGE = "language_model_pretraining"
 ALL_VARIANTS = {
     **VARIANTS, **SEGMENTATION_VARIANTS, **DENOISING_VARIANTS, **PRETRAIN_VARIANTS, **FORECAST_VARIANTS,
-    **DEPTH_VARIANTS,
+    **DEPTH_VARIANTS, **LANGUAGE_VARIANTS,
 }
 
 
@@ -157,8 +162,8 @@ def test_the_listing_is_the_literal_variant_tables(builtin):
     assert sorted(builtin) == sorted(ALL_VARIANTS)
     expected = sorted(f"{f}/{v}" for f, names in ALL_VARIANTS.items() for v in names)
     # 76 before the pretrain families (3 + 4), the forecasting families (23), depth (3); 109 + 4 + 3 classifier
-    # variants of beit and energy_transformer (plan 5c6cc105 Step 5).
-    assert len(expected) == 116
+    # variants of beit and energy_transformer (plan 5c6cc105 Step 5), and the 5 variants of gpt2_lm.
+    assert len(expected) == 121
     assert registry.list_models() == expected
     for family, spec in builtin.items():
         if family in SEGMENTATION_VARIANTS:
@@ -171,6 +176,8 @@ def test_the_listing_is_the_literal_variant_tables(builtin):
             assert spec.tasks == (FORECAST,), family
         elif family in DEPTH_VARIANTS:
             assert spec.tasks == (DEPTH,), family
+        elif family in LANGUAGE_VARIANTS:
+            assert spec.tasks == (LANGUAGE,), family
         else:
             assert spec.tasks == (TASK,), family
 
@@ -188,19 +195,22 @@ def test_the_task_filter_keeps_every_family_of_the_task(builtin):
     registry.register_task(registry.TaskSpec(PRETRAIN, "x.y:Config", "x.y:run", "pretrain"))
     registry.register_task(registry.TaskSpec(FORECAST, "x.y:Config", "x.y:run", "time series forecasting"))
     registry.register_task(registry.TaskSpec(DEPTH, "x.y:Config", "x.y:run", "depth estimation"))
+    registry.register_task(registry.TaskSpec(LANGUAGE, "x.y:Config", "x.y:run", "language model pretraining"))
     classifiers = sorted(f"{f}/{v}" for f, names in VARIANTS.items() for v in names)
     segmenters = sorted(f"{f}/{v}" for f, names in SEGMENTATION_VARIANTS.items() for v in names)
     denoisers = sorted(f"{f}/{v}" for f, names in DENOISING_VARIANTS.items() for v in names)
     pretrainers = sorted(f"{f}/{v}" for f, names in PRETRAIN_VARIANTS.items() for v in names)
     forecasters = sorted(f"{f}/{v}" for f, names in FORECAST_VARIANTS.items() for v in names)
     depth = sorted(f"{f}/{v}" for f, names in DEPTH_VARIANTS.items() for v in names)
+    language = sorted(f"{f}/{v}" for f, names in LANGUAGE_VARIANTS.items() for v in names)
     assert registry.list_models(TASK) == classifiers
     assert registry.list_models(SEGMENTATION) == segmenters
     assert registry.list_models(DENOISING) == denoisers
     assert registry.list_models(PRETRAIN) == pretrainers
     assert registry.list_models(FORECAST) == forecasters
     assert registry.list_models(DEPTH) == depth
-    assert sorted(classifiers + segmenters + denoisers + pretrainers + forecasters + depth) == registry.list_models()
+    assert registry.list_models(LANGUAGE) == language
+    assert sorted(classifiers + segmenters + denoisers + pretrainers + forecasters + depth + language) == registry.list_models()
     # Control: a family that lists another task drops out of the filter.
     other = dataclasses.replace(builtin["vit"], family="other_vit", tasks=("else",))
     registry.register_model(other)

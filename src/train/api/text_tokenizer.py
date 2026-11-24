@@ -16,8 +16,9 @@ Interface contract
     A frozen record: ``encoding``, ``n_vocab`` (the tokenizer's own ids), ``vocab_size`` (the model's: ``n_vocab`` plus the four
     specials a classifier needs), ``eot_id``, ``cls_id``, ``sep_id``, ``pad_id``, ``mask_id`` and ``files`` (``((cache file name,
     sha256), ...)`` sorted by name, empty for ``ascii95``). ``digest`` is the sha256 of the canonical json of all of them, the
-    file hashes included, so a changed id, encoding or file is another tokenizer. The model's ``vocab_size`` is ALWAYS this
-    one, never a model default (the library GPT-2 defaults to 100,277, the legacy trainers use 50,261).
+    file hashes included, so a changed id, encoding or file is another tokenizer. ``record()`` is the fields and the digest as a
+    json-ready dict (``files`` an object of name to sha256): what a summary and a ``task.json`` hold. The model's ``vocab_size``
+    is ALWAYS this one, never a model default (the library GPT-2 defaults to 100,277, the legacy trainers use 50,261).
 
 ``tokenizer_spec(name)``
     :return: the spec of ``name``. :raises ConfigError: for a name that is not in :data:`TOKENIZERS`.
@@ -37,7 +38,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 from .errors import ConfigError
 from .init_from import file_sha256
@@ -94,6 +95,10 @@ class TokenizerSpec:
         """The sha256 (64 hex digits) of every field as json (sorted keys, no spaces; ``files`` an object), the file hashes included."""
         fields = {**dataclasses.asdict(self), "files": dict(self.files)}
         return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def record(self) -> Dict[str, Any]:
+        """The fields (``files`` an object of name to sha256) and the digest, as a json-ready dict."""
+        return {**dataclasses.asdict(self), "files": dict(self.files), "digest": self.digest}
 
 
 _SPECS = {

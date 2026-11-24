@@ -49,6 +49,8 @@ recipes.register_builtin_models()
 
 CLASSIFICATION, SEGMENTATION, DENOISING = "image_classification", "image_segmentation", "image_denoising"
 FORECASTING, DEPTH, PRETRAIN = "time_series_forecasting", "depth_estimation", "pretrain"
+#: The language-model task takes no ``init`` yet (its row declares the empty transfer); the census counts its one family.
+LANGUAGE_MODEL = "language_model_pretraining"
 #: The tasks that take ``init``.
 INIT_TASKS = (CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH)
 
@@ -179,10 +181,11 @@ def undeclared(specs: Mapping[str, registry.ModelSpec]) -> List[str]:
 
 
 def test_every_row_declares_a_spec():
-    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN}
+    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL}
     assert all(len(spec.tasks) == 1 for spec in registry.MODELS.values())
     assert undeclared(registry.MODELS) == []
     assert sum(task_of(family) == PRETRAIN for family in registry.MODELS) == 2
+    assert sum(task_of(family) == LANGUAGE_MODEL for family in registry.MODELS) == 1
 
 
 def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():

@@ -47,6 +47,13 @@ Interface contract
         seam: ``loader(split, data_dir, limit)`` yields ``(text, label)``; the default reads TFDS offline (``download=False``,
         ``shuffle_files=False``).
 
+``corpus_documents(dataset, kind, *, max_samples)``
+    :return: ``((train_texts, train_labels), (test_texts, test_labels))`` of the corpus ``dataset`` (``synthetic`` or ``imdb_reviews``,
+        ``train.api.text_args.DATASETS``): the first ``max_samples`` documents of each split in read order for ``imdb_reviews``; for the
+        synthetic bank ``max_samples`` train documents and a quarter of that many test documents (``None``: the sizes
+        ``train.api.text_args`` names). The bank is keyed on :data:`BANK_SEED`, never on the run's seed, so a corpus is the same
+        documents for every run and the seed only splits and orders them.
+
 ``split_documents(n, seed, validation_split)``
     :return: ``(train_index, select_index)``, int64, ascending: document ``i`` is selected when ``sha256(f"{seed}:select:{i}")``,
         read as a unit float, is below ``validation_split``. A function of ``(seed, i)`` only: stable when documents are appended.
@@ -73,6 +80,13 @@ stream_seed=None, validation_split)``
     :return: ``(ids, truncated)``: int32 ``(n, seq_len)`` rows ``[CLS]`` + the head of the document + pad, and the number of
         documents cut. A row is never all pad (the ``[CLS]`` is its first id). :raises ValueError: ``seq_len`` below 2.
 
+``TextBatches`` / ``lm_batches(split, *, spec, seq_len, batch_size, seed, validation_split)``
+    The object the language task's ``build_data`` returns and the run sequence reads: the :class:`TextSplit`, the three datasets
+    built from it (``select_dataset`` of the selection and of the test windows, ``train_dataset`` of the stream), the counts in
+    windows (``n_train``, ``n_select``, ``n_test``), ``steps_per_epoch``, ``val_steps``, ``input_shape`` ``(seq_len,)``, no classes
+    and the plain-language provenance of the two fixed splits. ``with_start(step)`` is the same data whose train stream begins at
+    ``step`` (the fixed datasets are the same objects).
+
 ``select_dataset((x, y), batch_size)`` / ``train_dataset(stream)``
     TensorFlow datasets. The first is finite, in row order, its last batch ragged, its cardinality stated and checked. The second
     is infinite (``Dataset.counter`` mapped through ``stream.batch_at``), begins at ``stream.start_step`` and holds no state but the
@@ -91,6 +105,7 @@ from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from train.api.text_args import IMDB, SYNTHETIC, SYNTHETIC_TEST_DOCUMENTS, SYNTHETIC_TRAIN_DOCUMENTS
 from train.api.text_tokenizer import ASCII95, TOKENIZERS, TokenizerSpec, check_files
 
 #: The environment variable tiktoken reads its cache directory from.
@@ -103,6 +118,12 @@ SELECT_TAG = "select"
 LM, CLASSIFICATION = "language_model", "classification"
 KINDS: Tuple[str, ...] = (LM, CLASSIFICATION)
 SPLITS: Tuple[str, ...] = ("train", "test")
+
+# DECISION plan-2026-11-24T092348-7806a290/D-026
+# The synthetic bank is keyed on this constant, NOT on the run's seed: a corpus is the same documents for every run (as the IMDB
+# reviews are), and the seed splits and orders them. A bank that followed the seed would make two seeds two corpora, so "the
+# documents a source run trained on" would name other texts under the same index. Do NOT pass `config.seed` to `synthetic_documents`.
+BANK_SEED = 0
 
 #: The words of the synthetic language bank: sixteen, in a ring. A word is followed by the next one (0.80), the one three on
 #: (0.15) or any (0.05), so a bigram model reaches 0.72 nats a word where a unigram model cannot go below ln 16 = 2.77.
@@ -294,6 +315,19 @@ def imdb_documents(
     return texts, np.asarray(labels, np.int64)
 
 
+def corpus_documents(
+        dataset: str, kind: str, *, max_samples: Optional[int],
+) -> Tuple[Tuple[List[str], Optional[np.ndarray]], Tuple[List[str], Optional[np.ndarray]]]:
+    """The train and test documents of ``dataset``: ``((texts, labels), (texts, labels))``; see the module contract."""
+    if dataset == SYNTHETIC:
+        n_train = SYNTHETIC_TRAIN_DOCUMENTS if max_samples is None else max_samples
+        n_test = SYNTHETIC_TEST_DOCUMENTS if max_samples is None else max(1, max_samples // 4)
+        return synthetic_documents(BANK_SEED, n_train, kind, "train"), synthetic_documents(BANK_SEED, n_test, kind, "test")
+    if dataset == IMDB:
+        return imdb_documents("train", None, max_samples), imdb_documents("test", None, max_samples)
+    raise ValueError(f"dataset must be {SYNTHETIC!r} or {IMDB!r}, got {dataset!r}")
+
+
 # ---------------------------------------------------------------------
 # the split and the windows
 # ---------------------------------------------------------------------
@@ -391,7 +425,7 @@ class TextStream:
         if self.n_rows < self.batch_size:
             raise ValueError(
                 f"the train stream holds {self.n_rows} rows per epoch, fewer than one batch of {self.batch_size}: lower the batch "
-                "size, raise data.max_documents, or lower the validation share")
+                "size, raise data.max_samples, or lower the validation share")
         object.__setattr__(self, "_cache", _EpochCache())
 
     @property
@@ -475,7 +509,7 @@ def lm_split(
         if len(rows) == 0:
             raise ValueError(
                 f"the {name} documents ({count} of them) hold fewer tokens than one window of {seq_len + 1}: raise "
-                "data.max_documents (or data.validation_split for the selection), or lower the sequence length")
+                "data.max_samples (or data.validation_split for the selection), or lower the sequence length")
     stream = lm_stream([train_docs[i] for i in train_index], seq_len=seq_len, batch_size=batch_size,
                        seed=seed if stream_seed is None else stream_seed, eot=spec.eot_id)
     logger.info(
@@ -545,3 +579,68 @@ def train_dataset(stream: TextStream) -> "Any":
     if int(dataset.cardinality()) != int(tf.data.INFINITE_CARDINALITY):
         raise ValueError(f"the train dataset states cardinality {int(dataset.cardinality())}, not infinite")
     return dataset
+
+
+# ---------------------------------------------------------------------
+# what a language task consumes
+# ---------------------------------------------------------------------
+
+
+# DECISION plan-2026-11-24T092348-7806a290/D-025
+# The object the run sequence reads (`build_data`'s return value) is a frozen dataclass of the datasets and the counts, beside the
+# numpy `TextSplit` it was built from, as `PretrainBatches` and `ForecastBatches` are: the sequence needs `train_ds`, `select_ds`,
+# `test_ds`, `steps_per_epoch`, the three counts, `input_shape` and the provenance strings by those names, and a resume replaces
+# only the train dataset (`with_start`). Do NOT fold the datasets into `TextSplit` (it is numpy only, and the stream tests need no
+# TensorFlow) and do NOT hand the sequence a bare namespace (`dataclasses.replace` is how a test watches the stream).
+@dataclass(frozen=True, eq=False)
+class TextBatches:
+    """What the language task consumes; the fields the run sequence reads; see the module contract."""
+
+    split: TextSplit
+    train_ds: Any = field(repr=False)
+    select_ds: Any = field(repr=False)
+    test_ds: Any = field(repr=False)
+    steps_per_epoch: int
+    val_steps: int
+    n_train: int
+    n_select: int
+    n_test: int
+    input_shape: Tuple[int]
+    num_classes: Optional[int]
+    selection_split: str
+    test_split: str
+    spec: TokenizerSpec
+    seed: int
+    batch_size: int
+
+    def with_start(self, step: int) -> "TextBatches":
+        """The same data whose train stream begins at ``step``: the fixed datasets are the same objects."""
+        stream = self.split.stream.with_start(step)
+        return dataclasses.replace(self, split=dataclasses.replace(self.split, stream=stream), train_ds=train_dataset(stream))
+
+
+def lm_batches(
+        split: TextSplit, *, spec: TokenizerSpec, seq_len: int, batch_size: int, seed: int, validation_split: float,
+) -> TextBatches:
+    """The three datasets of a :class:`TextSplit` and their counts; see the module contract."""
+    n_select, n_test = len(split.select[0]), len(split.test[0])
+    return TextBatches(
+        split=split,
+        train_ds=train_dataset(split.stream),
+        select_ds=select_dataset(split.select, batch_size),
+        test_ds=select_dataset(split.test, batch_size),
+        steps_per_epoch=split.stream.steps_per_epoch,
+        val_steps=-(-n_select // batch_size),
+        n_train=split.stream.n_rows,
+        n_select=n_select,
+        n_test=n_test,
+        input_shape=(seq_len,),
+        num_classes=None,
+        selection_split=(
+            f"the documents whose sha256 of '{seed}:{SELECT_TAG}:<index>' is below validation_split={validation_split} of the train "
+            "documents, cut into windows"),
+        test_split="the test documents of the corpus, cut into windows",
+        spec=spec,
+        seed=seed,
+        batch_size=batch_size,
+    )

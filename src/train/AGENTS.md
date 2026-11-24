@@ -539,8 +539,8 @@ an exemption to green a newly dead field.
 
 `src/train/api/` is a key=value command line and a Python function over strict configs, beside the
 per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
-[`README.md`](README.md)). It has six tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain`,
-`time_series_forecasting` and `depth_estimation` (`python -m train list_tasks` prints them), each
+[`README.md`](README.md)). It has seven tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain`,
+`time_series_forecasting`, `depth_estimation` and `language_model_pretraining` (`python -m train list_tasks` prints them), each
 a `TaskTrainer` subclass in `api/tasks/` (`api/trainer.py:TaskTrainer` holds the hooks and the shared sequence). The
 classification task calls the same `train.common.classification_run` helpers as `train.convnext.common` in the same order.
 
@@ -585,8 +585,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   families (`api/denoising_models.py:builtin_denoising_models`) and the two pretrain families
   (`api/pretrain_models.py:builtin_pretrain_models`) and the seven forecasting families
   (`api/forecast_models.py:builtin_forecast_models`) and the one depth family
-  (`api/depth_models.py:builtin_depth_models`), so a guard that walks
-  `registry.MODELS` meets 27 families (8 + 4 + 5 + 2 + 7 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  (`api/depth_models.py:builtin_depth_models`) and the one language-model family
+  (`api/text_models.py:builtin_text_models`), so a guard that walks
+  `registry.MODELS` meets 28 families (8 + 4 + 5 + 2 + 7 + 1 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
   classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
   layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
   changed once with another session's commits; a test fails when the head gains a knob).

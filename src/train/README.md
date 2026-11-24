@@ -6,12 +6,13 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 ## `python -m train` and `train.api`
 
-A key=value command line over strict configs. It has six tasks, `image_classification`
+A key=value command line over strict configs. It has seven tasks, `image_classification`
 (families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`, `beit`, `energy_transformer`),
 `image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), `image_denoising`
 (families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), `pretrain` (families `et_mim`, `beit_mim`),
 `time_series_forecasting` (families `nbeats`, `prism`, `tirex`, `xlstm`, `ets`, `timestral`, `mdn`) and
-`depth_estimation` (family `depth_anything`), and the same code is a Python function. Run it from the repo root with `.venv`, with
+`depth_estimation` (family `depth_anything`) and `language_model_pretraining` (family `gpt2_lm`), and the same code is a Python
+function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
 ```bash
@@ -306,7 +307,7 @@ denoised = load_model("<run>/final_model.keras").predict("noisy.png")["denoised"
 ```
 
 * **Families** (`train/api/denoising_models.py`; each trains this task only: `python -m train image_denoising model=vit/vit_pico` exits 2 naming
-  the families of this task, and the other five tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
+  the families of this task, and the other six tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
   `"bias_free"`: no additive constant anywhere, so `f(a x) = a f(x)`; the three are checked, see Homogeneity below);
   `convunext_biased` (ConvUNext with `use_bias=true`, its own family because the segmentation family forces
   `output_channels` to the class count) and `scunet` carry constants and are never checked. `scunet` has no variants table in the
@@ -621,7 +622,7 @@ result = train_pretrain(out="auto", model="et_mim/et_tiny", data={"dataset": "ci
 
 * **Families** (`train/api/pretrain_models.py`; the variants are the keys of each model module's `MODEL_VARIANTS`, and
   `python -m train list_models task=pretrain` prints them). Each family trains this task only: a `vit/vit_pico` model given to `pretrain`
-  exits 2 naming the families of this task, and the other five tasks refuse these two the same way. The names before plan 5c6cc105,
+  exits 2 naming the families of this task, and the other six tasks refuse these two the same way. The names before plan 5c6cc105,
   `energy_transformer` and `beit`, are the classifiers of `image_classification` now, with no alias (Limits).
 
 | Family | Method | Variants | Recipe (the legacy trainer's) |
@@ -886,7 +887,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 
 * **Families** (`train/api/forecast_models.py`; the variants are the keys of each family's variants table, `python -m train list_models
   task=time_series_forecasting` prints them). Each family trains this task only; `model=vit/vit_pico` exits 2 naming the families of
-  this task, and the other five tasks refuse these seven the same way. Every row is held to its library factory's signature by
+  this task, and the other six tasks refuse these seven the same way. Every row is held to its library factory's signature by
   `signature_census`: a key the family offers is passed through (and may override a variant's value), a key it refuses or forces is
   named in the refusal, and a key the adapter takes from the data (`lookback`, `horizon`, the channels) is refused as `model_args`.
 
@@ -1160,7 +1161,7 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
 ```
 
 * **Family** (`train/api/depth_models.py`; `python -m train list_models task=depth_estimation` prints the variants). `depth_anything`
-  trains this task only: `model=vit/vit_pico` exits 2 naming it, and the other five tasks refuse it the same way. Its variants are
+  trains this task only: `model=vit/vit_pico` exits 2 naming it, and the other six tasks refuse it the same way. Its variants are
   `vit_s`, `vit_b` and `vit_l` (DINOv2 small, base and large). The adapter is held to the factory's signature by `signature_census`:
   it offers one key, `model_args.pretrained`; it supplies `variant`, `encoder_type` and `image_shape` itself (the last from
   `transform_args.image_size`); it forces `encoder_kind` to `"real"`, `use_feature_alignment` to false, `include_top` to true and
