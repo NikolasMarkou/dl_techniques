@@ -20,6 +20,11 @@ Interface contract
 
 ``wrong_tokenizer_dir(parent)``
     :return: a directory holding the two file names of the pinned ``gpt2`` cache with other bytes (a refusal names their sha256).
+
+``CLASSIFIER_ARGS`` / ``classifier_world`` (fixture, module scope)
+    The ``model_args`` that shrink each classifier family (``bert``, ``gpt2``) to a tiny CPU model, and ``world`` plus the two classifier
+    rows (``train.api.text_models.builtin_classifier_models``), which are not registered until the ``text_classification`` task is
+    (plan-2026-11-24T092348-7806a290 step 9 builds them, step 10 registers them with the task and drops this fixture).
 """
 
 from pathlib import Path
@@ -38,6 +43,9 @@ from ._resume_protocol import merge_changes
 MODEL = "gpt2_lm/tiny"
 #: The ``tiny`` variant is 256 wide with 4 blocks; the tests shrink it (``model_args`` win over the variant's table).
 TINY_MODEL_ARGS = {"embed_dim": 64, "depth": 2, "num_heads": 2}
+#: The same shrink for the ``bert`` classifier (its table names the width ``hidden_size`` and the depth ``num_layers``).
+BERT_MODEL_ARGS = {"hidden_size": 64, "num_layers": 2, "num_heads": 2, "intermediate_size": 128}
+CLASSIFIER_ARGS = {"bert": BERT_MODEL_ARGS, "gpt2": TINY_MODEL_ARGS}
 SEQ_LEN, BATCH, EPOCHS = 32, 16, 3
 #: Documents of the synthetic bank a tiny run reads (the first ``max_samples`` of each split).
 DOCUMENTS = 200
@@ -68,6 +76,17 @@ def world():
         patch.setattr(registry, "TASKS", {})
         recipes.register_builtin_models()
         register_builtin_tasks()
+        yield
+
+
+@pytest.fixture(scope="module")
+def classifier_world(world):
+    """``world`` plus the two classifier rows, in the registry for the module."""
+    from train.api import text_models
+
+    with pytest.MonkeyPatch.context() as patch:
+        for spec in text_models.builtin_classifier_models():
+            patch.setitem(registry.MODELS, spec.family, spec)
         yield
 
 

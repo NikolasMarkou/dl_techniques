@@ -15,6 +15,10 @@ Interface contract
     ``"language_model_pretraining"``, the task these groups belong to, and ``"gpt2_lm"``, the family that trains it
     (:mod:`train.api.text_models` registers its row under that name).
 
+``CLASSIFICATION_TASK`` / ``BERT`` / ``GPT2_CLASSIFIER``
+    ``"text_classification"``, the second text task, and the two families that train it, ``"bert"`` and ``"gpt2"`` (the family and the
+    tokenizer ``gpt2`` share a name: ``text_tokenizer.GPT2`` is the tokenizer). :mod:`train.api.text_models` builds their rows.
+
 ``DATASETS`` / ``SYNTHETIC_TRAIN_DOCUMENTS`` / ``SYNTHETIC_TEST_DOCUMENTS``
     The corpora the text tasks read: the offline ``synthetic`` bank and the local TFDS ``imdb_reviews``; and the default size of
     the bank (``train.common.text_data`` imports both numbers, so the help below and the loader cannot disagree).
@@ -73,6 +77,9 @@ from .text_tokenizer import ASCII95, GPT2, TOKENIZERS, tokenizer_spec
 
 TASK = "language_model_pretraining"
 GPT2_LM = "gpt2_lm"
+CLASSIFICATION_TASK = "text_classification"
+BERT = "bert"
+GPT2_CLASSIFIER = "gpt2"
 
 SYNTHETIC, IMDB = "synthetic", "imdb_reviews"
 DATASETS = (SYNTHETIC, IMDB)
