@@ -326,6 +326,21 @@ def test_the_agents_counts_about_the_tasks_their_hooks_and_the_language_record_a
     assert resume in agents[start:start + 900] and resume in readme, "the keys a resume compares"
 
 
+def test_the_eighth_record_kind_is_described_as_the_code_defines_it():
+    """Plan 7806a290 step 12: the text-classification record's ordinal, own keys and values, and resume keys (a wrong word stayed green)."""
+    task, language = "text_classification", "language_model_pretraining"
+    kind = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")[list(predictor.RECORD_KEYS).index(task)]
+    agents = " ".join(AGENTS.read_text().split())
+    sentence = agents[agents.index(f"a text-classification record (the {kind} kind"):][:520]
+    own = [key for key in predictor.RECORD_KEYS[task] if key not in predictor.RECORD_KEYS[language] or key == "output"]
+    assert own and all(f"`{key}`" in sentence for key in own), own
+    assert f"`{predictor.TEXT_LAYOUTS[0]}`" in sentence and f"`{predictor.TEXT_CLASSIFICATION_OUTPUTS[0]}`" in sentence
+    assert predictor.DATA_KEYS[task] == (*predictor.DATA_KEYS[language], "class_names")
+    shared = ("zero", "one", "two", "three", "four", "five")[len(predictor.DATA_KEYS[language])]
+    assert f"a resume compares the same {shared} and `class_names`" in sentence
+    assert f"`{task}` the {kind} (the same" in agents, "the tables bullet names the kind"
+
+
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")
 
 
