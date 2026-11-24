@@ -704,7 +704,15 @@ classification task calls the same `train.common.classification_run` helpers as 
   help's clause on `checkpoint_args.backup_every_steps`: the default (`config.BACKUP_HELP`) says the key bounds the lost
   work, and `depth_estimation`, which refuses the key, passes a clause saying so. Both hooks have four users today, `pretrain`,
   `time_series_forecasting`, `depth_estimation` and `language_model_pretraining`, which continues the stream at the settled step instead
-  of deriving a seed; `text_classification` is the next.
+  of deriving a seed; `text_classification` is the next. `TaskTrainer.resume_stream_exact` (a class variable, default `False`) says that a
+  resume from a copy taken inside an epoch reads the batches the unkilled run reads next, because `resume_stream` returns the SAME stream
+  at the settled step; one task sets it today, `language_model_pretraining`, and a task that derives another stream or replays epoch 0
+  must leave it `False`. Four sentences choose their wording from it: `config.BACKUP_HELP_EXACT` (the `backup=` clause of
+  `resume_interrupted`'s help) and `args.BACKUP_EVERY_STEPS_HELP_EXACT` (the help of `checkpoint_args.backup_every_steps`, given through
+  the config class's `HELP_OVERRIDES`, which `cli._field_help_lines` reads) are declared by the task's config, the `Resume:` line by
+  `resume_state.StepBackupAndRestore(exact_stream=)`, which `fit_callbacks` hands the flag, and the summary's note by `TaskTrainer._notes`;
+  `test_the_sequence_seams_default_to_nothing.py` compares each earlier task's four sentences with their text before the flag and holds the
+  helps equal to the flag for every task (D-050 of plan 7806a290).
 - **A sixth seam, for a per-variable learning rate** (plan 9c7b9096; a no-op by default, proven in
   `test_the_sequence_seams_default_to_nothing.py`, with the goldens EXACT after the shared edit).
   `TaskTrainer.optimizer_options(config, model)` (default `{}`) is called ONCE in `run_sequence`, after the model is built and,

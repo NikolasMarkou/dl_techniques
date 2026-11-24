@@ -126,12 +126,22 @@ RUN_HELP: Dict[str, str] = {
 }
 
 
-#: The default ``backup`` clause of :func:`resume_help`: what ``checkpoint_args.backup_every_steps`` does to a resume.
-BACKUP_HELP = (
+_BACKUP_HELP_HEAD = (
     "checkpoint_args.backup_every_steps bounds the loss to that many batches "
     "of training, and the epoch is then continued from the last backup: only the "
-    "batches that backup had not taken run, from a fresh pass of the data, so some "
+    "batches that backup had not taken run, from "
+)
+
+#: The default ``backup`` clause of :func:`resume_help`: what ``checkpoint_args.backup_every_steps`` does to a resume.
+BACKUP_HELP = _BACKUP_HELP_HEAD + (
+    "a fresh pass of the data, so some "
     "examples of that epoch repeat and some are missed"
+)
+
+#: The clause of a task whose ``TaskTrainer.resume_stream_exact`` is true: its resume continues the stream, so nothing repeats.
+BACKUP_HELP_EXACT = _BACKUP_HELP_HEAD + (
+    "the stream at the step that backup holds (the batches the unkilled run reads next), "
+    "so no example of that epoch repeats and none is missed"
 )
 
 
@@ -142,7 +152,8 @@ def resume_help(epoch_cost: str, order: str = "the data order replays epoch 0's"
     :param order: what the training data order does on a resume; the default is the shipped tasks' (their loader
         replays epoch 0's order), a task whose resume trains on another stream says so here.
     :param backup: the parenthesis' second clause, what ``checkpoint_args.backup_every_steps`` does to a resume; the
-        default is the tasks' that take the key, a task that refuses it says so here.
+        default is the tasks' that take the key (:data:`BACKUP_HELP_EXACT` for a task whose resume continues its stream), a
+        task that refuses it says so here.
     """
     return (
         "continue a killed run of the same out with the same request (devices "

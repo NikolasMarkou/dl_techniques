@@ -775,7 +775,10 @@ class StepBackupAndRestore(keras.callbacks.BackupAndRestore):
     and its position is not stored), and ends; the epochs after it run in full. The fresh pass
     is the first pass of a new process, so the batches it draws are the first of the order epoch
     0 had, not the ones epoch ``e`` had not yet shown: some examples of epoch ``e`` are seen twice
-    and some not at all. The row of epoch ``e`` in ``training_log.csv`` and the history is
+    and some not at all. A task whose resume continues its stream at the settled step passes
+    ``exact_stream=True`` (``TaskTrainer.resume_stream_exact``): the batches are then the ones the
+    unkilled run reads next, and the ``Resume:`` line says so; nothing else of the callback changes.
+    The row of epoch ``e`` in ``training_log.csv`` and the history is
     written once, by the resumed process: its train metrics (loss, accuracy, ...) and its time
     cover the remaining batches only (the first ones ran in the killed process, whose running
     averages are lost), its validation metrics are the full validation set's, and its ``lr`` is
@@ -798,6 +801,7 @@ class StepBackupAndRestore(keras.callbacks.BackupAndRestore):
             steps_per_epoch: int,
             double_checkpoint: bool = True,
             delete_checkpoint: bool = False,
+            exact_stream: bool = False,
     ) -> None:
         for name, value in (("save_every_steps", save_every_steps), ("steps_per_epoch", steps_per_epoch)):
             if isinstance(value, bool) or not isinstance(value, int):
@@ -819,6 +823,7 @@ class StepBackupAndRestore(keras.callbacks.BackupAndRestore):
             double_checkpoint=double_checkpoint, delete_checkpoint=delete_checkpoint)
         self.save_every_steps = save_every_steps
         self.steps_per_epoch = steps_per_epoch
+        self.exact_stream = exact_stream
         self._saved_at = 0
         self._save_seconds: List[float] = []
         #: Batches of the epoch the restored copy had taken, until the epoch begins; then 0.
@@ -866,10 +871,17 @@ class StepBackupAndRestore(keras.callbacks.BackupAndRestore):
         steps = "" if optimizer is None else (
             "; the optimizer's step count stays at "
             f"{int(keras.ops.convert_to_numpy(getattr(optimizer, 'inner_optimizer', optimizer).iterations))}")
+        # DECISION plan-2026-11-24T092348-7806a290/D-050
+        # The clause follows the TASK's stream: `exact_stream` is `TaskTrainer.resume_stream_exact`, true only where `resume_stream`
+        # returns the SAME stream at the settled step. Do NOT say "a fresh pass" for every task (false there) and do NOT say the
+        # batches are the unkilled run's for every task (false where the resume derives another stream seed or replays epoch 0).
+        batches = (
+            "the stream at the step the backup holds (the batches the unkilled run reads next: none of its examples repeats or "
+            "is missed)" if self.exact_stream else
+            "a fresh pass of the data (some examples of it repeat and some are missed)")
         logger.info(
             f"Resume: the backup was taken after batch {self._owed} of {self.steps_per_epoch} of epoch "
-            f"{epoch}; that epoch runs its remaining {remaining} batches from a fresh pass of the data "
-            f"(some examples of it repeat and some are missed) and ends{steps}")
+            f"{epoch}; that epoch runs its remaining {remaining} batches from {batches} and ends{steps}")
 
     def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         """A new epoch counts its batches from 0, the restored one from what the copy had taken."""

@@ -661,8 +661,14 @@ PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path],
 }
 
 
-def _field_help_lines(cls: Type[StrictConfig], prefix: str = "") -> List[str]:
-    """Return one ``key  type  help [default]`` line per leaf key of ``cls``."""
+def _field_help_lines(cls: Type[StrictConfig], prefix: str = "", overrides: Optional[Mapping[str, str]] = None) -> List[str]:
+    """Return one ``key  type  help [default]`` line per leaf key of ``cls``.
+
+    ``overrides`` maps a dotted key to the help its task gives it in place of its group's; ``None`` reads the config class's
+    ``HELP_OVERRIDES`` (a task has none unless its stream says something a shared group's help cannot, D-050).
+    """
+    if overrides is None:
+        overrides = getattr(cls, "HELP_OVERRIDES", {})
     hints = typing.get_type_hints(cls)
     lines: List[str] = []
     for item in dataclasses.fields(cls):
@@ -671,13 +677,13 @@ def _field_help_lines(cls: Type[StrictConfig], prefix: str = "") -> List[str]:
         key = f"{prefix}.{item.name}" if prefix else item.name
         annotation = hints[item.name]
         if isinstance(annotation, type) and issubclass(annotation, StrictConfig):
-            lines += _field_help_lines(annotation, key)
+            lines += _field_help_lines(annotation, key, overrides)
             continue
         members = typing.get_args(annotation) if typing.get_origin(annotation) is Union else ()
         if members and all(isinstance(m, type) and issubclass(m, StrictConfig) for m in members):
             # A union of groups (``data``): the keys of each member, told apart by ``format``.
             for member in members:
-                lines += _field_help_lines(member, key)
+                lines += _field_help_lines(member, key, overrides)
             continue
         if item.default is not dataclasses.MISSING:
             default = f" [default: {item.default!r}]"
@@ -685,7 +691,7 @@ def _field_help_lines(cls: Type[StrictConfig], prefix: str = "") -> List[str]:
             default = f" [default: {item.default_factory()!r}]"
         else:
             default = " [required]"
-        text = item.metadata.get("help", "")
+        text = overrides.get(key, item.metadata.get("help", ""))
         lines.append(f"  {key}  ({describe_annotation(annotation)})  {text}{default}")
     return lines
 

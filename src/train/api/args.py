@@ -523,6 +523,35 @@ class MetricArgs(StrictConfig):
         return _with_values(self, "metric_args", found)
 
 
+_BACKUP_EVERY_STEPS_HEAD = (
+    "also back the run up every this many batches INSIDE an epoch (an int >= 2 "
+    "and below the steps per epoch), so a killed epoch loses at most that many batches "
+    "of weights; null backs up at each epoch end only. A resume from such a backup "
+    "continues the killed epoch on the weights of the last backup and runs only the "
+    "batches of it that backup had not taken, from "
+)
+_BACKUP_EVERY_STEPS_TAIL = (
+    ", then the remaining epochs in full; the optimizer's step count and the learning rate of every step "
+    "are the unkilled run's. That epoch's row holds the train metrics of its remaining "
+    "batches only. Each backup writes the weights and optimizer "
+    "state twice (the previous copy is kept): src/train/README.md has the measured "
+    "cost per save"
+)
+#: The help of ``checkpoint_args.backup_every_steps``; the clause between the two parts says what the batches of the killed epoch
+#: are drawn from. A task whose ``TaskTrainer.resume_stream_exact`` is true puts the EXACT text in its config's ``HELP_OVERRIDES``.
+BACKUP_EVERY_STEPS_HELP = (
+    _BACKUP_EVERY_STEPS_HEAD
+    + "a fresh pass of the data (some examples of that epoch are seen twice and some not at all)"
+    + _BACKUP_EVERY_STEPS_TAIL
+)
+BACKUP_EVERY_STEPS_HELP_EXACT = (
+    _BACKUP_EVERY_STEPS_HEAD
+    + "the stream at the step that backup holds (the batches the unkilled run reads next: "
+    "no example of that epoch is seen twice and none is missed)"
+    + _BACKUP_EVERY_STEPS_TAIL
+)
+
+
 @dataclasses.dataclass(frozen=True)
 class CheckpointArgs(StrictConfig):
     """Which weights are kept and when training stops early. Read by ``trainer.py``."""
@@ -538,20 +567,7 @@ class CheckpointArgs(StrictConfig):
         metadata={"help": "epochs without improvement before stopping"},
     )
     backup_every_steps: Optional[int] = dataclasses.field(
-        default=None,
-        metadata={
-            "help": "also back the run up every this many batches INSIDE an epoch (an int >= 2 "
-            "and below the steps per epoch), so a killed epoch loses at most that many batches "
-            "of weights; null backs up at each epoch end only. A resume from such a backup "
-            "continues the killed epoch on the weights of the last backup and runs only the "
-            "batches of it that backup had not taken, from a fresh pass of the data (some "
-            "examples of that epoch are seen twice and some not at all), then the remaining "
-            "epochs in full; the optimizer's step count and the learning rate of every step "
-            "are the unkilled run's. That epoch's row holds the train metrics of its remaining "
-            "batches only. Each backup writes the weights and optimizer "
-            "state twice (the previous copy is kept): src/train/README.md has the measured "
-            "cost per save"
-        },
+        default=None, metadata={"help": BACKUP_EVERY_STEPS_HELP}
     )
 
     def problems(self, prefix: str) -> List[str]:

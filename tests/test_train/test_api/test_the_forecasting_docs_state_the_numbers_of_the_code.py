@@ -282,11 +282,16 @@ def test_the_language_section_states_the_numbers_of_the_code():
     assert f"synthetic: {text_args.SYNTHETIC_TRAIN_DOCUMENTS} train and {text_args.SYNTHETIC_TEST_DOCUMENTS} test when null" in text
     assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in text and f"`data.max_samples` {SMOKE_MAX_SAMPLES} when it is null" in text
     assert all(name in text for name, _ in tt.GPT2_FILES) and tt.DEFAULT_TOKENIZER_DIR in text
-    # the open defect the stream bullet names stays named while the shared sentences still say it (D-049): a fix turns this RED
+    # the stream bullet says what the four shared sentences say for this task (D-050; D-049 named the defect they were): the clause it
+    # quotes is the code's, so a change of the wording moves the document with it, and the other tasks' sentences still say a fresh pass
     from train.api.args import CheckpointArgs
-    from train.api.config import BACKUP_HELP
+    from train.api.config import BACKUP_HELP, BACKUP_HELP_EXACT
+    from train.api.tasks.language_model_pretraining import LanguageModelPretrainingTrainer
 
-    assert "wrong for this task, and a known open defect of the shared sequence" in text
+    clause = "from the stream at the step that backup holds (the batches the unkilled run reads next)"
+    assert LanguageModelPretrainingTrainer.resume_stream_exact is True and "`TaskTrainer.resume_stream_exact`" in text
+    assert clause in text and clause in BACKUP_HELP_EXACT and "open defect" not in text and "wrong for this task" not in text
+    assert "so no example repeats and none is missed" in text and '"from a fresh pass of the data"' in text
     assert all("from a fresh pass of the data" in sentence for sentence in (
         BACKUP_HELP, {f.name: f for f in dataclasses.fields(CheckpointArgs)}["backup_every_steps"].metadata["help"]))
 
@@ -313,6 +318,8 @@ def test_the_agents_counts_about_the_tasks_their_hooks_and_the_language_record_a
     start = agents.index(f"a language-model record (the {ordinal} kind")
     keys = [key for key in predictor.RECORD_KEYS["language_model_pretraining"] if key not in ("schema_version", "task", "model", "family", "variant")]
     assert all(f"`{key}`" in agents[start:start + 700] for key in keys) and f"the {ordinal} record kind" in readme
+    exact = [trainer for trainer in trainers if trainer.resume_stream_exact]
+    assert f"`TaskTrainer.resume_stream_exact`" in agents and f"{words[len(exact)]} task sets it today" in agents
     compared = predictor.DATA_KEYS["language_model_pretraining"]
     resume = "a resume compares " + ", ".join(f"`{key}`" for key in compared[:-1]) + f" and `{compared[-1]}`"
     assert resume in agents[start:start + 900] and resume in readme, "the keys a resume compares"

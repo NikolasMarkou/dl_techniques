@@ -82,12 +82,14 @@ import dataclasses
 import functools
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Tuple, Union
 
 from .. import recipes, registry
-from ..args import AnalysisArgs, AutoContext, CheckpointArgs, DebugArgs, LoggerArgs, OptimArgs, is_count
+from ..args import (
+    BACKUP_EVERY_STEPS_HELP_EXACT, AnalysisArgs, AutoContext, CheckpointArgs, DebugArgs, LoggerArgs, OptimArgs, is_count)
 from ..config import (
     AUTO,
+    BACKUP_HELP_EXACT,
     DEFAULT_SEED,
     PATH_FORM,
     RUN_HELP,
@@ -126,6 +128,11 @@ from .pretrain import selection_block
 #: logits (205 MB for four rows at the 50,261-wide vocabulary and 256 tokens), twice, so the sample is small.
 LOAD_CHECK_ROWS = 4
 
+# DECISION plan-2026-11-24T092348-7806a290/D-050
+# This task's resume continues the SAME stream at the settled step, so it sets `resume_stream_exact` on the trainer and gives the two
+# helps their exact clause (`resume_help(backup=)` and `HELP_OVERRIDES`): the shared sentences say "a fresh pass of the data" and that
+# examples repeat or are missed, which is false here. Do NOT drop one of the three (a test holds them equal) and do NOT reword the
+# shared sentences for every task.
 _RESUME_ORDER = (
     "the training stream continues at the step the killed run stopped at (epoch e is a permutation of the training documents "
     "keyed on (seed, e), so the resumed run reads the batches the uninterrupted run would have read next, never epoch 0's again "
@@ -161,7 +168,12 @@ def documents_read(dataset: str, cap: Optional[int], ours: Optional[int], read: 
 
 @dataclasses.dataclass(frozen=True)
 class LanguageModelPretrainingConfig(StrictConfig):
-    """Everything a language-model run is told; see the module contract."""
+    """Everything a language-model run is told; see the module contract.
+
+    :cvar HELP_OVERRIDES: dotted key to the help this task gives it in place of its group's (``cli._field_help_lines`` reads it).
+    """
+
+    HELP_OVERRIDES: ClassVar[Dict[str, str]] = {"checkpoint_args.backup_every_steps": BACKUP_EVERY_STEPS_HELP_EXACT}
 
     out: str = dataclasses.field(metadata={"help": RUN_HELP["out"]})
     model: str = dataclasses.field(
@@ -182,7 +194,8 @@ class LanguageModelPretrainingConfig(StrictConfig):
     precision: Precision = dataclasses.field(default="float32", metadata={"help": RUN_HELP["precision"]})
     resume_interrupted: bool = dataclasses.field(
         default=False,
-        metadata={"help": resume_help("an epoch of the imdb_reviews corpus takes minutes", order=_RESUME_ORDER)},
+        metadata={"help": resume_help(
+            "an epoch of the imdb_reviews corpus takes minutes", order=_RESUME_ORDER, backup=BACKUP_HELP_EXACT)},
     )
     init: Optional[str] = dataclasses.field(default=None, metadata={"help": RUN_HELP["init"]})
     model_args: Dict[str, Any] = dataclasses.field(
@@ -207,11 +220,13 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
     :cvar initial_loss_hint: the remedy sentence of the non-finite initial loss refusal.
     :cvar resume_order: what a resume does to the training stream, for the summary's resume note (the help of
         ``resume_interrupted`` carries the same clause).
+    :cvar resume_stream_exact: true: a resume from a copy taken inside an epoch reads the batches the unkilled run reads next.
     """
 
     task = TASK
     success_metric = WATCH_METRIC
     resume_order = _RESUME_ORDER
+    resume_stream_exact = True
     initial_loss_hint = "Lower optim_args.lr, or check the model arguments and the corpus."
 
     def __init__(self, config: StrictConfig) -> None:

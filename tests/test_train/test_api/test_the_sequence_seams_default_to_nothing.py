@@ -34,6 +34,11 @@ Plan 7806a290 step 5 (D-008) adds the two seams the language task's export needs
 ``ExportRule.sample`` (default ``None``: the tflite check feeds the random float batch it always fed) and the rank-keyed sentence of
 ``exporting._input_spec`` (ranks 3 and 2 keep their words, rank 1 names ``(seq_len,)``). Each has its own test over EVERY task's row.
 
+Plan 7806a290 step 7.2 (D-050) adds ``TaskTrainer.resume_stream_exact`` (default ``False``), which says that a resume from a copy
+taken inside an epoch reads the batches the unkilled run reads next. Four shared sentences choose their wording from it (the help
+of ``resume_interrupted`` and of ``checkpoint_args.backup_every_steps``, the ``Resume:`` log line, the summary note); the last section
+compares each earlier task's four sentences with the text they had at 585af294b, character for character.
+
 Every seam is proved twice, because a default that is "almost" nothing moves a byte in a golden and a
 seam that does nothing passes every default test: the default arm is a real fit of ``vit/vit_pico`` on
 fake CIFAR-10 arrays whose compile call, callback list, ``config.json`` keys and summary keys are read
@@ -1009,3 +1014,185 @@ def test_every_earlier_tasks_input_spec_sentence_is_the_one_it_always_was_and_th
     assert tuple(spec.shape) == (None, 8) and spec.dtype.name == "float32"
     with pytest.raises(ConfigError, match=r"expected \(seq_len,\) of positive ints"):
         exporting._input_spec(None, (8, 8), rank=1)
+
+
+# ---------------------------------------------------------------------
+# Plan 7806a290 step 7.2 (D-050): TaskTrainer.resume_stream_exact, and the four sentences that read it
+# ---------------------------------------------------------------------
+
+EARLIER_TASKS = ("image_classification", "image_segmentation", "image_denoising", "pretrain", "time_series_forecasting",
+                 "depth_estimation")
+#: The words the four sentences of a task whose resumed stream is exact share.
+EXACT_PHRASE = "the batches the unkilled run reads next"
+#: Each sentence's clause about the batches of the killed epoch the copy had not taken, as it was at 585af294b (``OLD``) and as a
+#: task that sets the flag says it (``NEW``): the help of ``resume_interrupted`` (1), of ``backup_every_steps`` (2), the log line
+#: (3) and the summary note (4). The rest of each sentence is the shared text and is the same on both sides.
+OLD = {
+    1: "from a fresh pass of the data, so some examples of that epoch repeat and some are missed",
+    2: "from a fresh pass of the data (some examples of that epoch are seen twice and some not at all)",
+    3: "from a fresh pass of the data (some examples of it repeat and some are missed)",
+    4: "from a fresh pass of the data, so some of its examples were seen twice and some not at all",
+}
+NEW = {
+    1: "from the stream at the step that backup holds (the batches the unkilled run reads next), so no example of that epoch "
+       "repeats and none is missed",
+    2: "from the stream at the step that backup holds (the batches the unkilled run reads next: no example of that epoch is seen "
+       "twice and none is missed)",
+    3: "from the stream at the step the backup holds (the batches the unkilled run reads next: none of its examples repeats or "
+       "is missed)",
+    4: "from the stream at the step the backup holds (the batches the unkilled run reads next), so none of its examples was seen "
+       "twice or missed",
+}
+#: The rendered help line of ``checkpoint_args.backup_every_steps`` at 585af294b: one text for every task (the group is shared).
+BEFORE_BACKUP_EVERY_STEPS_LINE = (
+    "  checkpoint_args.backup_every_steps  (int or null)  also back the run up every this many batches INSIDE an epoch (an int >= 2 "
+    "and below the steps per epoch), so a killed epoch loses at most that many batches of weights; null backs up at each epoch end "
+    "only. A resume from such a backup continues the killed epoch on the weights of the last backup and runs only the batches of it "
+    "that backup had not taken, from a fresh pass of the data (some examples of that epoch are seen twice and some not at all), then "
+    "the remaining epochs in full; the optimizer's step count and the learning rate of every step are the unkilled run's. That "
+    "epoch's row holds the train metrics of its remaining batches only. Each backup writes the weights and optimizer state twice "
+    "(the previous copy is kept): src/train/README.md has the measured cost per save [default: None]"
+)
+#: sha256 of the rendered ``resume_interrupted`` line of each task at 585af294b (it differs per task: its epoch cost and its order).
+BEFORE_RESUME_LINE_SHA256 = {
+    "image_classification": "77c3adfe69c61edd4df41156d688b87594d8be79828bbcec50fd83434ecfb388",
+    "image_segmentation": "d3fc00fad9037082137a21a36885228fb36f8800bfe246490ae6b7bf7e6677df",
+    "image_denoising": "d3fc00fad9037082137a21a36885228fb36f8800bfe246490ae6b7bf7e6677df",
+    "pretrain": "ab0f9158b8e2bd2a8ed26e4d7aaee819e38bb9f6eaf1f72bbbf25f7326d6a8d1",
+    "time_series_forecasting": "65eec1749a11cbe55e2cbf1bcf85e10bda0494fdd19ec5dae526c4de5f2446e6",
+    "depth_estimation": "8b1b6e8869121b170bf2f442f433510f4e687c07b5cf8ae15e12f3a624d2fa23",
+    "language_model_pretraining": "fbb39c201c4ede0c53cdfccbfabad75f6eff279689267be1b5a05a7762e4ac9c",
+}
+#: The ``Resume:`` line of a resume from a copy taken after batch 4 of 10 of epoch 1 (``resume_line`` below), and the summary note
+#: of the killed epoch (``killed_epoch_note``), both at 585af294b.
+BEFORE_RESUME_LOG_LINE = (
+    "Resume: the backup was taken after batch 4 of 10 of epoch 1; that epoch runs its remaining 6 batches from a fresh pass of the "
+    "data (some examples of it repeat and some are missed) and ends; the optimizer's step count stays at 14"
+)
+BEFORE_KILLED_EPOCH_NOTE = (
+    "epoch 1 was killed after 4 of its 10 batches; the resume ran its remaining 6 from a fresh pass of the data, so some of its "
+    "examples were seen twice and some not at all, and the epoch's row (index 1) holds the train metrics (loss, accuracy, ...), "
+    "`lr` and `epoch_times` entry of those 6 batches only and the validation metrics of the whole validation set"
+)
+
+
+def task_row(name):
+    from train.api.tasks import BUILTIN_TASKS
+
+    return next(row for row in BUILTIN_TASKS if row.name == name)
+
+
+def trainer_class_of(row):
+    """The one ``TaskTrainer`` the module of the task defines."""
+    module = importlib.import_module(row.function.split(":")[0])
+    found = [value for value in vars(module).values()
+             if isinstance(value, type) and issubclass(value, TaskTrainer) and value.__module__ == module.__name__]
+    assert len(found) == 1, (row.name, found)
+    return found[0]
+
+
+def rendered(name, key):
+    """The line ``python -m train <task> help`` prints for ``key`` (the real renderer)."""
+    from train.api import cli
+
+    lines = [line for line in cli._field_help_lines(task_row(name).load_config_class()) if line.startswith(f"  {key}  (")]
+    assert len(lines) == 1, (name, key, lines)
+    return lines[0]
+
+
+def sha256_of(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_the_flag_is_false_by_default_and_the_language_task_is_the_one_task_that_sets_it():
+    """A task whose ``resume_stream`` continues the SAME stream at the settled step is the one that sets it; the seam's second
+    user (the text classifier of the next half) is a new row to review here, not a silent change."""
+    from train.api.tasks import BUILTIN_TASKS
+
+    assert TaskTrainer.resume_stream_exact is False
+    assert {row.name: trainer_class_of(row).resume_stream_exact for row in BUILTIN_TASKS} == {
+        **{name: False for name in EARLIER_TASKS}, "language_model_pretraining": True}
+
+
+@pytest.mark.parametrize("name", EARLIER_TASKS)
+def test_the_two_helps_of_every_earlier_task_are_what_they_always_were(name):
+    assert sha256_of(rendered(name, "resume_interrupted")) == BEFORE_RESUME_LINE_SHA256[name], rendered(name, "resume_interrupted")
+    assert rendered(name, "checkpoint_args.backup_every_steps") == BEFORE_BACKUP_EVERY_STEPS_LINE
+
+
+def test_a_task_that_sets_the_flag_changes_the_clause_of_both_helps_and_nothing_else():
+    lm = "language_model_pretraining"
+    resume, backup = rendered(lm, "resume_interrupted"), rendered(lm, "checkpoint_args.backup_every_steps")
+    assert NEW[1] in resume and NEW[2] in backup, (resume, backup)
+    assert "fresh pass" not in resume + backup
+    assert sha256_of(resume.replace(NEW[1], OLD[1])) == BEFORE_RESUME_LINE_SHA256[lm]
+    assert backup.replace(NEW[2], OLD[2]) == BEFORE_BACKUP_EVERY_STEPS_LINE
+
+
+@pytest.mark.parametrize("name", [*EARLIER_TASKS, "language_model_pretraining"])
+def test_the_helps_of_every_task_follow_its_flag(name):
+    """The helps are text of the config class and the flag a class variable of the trainer, declared apart (as ``resume_order``
+    and the help's ``order`` are): this test holds them equal for every task, so a task cannot set one and forget the other."""
+    exact = trainer_class_of(task_row(name)).resume_stream_exact
+    for key in ("resume_interrupted", "checkpoint_args.backup_every_steps"):
+        if name == "depth_estimation" and key == "resume_interrupted":
+            continue  # a task that refuses the key says so instead of what a resume from a copy reads
+        text = rendered(name, key)
+        assert (EXACT_PHRASE in text, "from a fresh pass of the data" in text) == (exact, not exact), (name, key, text)
+
+
+def resume_line(monkeypatch, tmp_path, **keywords):
+    """The ``Resume:`` line the real callback logs when a fit resumes from a copy taken after batch 4 of 10 of epoch 1."""
+    from train.common import resume_state
+
+    from .test_backup_every_steps import KillAt, S, backed_up, fit, tiny
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    directory = tmp_path / "b"
+    assert fit(tiny(), [KillAt(1, 6), *backed_up(directory)[1]]) and S == 10
+    lines = []
+    monkeypatch.setattr(resume_state.logger, "info", lines.append)
+    second = resume_state.StepBackupAndRestore(directory, 4, S, **keywords)
+    assert not fit(tiny(), [second.finish, second])
+    return next(line for line in lines if line.startswith("Resume:"))
+
+
+def test_the_resume_line_is_what_it_always_was_and_the_flag_changes_its_clause_only(monkeypatch, tmp_path):
+    assert resume_line(monkeypatch, tmp_path / "default") == BEFORE_RESUME_LOG_LINE
+    line = resume_line(monkeypatch, tmp_path / "exact", exact_stream=True)
+    assert line == BEFORE_RESUME_LOG_LINE.replace(OLD[3], NEW[3]) and EXACT_PHRASE in line
+
+
+def killed_epoch_note(trainer_class, monkeypatch):
+    """The second note of the real ``TaskTrainer._notes`` (the task's own lines left out) after 4 of 10 batches of epoch 1."""
+    from types import SimpleNamespace
+
+    from train.api import resume_decisions
+
+    monkeypatch.setattr(trainer_class, "task_notes", lambda *args: [])
+    monkeypatch.setattr(resume_decisions, "training_complete_reason", lambda resume, config: None)
+    config = SimpleNamespace(debug_args=SimpleNamespace(smoke=False))
+    return object.__new__(trainer_class)._notes(
+        config, {}, 1.0, False, SimpleNamespace(steps_per_epoch=10), SimpleNamespace(start=1, batch=3))[1]
+
+
+@pytest.mark.parametrize("name", EARLIER_TASKS)
+def test_the_killed_epoch_note_of_every_earlier_task_is_what_it_always_was(name, monkeypatch):
+    assert killed_epoch_note(trainer_class_of(task_row(name)), monkeypatch) == BEFORE_KILLED_EPOCH_NOTE
+
+
+def test_the_killed_epoch_note_of_a_task_that_sets_the_flag_changes_its_clause_only(monkeypatch):
+    note = killed_epoch_note(trainer_class_of(task_row("language_model_pretraining")), monkeypatch)
+    assert note == BEFORE_KILLED_EPOCH_NOTE.replace(OLD[4], NEW[4]) and EXACT_PHRASE in note
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_the_callback_list_hands_the_trainers_flag_to_the_backup_callback(world, tmp_path, exact):
+    """``build_callbacks`` reads the flag off the trainer: a real run with ``backup_every_steps`` set holds the callback."""
+    from train.common.resume_state import StepBackupAndRestore
+
+    task_class = type("Flagged", (Scripted,), {"resume_stream_exact": exact})
+    task = task_class(config_for(tmp_path / "run", epochs=1, **{"checkpoint_args.backup_every_steps": 2}))
+    task.run()
+    backups = [callback for callback in task.seen_callbacks if isinstance(callback, StepBackupAndRestore)]
+    assert [backup.exact_stream for backup in backups] == [exact]

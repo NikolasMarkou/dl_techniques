@@ -176,6 +176,17 @@ def test_the_stream_after_a_mid_epoch_copy_is_the_one_of_the_count_the_copy_hold
     protocol.check_the_mid_epoch_stream(mid_epoch, streams, parent["steps"], parent["counts"]["mid"])
 
 
+def test_the_sentences_a_mid_epoch_resume_writes_say_the_stream_continues_exactly(mid_epoch):
+    """The ``Resume:`` log line and the summary note of the real resumed process (plan 7806a290 step 7.2, D-050): the batches it
+    reads are the ones the unkilled run reads next, so neither sentence may say a fresh pass, repeats or misses."""
+    log = (mid_epoch.run / "run.log").read_text()
+    notes = json.loads((mid_epoch.run / "results_summary.json").read_text())["notes"]
+    sentences = [next(line for line in log.splitlines() if "Resume: the backup was taken after batch" in line),
+                 next(note for note in notes if note.startswith("epoch 1 was killed after "))]
+    for sentence in sentences:
+        assert "the batches the unkilled run reads next" in sentence and "fresh pass" not in sentence, sentence
+
+
 def test_the_mid_epoch_resume_leaves_each_epoch_one_row_and_keeps_the_split(mid_epoch, parent):
     assert [row["epoch"] for row in csv_rows(mid_epoch.run / "training_log.csv")] == [str(e) for e in range(EPOCHS)]
     selects = [row["digest"] for row in mid_epoch.lines("select")]

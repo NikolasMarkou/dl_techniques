@@ -392,6 +392,8 @@ def test_the_help_lists_the_keys(world, capsys):  # noqa: F811
                 "data.max_samples", "model_args", "optim_args.lr", "metric_args.watch_metric", "resume_interrupted"):
         assert key in text, key
     assert "init" in text
+    # the stream of a resume continues (D-050): the command's help says so in both places and names no fresh pass
+    assert text.count("the batches the unkilled run reads next") == 2 and "fresh pass" not in text
 
 
 def child(code: str) -> subprocess.CompletedProcess:
