@@ -79,7 +79,7 @@ class MeanShiftLayer(keras.layers.Layer):
         x [B, N, D']   (vMF: L2-normalise)       D' = P or D
                        │
                        ▼   z = x
-        ┌─ repeat num_steps times ──────────────────────────────┐
+        ┌─ repeat num_steps times ───────────────────────────────┐
         │  keys = z (blurring)  or  x (projection / inputs)      │
         │          │                                             │
         │          ▼                                             │
@@ -412,3 +412,6 @@ def assign_clusters(
                 centers.append(point)
                 labels[row, index] = len(centers) - 1
     return labels if points.ndim == 3 else labels[0]
+
+# ---------------------------------------------------------------------
+

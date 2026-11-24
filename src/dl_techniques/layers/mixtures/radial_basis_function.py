@@ -48,6 +48,8 @@ import numpy as np
 from typing import Literal, Optional, Union, Tuple, Dict, Any, ClassVar, FrozenSet
 
 # ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from ...utils.tensors import resolve_training_factor, pairwise_squared_distance
 from dl_techniques.utils.keras_registration import register_dl_technique

@@ -35,9 +35,6 @@ from typing import Dict, Any, Optional, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# dl_techniques.utils.tensors.gram_matrix fixes the Gram to the output-channel
-# axis, the unreachable target when units > fan_in, so _kernel_gram is used.
-
 # ---------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------

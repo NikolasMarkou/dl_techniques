@@ -1,4 +1,5 @@
-"""Pure mean-shift operations shared by the mean-shift layers.
+"""
+Pure mean-shift operations shared by the mean-shift layers.
 
 Mean shift moves a query ``x`` to the kernel-weighted mean of a set of keys,
 ``m(x) = sum_j K(x, x_j) v_j / sum_j K(x, x_j)``. With the Gaussian kernel
@@ -28,10 +29,13 @@ References:
       using von Mises-Fisher distributions.
 """
 
+import keras
 import math
 from typing import Any, Optional, Tuple, Union
 
-import keras
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.dtype_policy import (
     accumulation_dtype,
@@ -39,6 +43,8 @@ from dl_techniques.utils.dtype_policy import (
     stability_floor,
 )
 from dl_techniques.utils.tensors import l2_normalize
+
+# ---------------------------------------------------------------------
 
 __all__ = [
     "pairwise_sq_dist",
@@ -55,6 +61,7 @@ _NORMALIZE_EPS = 1e-12
 
 _MEDIAN_FLOOR = 1e-6
 
+# ---------------------------------------------------------------------
 
 def _check_kernel(kernel: str) -> None:
     """Raise if ``kernel`` is not one of the supported kernel names.
@@ -605,3 +612,5 @@ def median_heuristic_bandwidth(x: Any, mask: Optional[Any] = None) -> Any:
     median = keras.ops.maximum(median, stability_floor(out_dtype, _MEDIAN_FLOOR))
     median = keras.ops.reshape(median, (-1, 1, 1))
     return keras.ops.stop_gradient(keras.ops.cast(median, out_dtype))
+
+# ---------------------------------------------------------------------

@@ -49,11 +49,15 @@ References:
     - Upstream PyTorch: the ``SIGReg`` module of LeWM (Sobal et al., 2024).
 """
 
-from typing import Any, Dict, Optional, Tuple
-
 import keras
 import numpy as np
 from keras import ops
+from typing import Any, Dict, Optional, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
