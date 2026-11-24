@@ -15,7 +15,8 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
   in the first that has the field; ``data`` is the union of the seven data classes: step 8 of plan d483ffab added
   :class:`~train.api.tasks.image_denoising.ImageDenoisingConfig` and its ``DenoisingData``, step 10 of plan 46e5318f
   :class:`~train.api.tasks.pretrain.PretrainConfig` and its ``PretrainData``, step 7 of plan 7806a290
-  :class:`~train.api.tasks.language_model_pretraining.LanguageModelPretrainingConfig` and its ``TextData``: the lists below name the
+  :class:`~train.api.tasks.language_model_pretraining.LanguageModelPretrainingConfig` and its ``TextData``, step 13 the
+  :class:`~train.api.tasks.text_classification.TextClassificationConfig` (``TextData`` again): the lists below name the
   tasks, so a task the lists do not name has every ``data.<field>`` of its own refused as "not a field of a task config" and its
   fenced commands are never parsed); a backticked ``<name>_args`` alone must be a group; a ``<group>``
   that is not a group is refused; digits count in a field name;
@@ -100,6 +101,7 @@ from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoising
 from train.api.tasks.image_segmentation import ImageSegmentationConfig, ImageSegmentationTrainer
 from train.api.tasks.language_model_pretraining import LanguageModelPretrainingConfig, LanguageModelPretrainingTrainer
 from train.api.tasks.pretrain import PretrainConfig, PretrainTrainer
+from train.api.tasks.text_classification import TextClassificationConfig
 from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig, TimeSeriesForecastingTrainer
 from train.api.text_args import TextData
 from train.api.trainer import TaskTrainer
@@ -180,7 +182,7 @@ ANALYZER_BLOCK_KEYS = set(skipped_analysis_status()) | {"failed_analyses"}
 #: writes must exist in at least one task, and a value it writes after ``=`` must be valid there.
 CONFIGS = (
     ImageClassificationConfig, ImageSegmentationConfig, ImageDenoisingConfig, PretrainConfig, TimeSeriesForecastingConfig,
-    DepthEstimationConfig, LanguageModelPretrainingConfig,
+    DepthEstimationConfig, LanguageModelPretrainingConfig, TextClassificationConfig,
 )
 
 #: Every data class of those configs, in the order of :data:`CONFIGS`.
@@ -470,6 +472,7 @@ TASK_CONFIGS = {
     "time_series_forecasting": TimeSeriesForecastingConfig,
     "depth_estimation": DepthEstimationConfig,
     "language_model_pretraining": LanguageModelPretrainingConfig,
+    "text_classification": TextClassificationConfig,
 }
 
 

@@ -891,6 +891,22 @@ classification task calls the same `train.common.classification_run` helpers as 
   `test_language_model_pretraining_{task,resume,families,predictor_and_export}.py` (the resume file with the child `_language_child.py`),
   `test_common_text_data.py` and `test_text_baselines.py`, sharing `_text_world.py`. The user-facing description is in
   [`README.md`](README.md), which holds the numbers of its GPU gate in its own block.
+- **The `text_classification` task** (plan 7806a290, Phase 4i second half; the D-NNN below are that plan's):
+  `TextClassificationTrainer` (`api/tasks/text_classification.py`) supplies hooks and no stage and overrides `fit_kwargs` and
+  `resume_stream` as the language task's does. Two families train it, `bert` and `gpt2`: `api/text_models.py` holds `create_bert_classifier` and `create_gpt2_classifier`
+  (FUNCTIONAL models of float32 ids with the library's sentiment head, the padding mask read from the tokenizer's pad id inside the graph, D-055),
+  their tables, `CLASSIFIER_RECIPE` and `builtin_classifier_models`; `ClassifierMetricArgs` (`api/text_args.py`) fixes the metric and its
+  direction; `class_stream` and `class_split` (`train/common/text_data.py`) make the rows. Rules a change must keep: a row and its label move by
+  ONE index array, never by two permutations (D-056); the selection documents are the language task's for one seed and split (one
+  `split_documents` rule), and what the two tasks share (`tokenizer_identity`, `documents_overlap`, `check_text_window`, `tokenized_corpus`,
+  `text_run.report_run`) is shared, not copied (D-058); the bar is the majority share of the SELECTION split, strictly above in float32 with no
+  band, never `1 / num_classes`, twice chance, the train rows' share or `>=`, and `Evaluation.loaded` is set, so the bar must also beat the
+  loaded weights, which the language task's loss bar does not (D-057); `gpt2` takes `gpt2_lm` as its one source, an untied `lm_head` dropped,
+  and `bert` takes none (D-054); `fixed` is the vocabulary and the tokenizer's digest, never `seq_len` (D-040); the record is the eighth kind
+  (`HEAD_KEYS` names `class_names`, D-062) and its predictor shares `_TextPredictor` with the language model's (D-064); the export rule has a
+  served function and a sample and refuses no cell (D-063). Tests, in `tests/test_train/test_api/`:
+  `test_text_classification_{task,resume,families,predictor_and_export}.py` and `test_text_init_pairs.py`, sharing `_text_world.py`. The
+  user-facing description is in [`README.md`](README.md), whose gate block covers both text tasks.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `MODEL_CHECKS`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served, sample)`: the shape `export` traces, the cells it refuses, the

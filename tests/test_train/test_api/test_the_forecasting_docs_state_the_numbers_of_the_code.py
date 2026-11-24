@@ -339,6 +339,38 @@ def test_the_eighth_record_kind_is_described_as_the_code_defines_it():
     shared = ("zero", "one", "two", "three", "four", "five")[len(predictor.DATA_KEYS[language])]
     assert f"a resume compares the same {shared} and `class_names`" in sentence
     assert f"`{task}` the {kind} (the same" in agents, "the tables bullet names the kind"
+    readme = " ".join(README.read_text().split())  # step 13: the README says it too
+    sentence = readme[readme.index(f"the {kind} record kind"):][:700]
+    assert all(f"`{key}`" in sentence for key in own) and f"`{predictor.TEXT_LAYOUTS[0]}`" in sentence
+    compared = predictor.DATA_KEYS[task]
+    assert "a resume compares " + ", ".join(f"`{key}`" for key in compared[:-1]) + f" and `{compared[-1]}`" in sentence
+
+
+def test_the_classification_section_and_the_init_pairs_state_the_numbers_of_the_code(world):
+    """Plan 7806a290 step 13: the BERT variants, the classifier recipe, the constants the two text sections share and the count of declared pairs."""
+    import inspect
+
+    from dl_techniques.models.language.bert.model import BERT
+    from train.api import text_args, text_models
+    from train.api.trainer import SMOKE_MAX_SAMPLES
+
+    text = " ".join(README.read_text().split())
+    table, positions = BERT.MODEL_VARIANTS, inspect.signature(BERT.__init__).parameters["max_position_embeddings"].default
+    order = sorted(table, key=lambda name: table[name]["hidden_size"])
+    rows = [f"`{name}` ({table[name]['hidden_size']:,}, {table[name]['num_layers']}, {table[name]['num_heads']})" for name in order[1:]]
+    assert order[0] == "tiny" and all("max_position_embeddings" not in variant for variant in table.values()), "every variant has the library's table"
+    tiny = table["tiny"]
+    assert (f"`tiny` ({tiny['hidden_size']} wide, {tiny['num_layers']} blocks, {tiny['num_heads']} heads), {', '.join(rows[:-1])} and {rows[-1]}, "
+            f"each with a position table of {positions} rows") in text
+    recipe, optim = text_models.CLASSIFIER_RECIPE, text_models.CLASSIFIER_RECIPE["optim_args"]
+    assert (f"AdamW at {optim['lr']:.0e}".replace("e-0", "e-") + f", weight decay {optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epoch, "
+            f"cosine decay over the whole run, a global gradient clip of {optim['global_clipnorm']:.1f}, batch {recipe['batch_size']}, "
+            f"{recipe['epochs']} epochs, patience {recipe['checkpoint_args']['early_stopping_patience']}.") in text
+    keys = text[text.index("<!-- keys-of: text_classification -->"):][:2500]  # the section's own table and its next paragraphs
+    assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in keys and text_args.CLASS_NAMES == ("neg", "pos")
+    pairs = sum(len(spec.transfer.sources) for spec in registry.MODELS.values() if spec.transfer)
+    words = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    assert f"are the {words[pairs]} declared cross-task pairs" in text, "the init section counts the pairs the families declare"
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")
