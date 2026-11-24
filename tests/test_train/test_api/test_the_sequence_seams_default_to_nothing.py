@@ -1104,14 +1104,18 @@ def sha256_of(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def test_the_flag_is_false_by_default_and_the_language_task_is_the_one_task_that_sets_it():
+#: The tasks whose ``resume_stream`` continues the SAME stream at the settled step: the two text tasks.
+EXACT_TASKS = ("language_model_pretraining", "text_classification")
+
+
+def test_the_flag_is_false_by_default_and_the_two_text_tasks_are_the_tasks_that_set_it():
     """A task whose ``resume_stream`` continues the SAME stream at the settled step is the one that sets it; the seam's second
-    user (the text classifier of the next half) is a new row to review here, not a silent change."""
+    user (the text classifier, plan 7806a290 step 10) is a row reviewed here, not a silent change."""
     from train.api.tasks import BUILTIN_TASKS
 
     assert TaskTrainer.resume_stream_exact is False
     assert {row.name: trainer_class_of(row).resume_stream_exact for row in BUILTIN_TASKS} == {
-        **{name: False for name in EARLIER_TASKS}, "language_model_pretraining": True}
+        **{name: False for name in EARLIER_TASKS}, **{name: True for name in EXACT_TASKS}}
 
 
 @pytest.mark.parametrize("name", EARLIER_TASKS)
@@ -1129,7 +1133,7 @@ def test_a_task_that_sets_the_flag_changes_the_clause_of_both_helps_and_nothing_
     assert backup.replace(NEW[2], OLD[2]) == BEFORE_BACKUP_EVERY_STEPS_LINE
 
 
-@pytest.mark.parametrize("name", [*EARLIER_TASKS, "language_model_pretraining"])
+@pytest.mark.parametrize("name", [*EARLIER_TASKS, *EXACT_TASKS])
 def test_the_helps_of_every_task_follow_its_flag(name):
     """The helps are text of the config class and the flag a class variable of the trainer, declared apart (as ``resume_order``
     and the help's ``order`` are): this test holds them equal for every task, so a task cannot set one and forget the other."""

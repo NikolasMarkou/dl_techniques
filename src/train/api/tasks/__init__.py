@@ -59,6 +59,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.language_model_pretraining:train_language_model_pretraining",
         summary="train a GPT-2 as a causal language model on a text corpus, scored against the unigram of its selection targets",
     ),
+    registry.TaskSpec(
+        name="text_classification",
+        config_class="train.api.tasks.text_classification:TextClassificationConfig",
+        function="train.api.tasks.text_classification:train_text_classification",
+        summary="train a BERT or GPT-2 text classifier on a labelled corpus, scored against the majority class of its selection split",
+    ),
 )
 
 

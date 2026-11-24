@@ -319,8 +319,9 @@ def test_a_list_command_accepts_every_help_word(command, word, cwd):
         # pretrain families (et_mim with three, beit_mim with four) and the 23 of the seven
         # forecasting families (nbeats 3, prism 4, tirex 4, xlstm 2, ets 3, timestral 4, mdn 3) and the 3 of the one depth
         # family (depth_anything: vit_s, vit_b, vit_l); 109 + the 7 of the beit (4) and energy_transformer (3) classifiers
-        # (plan 5c6cc105 Step 5) and the 5 of the one language-model family (gpt2_lm: large, medium, small, tiny, xl).
-        assert len(result.stdout.split()) == 121
+        # (plan 5c6cc105 Step 5), the 5 of the one language-model family (gpt2_lm: large, medium, small, tiny, xl) and the 9 of the
+        # two text-classification families (plan 7806a290 Step 10: bert 4, gpt2 5).
+        assert len(result.stdout.split()) == 130
 
 
 # A task that raises a DLTrainError of its own is a user-fixable failure, not a

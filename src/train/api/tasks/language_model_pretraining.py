@@ -86,7 +86,7 @@ from typing import Any, ClassVar, Dict, List, Mapping, Optional, Tuple, Union
 
 from .. import recipes, registry
 from ..args import (
-    BACKUP_EVERY_STEPS_HELP_EXACT, AnalysisArgs, AutoContext, CheckpointArgs, DebugArgs, LoggerArgs, OptimArgs, is_count)
+    BACKUP_EVERY_STEPS_HELP_EXACT, AnalysisArgs, AutoContext, CheckpointArgs, DebugArgs, LoggerArgs, OptimArgs)
 from ..config import (
     AUTO,
     BACKUP_HELP_EXACT,
@@ -101,32 +101,26 @@ from ..config import (
     validate,
 )
 from ..data_args import DataFacts
-from ..errors import ConfigError
 from ..predictor import build_language_model_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..text_args import (
     GPT2_LM,
-    SYNTHETIC,
-    SYNTHETIC_TRAIN_DOCUMENTS,
     TASK,
     WATCH_METRIC,
     LanguageMetricArgs,
     TextData,
     TextTransformArgs,
+    documents_overlap,
     load_text_data_config,
     read_text_data_file,
     text_facts,
+    tokenizer_identity,
 )
-from ..text_models import METRIC_NAMES, language_loss_and_metrics, recipe_notices_of
-from ..text_tokenizer import check_tokenizer_dir, tokenizer_spec
+from ..text_models import METRIC_NAMES, check_text_window, language_loss_and_metrics, recipe_notices_of
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
 from .pretrain import selection_block
 
 # ---------------------------------------------------------------------
-
-#: Rows of the selection windows the reload check of ``final_model.keras`` predicts: each row is ``seq_len x vocab_size`` floats of
-#: logits (205 MB for four rows at the 50,261-wide vocabulary and 256 tokens), twice, so the sample is small.
-LOAD_CHECK_ROWS = 4
 
 # DECISION plan-2026-11-24T092348-7806a290/D-050
 # This task's resume continues the SAME stream at the settled step, so it sets `resume_stream_exact` on the trainer and gives the two
@@ -149,21 +143,6 @@ _CONFORMAL = (
     f"a conformal prediction set is a set of classes, which a {TASK} run does not produce; its output is a distribution over "
     "the next token"
 )
-
-
-def documents_read(dataset: str, cap: Optional[int], ours: Optional[int], read: int) -> Optional[int]:
-    """Return how many train documents a run capped at ``cap`` read of ``dataset``, or ``None`` when this run's cap hides it.
-
-    Interface contract: ``ours`` is the cap of THIS run (``data.max_samples``) and ``read`` the number of train documents it read. The
-    synthetic bank is as long as it is asked to be (the task's default when ``cap`` is null); a cap above a corpus reads all of it,
-    which this run's own read count gives when its cap did not bind; when it did, the corpus holds at least ``ours`` documents and a
-    source capped at most ``ours`` read exactly its cap. Pure; never raises.
-    """
-    if dataset == SYNTHETIC:
-        return SYNTHETIC_TRAIN_DOCUMENTS if cap is None else cap
-    if ours is None or read < ours:
-        return read if cap is None else min(cap, read)
-    return cap if cap is not None and cap <= ours else None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -246,23 +225,11 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
         return text_facts(config.data)
 
     def build_data(self, config: LanguageModelPretrainingConfig, context: AutoContext) -> Any:
-        import time
-
         from dl_techniques.utils.logger import logger
         from train.common import text_data, text_run
 
         data_cfg: TextData = config.data
-        spec = tokenizer_spec(data_cfg.tokenizer)
-        started = time.perf_counter()
-        tokenizer = text_data.open_tokenizer(spec, data_cfg.tokenizer_dir)
-        (train_texts, _), (test_texts, _) = text_data.corpus_documents(
-            data_cfg.dataset, text_data.LM, max_samples=data_cfg.max_samples)
-        train_docs = text_data.tokenize_documents(train_texts, tokenizer)
-        test_docs = text_data.tokenize_documents(test_texts, tokenizer)
-        logger.info(
-            f"Read and tokenized {len(train_docs)} train and {len(test_docs)} test documents of {data_cfg.dataset} with "
-            f"{spec.encoding} ({sum(len(doc) for doc in train_docs):,} and {sum(len(doc) for doc in test_docs):,} tokens, "
-            f"{time.perf_counter() - started:.1f} s)")
+        spec, (train_docs, _), (test_docs, _) = text_data.tokenized_corpus(data_cfg, text_data.LM)
         split = text_data.lm_split(
             train_docs, test_docs, spec=spec, seq_len=data_cfg.seq_len, batch_size=config.batch_size, seed=config.seed,
             validation_split=data_cfg.validation_split)
@@ -308,59 +275,15 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
         return {"model_args": recipes.serialize_model_args(self._model_kwargs(config, context))}
 
     def check_model_args(self, config: LanguageModelPretrainingConfig, context: AutoContext) -> None:
-        kwargs = self._model_kwargs(config, context)
-        # DECISION plan-2026-11-24T092348-7806a290/D-004
-        # The tokenizer's files are checked HERE, before the claim, with paths and hashes only (no tensor, no tokenizer library):
-        # a directory that is missing or holds a file of another hash must not cost a claimed `out`, and a run made with such a
-        # file would match no record made with the pinned copy. Do NOT leave it to `build_data` (the claim is made by then) and do
-        # NOT fall back to /tmp or the network when the pinned copy is gone.
-        check_tokenizer_dir(config.data.tokenizer, config.data.tokenizer_dir)
-        table = registry.MODELS[context.family].load_variants()[context.variant]
-        limit = kwargs.get("max_seq_len", table["max_seq_len"])
-        if is_count(limit) and config.data.seq_len > limit:  # a limit that is no count is the library's refusal, at the build
-            raise ConfigError(
-                f"Invalid value for 'data.seq_len': {config.data.seq_len!r} is above the {limit} rows of the position table of "
-                f"{context.family}/{context.variant} (max_seq_len), so the model cannot be built at it; lower data.seq_len, or "
-                "raise model_args.max_seq_len"
-            )
+        check_text_window(config.data, context.family, context.variant, self._model_kwargs(config, context))
 
     def init_identity(self, config: LanguageModelPretrainingConfig, context: AutoContext) -> Dict[str, Any]:
         """Return the vocabulary and the tokenizer's digest this run's record will hold, for an ``init`` source."""
-        spec = tokenizer_spec(config.data.tokenizer)
-        return {"vocab_size": spec.vocab_size, "tokenizer": spec.digest}
+        return tokenizer_identity(config.data)
 
     def init_overlap(self, source: Any, config: LanguageModelPretrainingConfig, data: Any) -> Dict[str, Any]:
-        """The source's train documents (``split_documents`` of its seed, split and cap, rebuilt) against this run's selection
-        documents, counted; the test documents are the corpus's own, which no run trains on."""
-        import numpy as np
-
-        from train.common.text_data import split_documents
-
-        from .. import init_from
-
-        theirs, ours = source.config.get("data") or {}, config.data
-        if theirs.get("dataset") != ours.dataset:
-            return init_from.split_block("different_data", f"the source trained on {theirs.get('dataset')}, this run reads "
-                                                           f"{ours.dataset}", {"data.dataset": theirs.get("dataset")}, None, (0, 0))
-        keys = {"data.dataset": ours.dataset, "seed": source.config.get("seed"),
-                "data.validation_split": theirs.get("validation_split"), "data.max_samples": theirs.get("max_samples")}
-        if keys == {"data.dataset": ours.dataset, "seed": config.seed, "data.validation_split": ours.validation_split,
-                    "data.max_samples": ours.max_samples}:
-            return init_from.same_split("documents", keys)
-        # DECISION plan-2026-11-24T092348-7806a290/D-042
-        # The source's train documents are rebuilt with the SOURCE's seed, split and cap (its config.json), and this run's selection
-        # documents are the ones it holds. Do NOT rebuild both cuts from this run's keys (they would coincide and the count read 0),
-        # and do NOT guess how many documents a capped source read: `documents_read` says, or the split is `unknown`.
-        select = data.split.select_index
-        n_source = documents_read(ours.dataset, keys["data.max_samples"], ours.max_samples,
-                                  len(data.split.train_index) + len(select))
-        if n_source is None:
-            return init_from.split_block("unknown", f"this run caps data.max_samples at {ours.max_samples}, so how many "
-                                                    f"{ours.dataset} documents the source (data.max_samples "
-                                                    f"{keys['data.max_samples']}) read is not known: its split of them cannot be rebuilt")
-        trained = split_documents(n_source, keys["seed"], keys["data.validation_split"])[0]
-        return init_from.counted_split("documents", keys, np.intersect1d(trained, select).size, len(select), 0,
-                                       data.split.n_test_docs)
+        """The source's train documents among this run's selection documents, counted (:func:`documents_overlap`)."""
+        return documents_overlap(source, config, data, self.task)
 
     # -- compile --------------------------------------------------------
 
@@ -528,56 +451,17 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
 
     def evaluate_and_report(self, config: LanguageModelPretrainingConfig, data: Any, fit: FitState) -> Evaluation:
         """Run the language-model reporting sequence; see the module contract."""
-        from types import SimpleNamespace
-
-        import numpy as np
-
-        from train.common import classification_run, pretrain_run, run_summary
+        from train.common import pretrain_run, text_run
         from train.common.resume_state import FIT_STATE_NAME
 
-        checkpoint_cfg: CheckpointArgs = config.checkpoint_args
-        analysis_cfg: AnalysisArgs = config.analysis_args
-        metric_cfg: LanguageMetricArgs = config.metric_args
         # The epoch-zero term of the bar, from the sidecar: see `epoch_zero_val_loss` (a resume reads the same number).
         self._epoch_zero = pretrain_run.epoch_zero_val_loss(fit.run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME)
         baseline = self._baseline
         if baseline is None:
             raise RuntimeError("evaluate_and_report needs the baseline build_data works out; the data was not built")
-        test_best: Optional[Dict[str, float]] = None
-        load_error: Optional[str] = None
-        max_diff: Optional[float] = None
-        if checkpoint_cfg.save_best:
-            # The in-memory model holds the BEST weights here (EarlyStopping restored them). The test windows are fixed, so the
-            # reloaded file reproduces them exactly.
-            test_best, load_error, max_diff = classification_run.check_best_checkpoint(
-                fit.model, fit.run_dir, data.test_ds, evaluate=classification_run.evaluate_dict, split_label="Test results")
-        # A few fixed selection windows: the sample of the analysis and of the reload check of `final_model.keras`.
-        x, y = data.split.select
-        sample_x = x[:LOAD_CHECK_ROWS].astype(np.float32)
-        # The best weights are analysed, then the last epoch's replace them (the sequence the denoising task shares).
-        analysis, test_final, load_check, load_detail = run_summary.report_data_free_run(
-            fit.model,
-            SimpleNamespace(x_fig=sample_x, y_fig=y[:LOAD_CHECK_ROWS]),
-            fit.history,
-            fit.run_dir,
-            fit.vis_dir,
-            fit.experiment_name,
-            run_analysis=functools.partial(self.run_analysis, config),
-            model_analysis=analysis_cfg.model_analysis,
-            eval_batch_size=analysis_cfg.eval_batch_size,
-            last_weights=fit.last_weights,
-            data=data,
-            epochs_run=fit.epochs_run,
-            save_last=checkpoint_cfg.save_last,
-            load_sample=sample_x,
-            predict_batch_size=data.batch_size,
-        )
-        visualizations: Dict[str, Any] = {"files": [], "failed": [], "skipped": not analysis_cfg.figures}
-        if analysis_cfg.figures and fit.vis_dir.is_dir():
-            visualizations["files"] = sorted(path.name for path in fit.vis_dir.iterdir() if path.is_file())
-        hist = {key: [float(v) for v in values] for key, values in fit.history.history.items()}
         start = self.selection_start_epoch(config)
-        best = run_summary.best_epoch(hist, metric_cfg.watch_metric, metric_cfg.watch_mode, first_epoch=start)
+        fields, hist, best = text_run.report_run(config, data, fit, functools.partial(self.run_analysis, config), start)
+        test_best, test_final = fields["test_metrics_best"], fields["test_metrics_final"]
         extras: Dict[str, Any] = {
             "baseline": {"kind": "unigram", "val_loss": baseline},
             "epoch_zero": {"val_loss": self._epoch_zero, "binds": bool(self._epoch_zero < baseline)},
@@ -592,18 +476,7 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
         }
         # DECISION plan-2026-11-19T081214-5c6cc105/D-012
         # No `loaded=`: `Evaluation.loaded` is higher-is-better (`init_from.beats_loaded`) and would judge this loss backwards.
-        return Evaluation(
-            test_metrics_best=test_best,
-            best_load_error=load_error,
-            checkpoint_max_diff=max_diff,
-            conformal=None,
-            visualizations=visualizations,
-            analysis=analysis,
-            test_metrics_final=test_final,
-            load_check=load_check,
-            load_detail=load_detail,
-            extras=extras,
-        )
+        return Evaluation(**fields, extras=extras)
 
 
 def train_language_model_pretraining(

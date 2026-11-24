@@ -33,7 +33,7 @@ from train.api.errors import ConfigError, ConfigValidationError
 from train.api.registry import CrossTask
 from train.api.text_tokenizer import tokenizer_spec
 
-from ._text_world import ASCII_VOCAB, CLASSIFIER_ARGS, SEQ_LEN, classifier_world, world  # noqa: F401  (fixtures)
+from ._text_world import ASCII_VOCAB, CLASSIFIER_ARGS, SEQ_LEN, world  # noqa: F401  (fixture)
 
 FAMILIES = ("bert", "gpt2")
 TASK, LM_TASK, LM_FAMILY = "text_classification", "language_model_pretraining", "gpt2_lm"
@@ -325,7 +325,7 @@ def test_only_the_gpt2_row_takes_a_source_and_it_is_the_language_family_whose_un
 
 
 @pytest.mark.parametrize("family", FAMILIES)
-def test_the_family_trains_this_task_only_and_every_other_family_is_refused_under_it(family, classifier_world):  # noqa: F811
+def test_the_family_trains_this_task_only_and_every_other_family_is_refused_under_it(family, world):  # noqa: F811
     assert registry.parse_model_name(f"{family}/tiny", task=TASK) == (family, "tiny")
     for other_task in ("image_classification", LM_TASK):
         with pytest.raises(ConfigError, match=f"the family '{family}' trains {TASK}, not '{other_task}'"):

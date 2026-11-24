@@ -21,10 +21,12 @@ Interface contract
 ``wrong_tokenizer_dir(parent)``
     :return: a directory holding the two file names of the pinned ``gpt2`` cache with other bytes (a refusal names their sha256).
 
-``CLASSIFIER_ARGS`` / ``classifier_world`` (fixture, module scope)
-    The ``model_args`` that shrink each classifier family (``bert``, ``gpt2``) to a tiny CPU model, and ``world`` plus the two classifier
-    rows (``train.api.text_models.builtin_classifier_models``), which are not registered until the ``text_classification`` task is
-    (plan-2026-11-24T092348-7806a290 step 9 builds them, step 10 registers them with the task and drops this fixture).
+``CLASSIFIER_ARGS``
+    The ``model_args`` that shrink each classifier family (``bert``, ``gpt2``) to a tiny CPU model.
+
+``classifier_request(out, family="gpt2", **changes)`` / ``classifier_prepared(out, family="gpt2", **changes)``
+    The ``text_classification`` twins of ``request`` and ``prepared``: a tiny run of ``<family>/tiny`` on the labelled synthetic bank
+    (``CLASSIFIER_DOCUMENTS`` documents, 60 percent of them class 0, a quarter selecting), ``CLASSIFIER_EPOCHS`` epochs.
 """
 
 from pathlib import Path
@@ -47,6 +49,11 @@ TINY_MODEL_ARGS = {"embed_dim": 64, "depth": 2, "num_heads": 2}
 BERT_MODEL_ARGS = {"hidden_size": 64, "num_layers": 2, "num_heads": 2, "intermediate_size": 128}
 CLASSIFIER_ARGS = {"bert": BERT_MODEL_ARGS, "gpt2": TINY_MODEL_ARGS}
 SEQ_LEN, BATCH, EPOCHS = 32, 16, 3
+#: A classifier needs more steps than a language model to leave the majority share on a bank this small, and a selection split of
+#: 75 documents (a quarter of 300) keeps its majority share near the bank's 0.6 where one of 19 would swing to 0.526.
+CLASSIFIER_EPOCHS = 8
+CLASSIFIER_DOCUMENTS = 300
+CLASSIFIER_SPLIT = 0.25
 #: Documents of the synthetic bank a tiny run reads (the first ``max_samples`` of each split).
 DOCUMENTS = 200
 ASCII_VOCAB = 101
@@ -79,15 +86,20 @@ def world():
         yield
 
 
-@pytest.fixture(scope="module")
-def classifier_world(world):
-    """``world`` plus the two classifier rows, in the registry for the module."""
-    from train.api import text_models
-
-    with pytest.MonkeyPatch.context() as patch:
-        for spec in text_models.builtin_classifier_models():
-            patch.setitem(registry.MODELS, spec.family, spec)
-        yield
+def classifier_request(out: Any, family: str = "gpt2", **changes: Any) -> Dict[str, Any]:
+    """The mapping of a tiny ``text_classification`` run of ``<family>/tiny`` on the labelled synthetic bank."""
+    asked: Dict[str, Any] = {
+        "out": str(out),
+        "model": f"{family}/tiny",
+        "data": {"dataset": "synthetic", "tokenizer": "ascii95", "seq_len": SEQ_LEN, "max_samples": CLASSIFIER_DOCUMENTS,
+                 "validation_split": CLASSIFIER_SPLIT},
+        "epochs": CLASSIFIER_EPOCHS,
+        "batch_size": BATCH,
+        "model_args": dict(CLASSIFIER_ARGS[family]),
+        "optim_args": {"lr": 3e-3},
+        "analysis_args": {"model_analysis": False, "figures": False},
+    }
+    return merge_changes(asked, changes)
 
 
 def prepared(out: Any, **changes: Any) -> Tuple[LanguageModelPretrainingTrainer, Any, Any]:
@@ -106,3 +118,14 @@ def wrong_tokenizer_dir(parent: Path) -> Path:
     for name, _ in tt.tokenizer_spec("gpt2").files:
         (directory / name).write_bytes(b"not the bpe file")
     return directory
+
+
+def classifier_prepared(out: Any, family: str = "gpt2", **changes: Any) -> Tuple[Any, Any, Any]:
+    """``(trainer, resolved config, context)`` of a tiny classifier request; see :func:`prepared`."""
+    from train.api.tasks.text_classification import TextClassificationConfig, TextClassificationTrainer
+
+    config = validate(TextClassificationConfig, classifier_request(out, family, **changes))
+    trainer = TextClassificationTrainer(config)
+    parsed, variant = registry.parse_model_name(config.model, task=trainer.task)
+    resolved, context = trainer._resolve(trainer.describe_data(config), parsed, variant)
+    return trainer, resolved, context

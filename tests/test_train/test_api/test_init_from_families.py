@@ -57,6 +57,9 @@ CLASSIFICATION, SEGMENTATION, DENOISING = "image_classification", "image_segment
 FORECASTING, DEPTH, PRETRAIN = "time_series_forecasting", "depth_estimation", "pretrain"
 #: The language-model task has one family, ``gpt2_lm``: censused at the end of the file, as the pretrain rows are.
 LANGUAGE_MODEL, GPT2_LM = "language_model_pretraining", "gpt2_lm"
+#: The text-classification task has two families, ``bert`` and ``gpt2``: their pair with the language model is censused in
+#: ``test_text_init_pairs.py`` (plan-2026-11-24T092348-7806a290 steps 9 and 10), not here.
+TEXT_CLASSIFICATION = "text_classification"
 #: The tasks that take ``init``.
 INIT_TASKS = (CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH)
 
@@ -192,11 +195,12 @@ def undeclared(specs: Mapping[str, registry.ModelSpec]) -> List[str]:
 
 
 def test_every_row_declares_a_spec():
-    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL}
+    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL, TEXT_CLASSIFICATION}
     assert all(len(spec.tasks) == 1 for spec in registry.MODELS.values())
     assert undeclared(registry.MODELS) == []
     assert sum(task_of(family) == PRETRAIN for family in registry.MODELS) == 2
     assert sum(task_of(family) == LANGUAGE_MODEL for family in registry.MODELS) == 1
+    assert sum(task_of(family) == TEXT_CLASSIFICATION for family in registry.MODELS) == 2
 
 
 def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():

@@ -21,7 +21,7 @@ One family trains the ``language_model_pretraining`` task (its name is :data:`tr
 Neither library factory takes the arguments the API calls a factory with (``factory(variant=, num_classes=, input_shape=)``):
 the adapters close that gap and nothing else. Importing this module imports no model code and no keras: each adapter imports
 its model inside the call, so ``python -m train help`` allocates nothing. ``recipes.register_builtin_models`` calls
-:func:`builtin_text_models`; the two classifier rows (:func:`builtin_classifier_models`) join it with their task.
+:func:`builtin_text_models`, which returns the language row and the two classifier rows of :func:`builtin_classifier_models`.
 
 Interface contract
 ------------------
@@ -67,9 +67,10 @@ Interface contract
     census is both empty.
 
 ``language_loss_and_metrics()`` / ``METRIC_NAMES``
-    :return: ``(loss, metrics)`` for ``compile``: ``SparseCategoricalCrossentropy(from_logits=True)`` and the token accuracy
-        named :data:`ACCURACY` (``METRIC_NAMES`` is the names alone, for the hook that must build nothing). The model returns
-        logits, so the loss takes logits: one module holds both halves of that contract.
+    :return: ``(loss, metrics)`` for ``compile``: ``SparseCategoricalCrossentropy(from_logits=True)`` and the accuracy named
+        :data:`ACCURACY` (the token accuracy of the language model, the class accuracy of a classifier: every text model returns
+        logits and the same two objects fit both; ``METRIC_NAMES`` is the names alone, for the hook that must build nothing). The
+        model returns logits, so the loss takes logits: one module holds both halves of that contract.
 
 ``observe_gpt2(model)`` / ``observe_bert(model)``
     The ``ModelSpec.observe`` of the rows: the variant-table keys the backbone layer of a loaded functional model shows
@@ -82,10 +83,17 @@ Interface contract
     :return: ``[(level, text)]``, the recipe's numbers that no run measured, the task's ``recipe_notices`` hook prints them.
 
 ``builtin_text_models()`` / ``builtin_classifier_models()``
-    :return: the language-model row, and the two classifier rows (``bert``, then ``gpt2``), freshly built. Each classifier row names
-        the ``text_classification`` task, ``task_head`` as its head and the vocabulary and the tokenizer as its fixed keys; ``gpt2``
-        declares the ``gpt2_lm`` family as its one source and ``bert`` none (an encoder cannot start from a causal decoder). The
-        classifier rows are registered by their task, not by :func:`builtin_text_models`, until that task exists.
+    :return: the three text rows, freshly built: the language-model row and the two classifier rows (``bert``, then ``gpt2``);
+        the second function alone gives the classifier rows. Each classifier row names the ``text_classification`` task,
+        ``task_head`` as its head and the vocabulary and the tokenizer as its fixed keys; ``gpt2`` declares the ``gpt2_lm`` family as
+        its one source and ``bert`` none (an encoder cannot start from a causal decoder).
+
+``check_text_window(data, family, variant, kwargs)``
+    The pre-claim refusals both text tasks share, from ``TaskTrainer.check_model_args``. :param data: the run's
+        :class:`~train.api.text_args.TextData`; ``kwargs``: the factory keywords the resolver returned. :raises ConfigError: a
+        tokenizer directory that is missing or holds files of another hash (paths and hashes only), and a ``data.seq_len`` above the
+        position table of the model (``max_seq_len`` of GPT-2, ``max_position_embeddings`` of BERT), which the library would refuse
+        only when the model is built, after the run directory is claimed.
 
 Import rule
 -----------
@@ -96,11 +104,13 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import recipes
 from .args import AutoContext, OptimArgs, is_count
+from . import registry
 from .config import unknown_key_message
 from .denoising_models import named_parameters
-from .errors import ConfigValidationError
+from .errors import ConfigError, ConfigValidationError
 from .registry import CrossTask, ModelSpec, TransferSpec
-from .text_args import BERT, CLASSIFICATION_TASK, GPT2_CLASSIFIER, GPT2_LM, TASK, WATCH_METRIC
+from .text_args import BERT, CLASSIFICATION_TASK, CLASSIFIER_METRIC, GPT2_CLASSIFIER, GPT2_LM, TASK, WATCH_METRIC, TextData
+from .text_tokenizer import check_tokenizer_dir
 
 # ---------------------------------------------------------------------
 
@@ -416,6 +426,37 @@ def language_loss_and_metrics() -> Tuple[Any, List[Any]]:
 
 
 # ---------------------------------------------------------------------
+# The refusals before the claim
+# ---------------------------------------------------------------------
+
+#: The key of each family's position table: the row count a window may not pass.
+POSITION_KEYS = {GPT2_LM: "max_seq_len", GPT2_CLASSIFIER: "max_seq_len", BERT: "max_position_embeddings"}
+
+
+def check_text_window(data: TextData, family: str, variant: str, kwargs: Mapping[str, Any]) -> None:
+    """Refuse a tokenizer directory and a window the run cannot honour, before the claim; see the module contract."""
+    # DECISION plan-2026-11-24T092348-7806a290/D-004
+    # The tokenizer's files are checked HERE, before the claim, with paths and hashes only (no tensor, no tokenizer library): a
+    # directory that is missing or holds a file of another hash must not cost a claimed `out`, and a run made with such a file
+    # would match no record made with the pinned copy. Do NOT leave it to `build_data` (the claim is made by then) and do NOT fall
+    # back to /tmp or the network when the pinned copy is gone.
+    check_tokenizer_dir(data.tokenizer, data.tokenizer_dir)
+    key = POSITION_KEYS[family]
+    table = registry.MODELS[family].load_variants()[variant]
+    if key in kwargs or key in table:
+        limit = kwargs.get(key, table.get(key))
+    else:  # BERT's table has no position row: the library's own default is the limit (imported here, the check runs after keras)
+        from dl_techniques.models.language.bert.model import BERT as BertLayer
+
+        limit = BertLayer.DEFAULT_MAX_POSITION_EMBEDDINGS
+    if is_count(limit) and data.seq_len > limit:  # a limit that is no count is the library's refusal, at the build
+        raise ConfigError(
+            f"Invalid value for 'data.seq_len': {data.seq_len!r} is above the {limit} rows of the position table of "
+            f"{family}/{variant} ({key}), so the model cannot be built at it; lower data.seq_len, or raise model_args.{key}"
+        )
+
+
+# ---------------------------------------------------------------------
 # The resolver
 # ---------------------------------------------------------------------
 
@@ -466,7 +507,7 @@ CLASSIFIER_RECIPE: Dict[str, Any] = {
         optimizer="adamw", lr=3e-4, weight_decay=0.01, warmup_epochs=1, decay_over="total", global_clipnorm=1.0
     ),
     "transform_args": {},
-    "metric_args": {"watch_metric": "val_accuracy"},
+    "metric_args": {"watch_metric": CLASSIFIER_METRIC},
     "checkpoint_args": {"early_stopping_patience": 4},
     "model_args": {},
     "per_dataset": {},
@@ -508,6 +549,10 @@ def builtin_text_models() -> Tuple[ModelSpec, ...]:
     # (`init_identity` of the task). The window length is NOT one: no weight depends on it (the position table is `max_seq_len`
     # rows; measured: every weight copies from a source of another `seq_len`), so a source of shorter windows may seed longer ones.
     # Do NOT add it (a refusal of a transfer that works), and do NOT add `sources` (the family takes its own family only).
+    # DECISION plan-2026-11-24T092348-7806a290/D-053
+    # The two classifier rows are registered HERE, in the same commit as the `text_classification` TaskSpec: a family whose task
+    # is not in `registry.TASKS` is a family `python -m train` lists and cannot run, and the count guard (`sum(counts) ==
+    # len(MODELS)` over the tasks of `BUILTIN_TASKS`) would be red or the documents false. Do NOT remove one without the other.
     return (
         ModelSpec(
             family=GPT2_LM,
@@ -519,16 +564,12 @@ def builtin_text_models() -> Tuple[ModelSpec, ...]:
             observe=f"{_HERE}:observe_gpt2",
             transfer=TransferSpec(fixed=("vocab_size", "tokenizer")),
         ),
+        *builtin_classifier_models(),
     )
 
 
 def builtin_classifier_models() -> Tuple[ModelSpec, ...]:
     """Return the two classifier family specs (``bert``, ``gpt2``), freshly built; see the module contract."""
-    # DECISION plan-2026-11-24T092348-7806a290/D-053
-    # These rows are built here and REGISTERED WITH THEIR TASK, not by `builtin_text_models`: a family whose task is not in
-    # `registry.TASKS` is a family `python -m train` lists and cannot run, and the count guard (`sum(counts) == len(MODELS)` over
-    # the tasks of `BUILTIN_TASKS`) would be red or the documents false until the task exists. Do NOT add them to
-    # `builtin_text_models` without the `text_classification` TaskSpec in the same commit.
     # DECISION plan-2026-11-24T092348-7806a290/D-054
     # `gpt2` takes the language-model family as its one source, with the untied `lm_head` dropped (an untied source seeds it too; the
     # bare `CrossTask()` refused it, measured: `scratch_step9/pair_probe.md`); `bert` takes none (a bidirectional encoder cannot

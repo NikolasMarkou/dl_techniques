@@ -16,25 +16,36 @@ the real models in the PRODUCTION ORDER (the target built first, then the source
   naming both sides;
 * the ``[CLS]`` layout: a row is ``[CLS]``, the head of the document, pad; every id of it is a row of the source's embedding table.
 
+Step 10 (the ``text_classification`` task exists): the same refusals come from the real task before the claim (exit 2, ``out``
+unclaimed), and a real tiny ``gpt2_lm`` run seeds a real ``gpt2`` run (``cross_task``): copied is every weight of the source (derived
+by counting the archive), reset is the 8 variables of the head, the run's own epoch zero is the loaded weights' accuracy and the bar
+must beat it. The classifier record, and with it a classifier as a SOURCE, is Step 11's.
+
 Tests write only under ``tmp_path``.
 """
 
 import json
+import shutil
+from types import SimpleNamespace
 
 import keras
 import numpy as np
 import pytest
 
 from dl_techniques.utils.logger import logger
-from train.api import init_from, predictor
+from train.api import cli, init_from, predictor
 from train.api import text_models as tm
-from train.api.args import AutoContext
 from train.api.errors import ConfigError
 from train.api.registry import CrossTask
+from train.api.tasks.language_model_pretraining import train_language_model_pretraining
+from train.api.tasks.text_classification import train_text_classification
 from train.api.text_tokenizer import tokenizer_spec
 from train.common import text_data as td
+from train.common import text_run
 
-from ._text_world import ASCII_VOCAB, SEQ_LEN, TINY_MODEL_ARGS, classifier_world, world  # noqa: F401  (fixtures)
+from ._text_world import (
+    ASCII_VOCAB, CLASSIFIER_SPLIT, SEQ_LEN, TINY_MODEL_ARGS, classifier_prepared, classifier_request, request,
+    world)  # noqa: F401  (``world``: fixture)
 
 TASK, LM_TASK, LM_FAMILY, FAMILY = "text_classification", "language_model_pretraining", "gpt2_lm", "gpt2"
 ASCII, GPT2_TOKENIZER = tokenizer_spec("ascii95"), tokenizer_spec("gpt2")
@@ -44,7 +55,7 @@ HEAD = "task_head"
 
 
 def row_of(family):
-    return {spec.family: spec for spec in tm.builtin_classifier_models()}[family]
+    return {spec.family: spec for spec in tm.builtin_text_models()}[family]
 
 
 def paths(model, side):
@@ -177,43 +188,47 @@ def write_source(root, record):
     return root
 
 
-class Classifier:
-    """The two things ``read_source`` asks of a task's trainer: its name and the identity of the run it starts."""
-
-    task = TASK
-
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-
-    def init_identity(self, config, context):
-        spec = tokenizer_spec(self.tokenizer)
-        return {"vocab_size": spec.vocab_size, "tokenizer": spec.digest}
+def refuse(source, family, tmp_path):
+    """Run the real task with ``init=source``: the sequence reads the source in ``_resolve``, ahead of ``open_run``."""
+    return train_text_classification(**{**classifier_request(tmp_path / "run", family), "init": str(source)})
 
 
-def read(source, family):
-    """What the sequence asks before the claim of a ``text_classification`` run on the ascii tokenizer."""
-    context = AutoContext(family=family, variant="tiny", dataset="synthetic", num_classes=2, image_size=None, defaults={})
-    return init_from.read_source(source, Classifier("ascii95"), None, context)
-
-
-def test_an_lm_run_is_a_declared_source_of_the_gpt2_classifier_before_the_claim(classifier_world, tmp_path):  # noqa: F811
+def test_an_lm_run_is_a_declared_source_of_the_gpt2_classifier_before_the_claim(world, tmp_path):  # noqa: F811
     source = write_source(tmp_path / "source", lm_record())
-    taken = read(source, FAMILY)
+    trainer, resolved, context = classifier_prepared(tmp_path / "run", FAMILY, init=str(source))
+    taken = trainer._init_source
     assert taken.relation == row_of(FAMILY).transfer.sources[(LM_TASK, LM_FAMILY)] and taken.relation is not None
-    assert dict(taken.pins) == {} and taken.notice is None and taken.record == lm_record()
-    assert init_from.file_sha256(source / "best_model.keras") == taken.sha256
+    assert dict(taken.pins) == {} and taken.notice is None and taken.record == lm_record() and context.pinned == {}
+    assert init_from.file_sha256(source / "best_model.keras") == taken.sha256 and not (tmp_path / "run").exists()
+    assert trainer.init_identity(resolved, context) == {"vocab_size": ASCII.vocab_size, "tokenizer": ASCII.digest}
 
 
-def test_the_gpt2_row_declares_the_language_family_as_its_source_and_bert_declares_none(classifier_world):  # noqa: F811
+def test_a_source_trained_at_another_length_is_taken_before_the_claim(world, tmp_path):  # noqa: F811
+    """``seq_len`` is no ``fixed`` key (D-040): no weight depends on it, so a language run of 64-token windows seeds a 32-token row."""
+    source = write_source(tmp_path / "source", lm_record(seq_len=64))
+    trainer, resolved, _ = classifier_prepared(tmp_path / "run", FAMILY, init=str(source))
+    assert trainer._init_source.relation is not None and trainer._init_source.record["seq_len"] == 64 != resolved.data.seq_len
+    assert not (tmp_path / "run").exists()
+
+
+def test_the_gpt2_row_declares_the_language_family_as_its_source_and_bert_declares_none(world):  # noqa: F811
     assert sorted(row_of(FAMILY).transfer.sources) == [(LM_TASK, LM_FAMILY)]
     assert not row_of("bert").transfer.sources
 
 
-def test_bert_takes_no_earlier_run_and_the_refusal_says_what_it_does_take(classifier_world, tmp_path):  # noqa: F811
+def test_bert_takes_no_earlier_run_and_the_refusal_says_what_it_does_take(world, tmp_path):  # noqa: F811
     source = write_source(tmp_path / "source", lm_record())
     with pytest.raises(ConfigError, match=r"Invalid value for 'init': gpt2_lm \(language_model_pretraining\) cannot seed bert "
                                           r"\(text_classification\); bert takes weights from bert \(text_classification\)$"):
-        read(source, "bert")
+        refuse(source, "bert", tmp_path)
+    assert not (tmp_path / "run").exists()
+
+
+def vit_record():
+    """An image-classification record: a run of another task, the case "a classifier source" can be before Step 11 has a record."""
+    return predictor.build_task_record(
+        task="image_classification", model="vit/vit_pico", family="vit", variant="vit_pico", class_names=["a", "b"],
+        input_shape=[32, 32, 3], normalize="standardize", mean=[0.5] * 3, std=[0.25] * 3, data_kind="cifar10", source_channels=3)
 
 
 REFUSALS = [
@@ -231,11 +246,25 @@ REFUSALS = [
 
 
 @pytest.mark.parametrize("record, pattern", REFUSALS)
-def test_a_gpt2_classifier_at_another_tokenizer_or_vocabulary_is_refused_naming_both_sides(
-        record, pattern, classifier_world, tmp_path):  # noqa: F811
+def test_a_gpt2_classifier_at_another_tokenizer_or_vocabulary_is_refused_naming_both_sides(record, pattern, world, tmp_path):  # noqa: F811
     source = write_source(tmp_path / "source", record())
     with pytest.raises(ConfigError, match="Invalid value for 'init': " + pattern):
-        read(source, FAMILY)
+        refuse(source, FAMILY, tmp_path)
+    assert not (tmp_path / "run").exists(), "a pre-claim refusal claimed the run directory"
+
+
+def test_a_run_of_another_task_is_refused_by_the_declared_sources_sentence_and_the_command_exits_two(world, tmp_path, capsys):  # noqa: F811
+    source = write_source(tmp_path / "source", vit_record())
+    sentence = (r"vit \(image_classification\) cannot seed gpt2 \(text_classification\); gpt2 takes weights from gpt2 "
+                r"\(text_classification\) or gpt2_lm \(language_model_pretraining\)$")
+    with pytest.raises(ConfigError, match="Invalid value for 'init': " + sentence):
+        refuse(source, FAMILY, tmp_path)
+    out = tmp_path / "cli_run"
+    stale = write_source(tmp_path / "stale", lm_record() | {"tokenizer": "f" * 64})
+    code = cli.main(["text_classification", f"out={out}", "model=gpt2/tiny", "data.dataset=synthetic", "data.tokenizer=ascii95",
+                     f"init={stale}"])
+    assert code == 2 and not out.exists()
+    assert "gpt2 sizes its weights by the tokenizer (data.tokenizer, as its digest)" in capsys.readouterr().err
 
 
 def test_every_fixed_key_of_the_classifier_rows_has_a_name_in_the_refusal():
@@ -262,3 +291,114 @@ def test_a_row_is_cls_then_the_head_of_the_document_then_pad_and_every_id_is_a_r
     model = tm.create_gpt2_classifier(variant="tiny", num_classes=2, input_shape=(8,), vocab_size=spec.vocab_size,
                                       pad_id=spec.pad_id, cls_id=spec.cls_id, embed_dim=16, depth=1, num_heads=2)
     assert model(ids.astype(np.float32)).shape == (4, 2)
+
+
+# ---------------------------------------------------------------------
+# A real pair: a tiny gpt2_lm run seeds a real gpt2 run
+# ---------------------------------------------------------------------
+
+#: A rate that moves no float32 weight: the run scores what the loaded weights scored at epoch zero.
+STILL = {"lr": 1e-30, "warmup_epochs": 0}
+
+
+def weights_of(run_dir):
+    """The engine's view of the saved best model of a run: ``{path relative to the model: array}``."""
+    model = keras.models.load_model(str(run_dir / "best_model.keras"), compile=False)
+    return {path: variable.numpy() for path, variable in init_from._by_path(model, "run").items()}
+
+
+@pytest.fixture(scope="module")
+def lm_source(world, tmp_path_factory):  # noqa: F811
+    """gpt2_lm on the synthetic bank (64 wide, 2 blocks, windows of 32), 3 epochs."""
+    out = tmp_path_factory.mktemp("lm_source") / "run"
+    keras.backend.clear_session()
+    train_language_model_pretraining(**request(out))
+    return out
+
+
+def classifier_run(root, source, **changes):
+    keras.backend.clear_session()
+    out = root / "run"
+    train_text_classification(**classifier_request(out, FAMILY, init=str(source), **changes))
+    return out, json.loads((out / "results_summary.json").read_text())
+
+
+@pytest.fixture(scope="module")
+def still(world, lm_source, tmp_path_factory):  # noqa: F811
+    root = tmp_path_factory.mktemp("still")
+    source = root / "source"
+    shutil.copytree(lm_source, source)
+    return SimpleNamespace(source=source, **dict(zip(("out", "summary"), classifier_run(root, source, epochs=1, optim_args=STILL))))
+
+
+def test_a_gpt2_run_starts_from_a_language_model_run_and_the_counts_are_the_archives(still, lm_source):
+    block = still.summary["init"]
+    source, target = weights_of(lm_source), weights_of(still.out)
+    head = sorted(path for path in target if path.split("/")[0] == HEAD)
+    assert (block["task"], block["family"], block["variant"], block["relation"], block["pinned"]) == (
+        LM_TASK, LM_FAMILY, "tiny", "cross_task", {})
+    assert block["geometry"] == {"seq_len": SEQ_LEN, "vocab_size": ASCII_VOCAB}
+    assert (block["transfer"]["copied"], sorted(block["transfer"]["reset"])) == (len(source), head) and len(head) == 8
+    assert not (block["transfer"]["dropped"] or block["transfer"]["resampled"] or block["transfer"]["grown"])
+    logger.info(f"CLS-INIT copied {block['transfer']['copied']} of {len(source)} weights of the language run, reset "
+                f"{len(block['transfer']['reset'])} (the head's {len(head)} variables), dropped 0, split {block['split']['relation']}")
+    # the run really holds the source's weights: a still fine-tune moves none of them, and the head is the run's own
+    decoder = sorted(path for path in target if path.split("/")[0] != HEAD)
+    assert decoder == sorted(source)
+    for path in decoder:
+        np.testing.assert_array_equal(target[path], source[path], err_msg=path)
+
+
+def test_the_two_synthetic_banks_are_other_texts_so_the_split_is_different_data(still):
+    split = still.summary["init"]["split"]
+    assert (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == ("different_data", 0, 0)
+    assert "language bank" in split["reason"] and "labelled bank" in split["reason"]
+    assert still.summary["epoch_zero_of"] == "init" and not any(init_from.bias_of(still.summary["init"]).values())
+
+
+def test_under_init_epoch_zero_is_the_loaded_weights_accuracy_and_a_fine_tune_that_only_holds_them_misses(still):
+    summary = still.summary
+    loaded = json.loads((still.out / "checkpoints" / "fit_state.json").read_text())["initial"]["metrics"]["accuracy"]
+    assert summary["loaded_success_value"] == loaded and (summary["initial_loss_ratio"], summary["init_scale_warning"]) == (None, None)
+    assert summary["success_value"] == loaded, "the still run scores what the loaded weights scored"
+    assert summary["success"] is False and not text_run.strictly_above(summary["success_value"], loaded)
+    assert init_from.NOT_JUDGED_UNDER_INIT in summary["notes"]
+    assert "Evaluate of the loaded weights before fit: " in (still.out / "run.log").read_text()
+    logger.info(f"CLS-INIT-STILL epoch zero (the loaded weights) {loaded:.4f}, bar (majority share) "
+                f"{summary['success_threshold']:.4f}, best of the still run {summary['success_value']:.4f}, success {summary['success']}")
+
+
+def test_a_fine_tune_that_learns_meets_the_bar_and_beats_the_loaded_weights(world, lm_source, tmp_path):  # noqa: F811
+    out, summary = classifier_run(tmp_path, lm_source)
+    loaded = summary["loaded_success_value"]
+    assert summary["success"] is True and text_run.strictly_above(summary["success_value"], summary["success_threshold"])
+    assert text_run.strictly_above(summary["success_value"], loaded), "and it beats the loaded weights' epoch zero"
+    logger.info(f"CLS-INIT-LEARNS epoch zero {loaded:.4f}, bar {summary['success_threshold']:.4f}, best {summary['success_value']:.4f}")
+
+
+def test_the_overlap_of_a_language_source_with_the_imdb_selection_is_counted_as_the_oracle(world, tmp_path):  # noqa: F811
+    """The same reviews serve both tasks, so by document index the count is exact (the synthetic banks are other texts)."""
+    import dataclasses
+    import hashlib
+
+    def held_out(seed, n, split):
+        return {i for i in range(n)
+                if int.from_bytes(hashlib.sha256(f"{seed}:select:{i}".encode()).digest()[:8], "big") / 2 ** 64 < split}
+
+    n, split = 120, CLASSIFIER_SPLIT
+    trainer, resolved, _ = classifier_prepared(tmp_path / "imdb", **{"data.dataset": "imdb_reviews", "data.max_samples": n})
+    theirs = {"seed": 42, "data": {"dataset": "imdb_reviews", "validation_split": split, "max_samples": n}}
+    source = SimpleNamespace(config=theirs, record={"task": LM_TASK})
+
+    def data_of(seed):
+        chosen = held_out(seed, n, split)
+        return SimpleNamespace(split=SimpleNamespace(
+            train_index=np.array(sorted(set(range(n)) - chosen)), select_index=np.array(sorted(chosen)), n_test_docs=n))
+
+    other = trainer.init_overlap(source, dataclasses.replace(resolved, seed=43), data_of(43))
+    expected = len((set(range(n)) - held_out(42, n, split)) & held_out(43, n, split))
+    assert expected > 0 and (other["relation"], other["unit"], other["n_select_overlap"], other["n_test_overlap"]) == (
+        "overlap", "documents", expected, 0)
+    assert predictor._split_problems(other) == []
+    same = trainer.init_overlap(source, resolved, data_of(42))
+    assert (same["relation"], same["n_select_overlap"], same["n_test_overlap"]) == ("same_split", 0, 0)

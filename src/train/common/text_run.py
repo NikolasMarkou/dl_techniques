@@ -1,10 +1,10 @@
-"""The bars of the language tasks: an analytic unigram, a majority share and two strict float32 comparisons.
+"""The bars of the language tasks (an analytic unigram, a majority share and two strict float32 comparisons) and their reporting.
 
 The bar of ``language_model_pretraining`` is cut from the ``val_loss`` of a CONSTANT model that predicts the unigram
 distribution of the selection targets, and the bar of ``text_classification`` from the share of the majority class of the
 selection split. Neither needs a model. A constant Keras model over a 50,261-wide vocabulary at batch 8 and 255 positions is
 0.4 GB of logits a forward (3 GB at 100,277), where the unigram is a count of the targets: O(vocabulary) memory. The module
-scope imports numpy only (the check against a compiled constant model is a test).
+scope imports numpy only (the check against a compiled constant model is a test); the reporting imports ``train.common`` inside.
 
 Interface contract
 ------------------
@@ -31,9 +31,24 @@ Interface contract
 ``strictly_above(reached, threshold)``
     :return: whether ``float32(reached)`` is strictly above ``float32(threshold)``. No band: Keras' accuracy of a model that answers
         the majority class is ``float32(k) / float32(n)``, the float32 of the share to the last bit (every count below 2**24).
+
+``report_run(config, data, fit, run_analysis, start)``
+    The reporting both text tasks share, the body of their ``evaluate_and_report`` up to the summary's task-specific keys: the best
+    checkpoint reloaded and scored on the test split, the data-free analysis (``run_analysis``, the task's bound hook), the last
+    epoch's weights scored, saved and reloaded. :param config: the resolved task config (its ``checkpoint_args``, ``analysis_args``
+    and ``metric_args``); ``data``: the :class:`~train.common.text_data.TextBatches` (the first :data:`LOAD_CHECK_ROWS` selection rows
+    are the sample of the analysis and of the reload check); ``fit``: the ``FitState``; ``start``: the 0-based epoch the selection
+    starts at. :return: ``(fields, hist, best)``: the keywords of ``Evaluation`` this reporting fills (everything but ``loaded``,
+    ``extras`` and ``failed_checks``), the history as plain floats and the 1-based best epoch of ``metric_args.watch_metric``.
 """
 
+from typing import Any, Callable, Dict, Tuple
+
 import numpy as np
+
+#: Selection rows the reload check of ``final_model.keras`` predicts and the analysis reads: each row of the language model is
+#: ``seq_len x vocab_size`` floats of logits (205 MB for four rows at the 50,261-wide vocabulary and 256 tokens), twice.
+LOAD_CHECK_ROWS = 4
 
 #: Targets counted per pass: a count never holds more than this many ids as one ``intp`` array (8 MB).
 CHUNK_ELEMENTS = 1 << 20
@@ -99,3 +114,36 @@ def strictly_above(reached: float, threshold: float) -> bool:
     # counts, equal to the last bit for every count below 2**24 (a test sweeps them), so a model that answers the majority class
     # scores exactly the bar and `>` calls it a miss. Do NOT write `>=` (that calls it a success).
     return bool(np.float32(reached) > np.float32(threshold))
+
+
+def report_run(config: Any, data: Any, fit: Any, run_analysis: Callable[..., Any], start: int) -> Tuple[Dict[str, Any], Dict[str, Any], int]:
+    """The reporting both text tasks share; see the module contract."""
+    from types import SimpleNamespace
+
+    from train.common import classification_run, run_summary
+
+    checkpoint_cfg, analysis_cfg, metric_cfg = config.checkpoint_args, config.analysis_args, config.metric_args
+    test_best, load_error, max_diff = None, None, None
+    if checkpoint_cfg.save_best:
+        # The in-memory model holds the BEST weights here (EarlyStopping restored them). The test rows are fixed, so the reloaded
+        # file reproduces them exactly.
+        test_best, load_error, max_diff = classification_run.check_best_checkpoint(
+            fit.model, fit.run_dir, data.test_ds, evaluate=classification_run.evaluate_dict, split_label="Test results")
+    # A few fixed selection rows: the sample of the analysis and of the reload check of `final_model.keras`.
+    x, y = data.split.select
+    sample_x = x[:LOAD_CHECK_ROWS].astype(np.float32)
+    # The best weights are analysed, then the last epoch's replace them (the sequence the denoising task shares).
+    analysis, test_final, load_check, load_detail = run_summary.report_data_free_run(
+        fit.model, SimpleNamespace(x_fig=sample_x, y_fig=y[:LOAD_CHECK_ROWS]), fit.history, fit.run_dir, fit.vis_dir,
+        fit.experiment_name, run_analysis=run_analysis, model_analysis=analysis_cfg.model_analysis,
+        eval_batch_size=analysis_cfg.eval_batch_size, last_weights=fit.last_weights, data=data, epochs_run=fit.epochs_run,
+        save_last=checkpoint_cfg.save_last, load_sample=sample_x, predict_batch_size=data.batch_size)
+    visualizations: Dict[str, Any] = {"files": [], "failed": [], "skipped": not analysis_cfg.figures}
+    if analysis_cfg.figures and fit.vis_dir.is_dir():
+        visualizations["files"] = sorted(path.name for path in fit.vis_dir.iterdir() if path.is_file())
+    hist = {key: [float(v) for v in values] for key, values in fit.history.history.items()}
+    best = run_summary.best_epoch(hist, metric_cfg.watch_metric, metric_cfg.watch_mode, first_epoch=start)
+    fields = dict(test_metrics_best=test_best, best_load_error=load_error, checkpoint_max_diff=max_diff, conformal=None,
+                  visualizations=visualizations, analysis=analysis, test_metrics_final=test_final, load_check=load_check,
+                  load_detail=load_detail)
+    return fields, hist, best

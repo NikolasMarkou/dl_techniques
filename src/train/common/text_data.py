@@ -80,6 +80,24 @@ stream_seed=None, validation_split)``
     :return: ``(ids, truncated)``: int32 ``(n, seq_len)`` rows ``[CLS]`` + the head of the document + pad, and the number of
         documents cut. A row is never all pad (the ``[CLS]`` is its first id). :raises ValueError: ``seq_len`` below 2.
 
+``tokenized_corpus(data, kind)``
+    :param data: a :class:`train.api.text_args.TextData`; ``kind``: :data:`LM` or :data:`CLASSIFICATION` (the synthetic bank's kind).
+    :return: ``(spec, (train_docs, train_labels), (test_docs, test_labels))``: the tokenizer's spec, the tokenized documents of both
+        splits (int32 arrays) and their labels (``None`` for a language corpus), the tokenizer opened from ``data.tokenizer_dir``.
+        The one reading both text tasks do before their split.
+
+``class_stream(ids, labels, *, batch_size, seed)`` / ``class_split(train_docs, train_labels, test_docs, test_labels, *, spec, seq_len,
+batch_size, seed, stream_seed=None, validation_split, num_classes)``
+    The classifier's twins of :func:`lm_stream` and :func:`lm_split`. The stream's epoch ``e`` is the train rows in an order keyed on
+    ``(seed, e)`` with each label moved by the SAME index array as its row; the split is :func:`split_documents` of the same rule
+    (so the selection documents of the two tasks are one set for one seed and split) and its parts are ``(ids, labels)`` rows. The
+    returned :class:`TextSplit` also holds the train labels and the number of documents cut at ``seq_len - 1`` tokens.
+    :raises ValueError: a train or selection part with no document of some class, naming the class and the counts; fewer train
+        rows than a batch.
+
+``class_batches(split, *, spec, seq_len, batch_size, seed, validation_split, num_classes)``
+    The :class:`TextBatches` of a classifier split: :func:`lm_batches` with the class count and the provenance of rows.
+
 ``TextBatches`` / ``lm_batches(split, *, spec, seq_len, batch_size, seed, validation_split)``
     The object the language task's ``build_data`` returns and the run sequence reads: the :class:`TextSplit`, the three datasets
     built from it (``select_dataset`` of the selection and of the test windows, ``train_dataset`` of the stream), the counts in
@@ -106,7 +124,7 @@ import numpy as np
 
 from dl_techniques.utils.logger import logger
 from train.api.text_args import IMDB, SYNTHETIC, SYNTHETIC_TEST_DOCUMENTS, SYNTHETIC_TRAIN_DOCUMENTS
-from train.api.text_tokenizer import ASCII95, TOKENIZERS, TokenizerSpec, check_files
+from train.api.text_tokenizer import ASCII95, TOKENIZERS, TokenizerSpec, check_files, tokenizer_spec
 
 #: The environment variable tiktoken reads its cache directory from.
 CACHE_ENV = "TIKTOKEN_CACHE_DIR"
@@ -328,6 +346,22 @@ def corpus_documents(
     raise ValueError(f"dataset must be {SYNTHETIC!r} or {IMDB!r}, got {dataset!r}")
 
 
+def tokenized_corpus(data: Any, kind: str) -> Tuple[TokenizerSpec, Tuple[List[np.ndarray], Any], Tuple[List[np.ndarray], Any]]:
+    """The tokenized train and test documents of ``data`` and their labels; see the module contract."""
+    import time
+
+    spec = tokenizer_spec(data.tokenizer)
+    started = time.perf_counter()
+    tokenizer = open_tokenizer(spec, data.tokenizer_dir)
+    (train_texts, train_labels), (test_texts, test_labels) = corpus_documents(data.dataset, kind, max_samples=data.max_samples)
+    train_docs, test_docs = tokenize_documents(train_texts, tokenizer), tokenize_documents(test_texts, tokenizer)
+    logger.info(
+        f"Read and tokenized {len(train_docs)} train and {len(test_docs)} test documents of {data.dataset} with {spec.encoding} "
+        f"({sum(len(doc) for doc in train_docs):,} and {sum(len(doc) for doc in test_docs):,} tokens, "
+        f"{time.perf_counter() - started:.1f} s)")
+    return spec, (train_docs, train_labels), (test_docs, test_labels)
+
+
 # ---------------------------------------------------------------------
 # the split and the windows
 # ---------------------------------------------------------------------
@@ -480,8 +514,10 @@ class TextSplit:
     """The numpy half of what a text task consumes.
 
     :param stream: the train stream over the train documents. :param select, test: the fixed ``(x, y)`` windows of the selection
-        documents and of the test documents. :param train_index, select_index: the document numbers of the train and of the
-        selection parts, in the corpus given. :param n_test_docs: documents of the test part.
+        documents and of the test documents (a classifier's: ``(ids, labels)`` rows). :param train_index, select_index: the document
+        numbers of the train and of the selection parts, in the corpus given. :param n_test_docs: documents of the test part.
+        :param truncated, train_labels: a classifier's only: the documents (of every part) cut at ``seq_len - 1`` tokens and the
+        labels of the train rows in document order (a language split holds ``0`` and ``None``).
     """
 
     stream: TextStream
@@ -490,6 +526,8 @@ class TextSplit:
     train_index: np.ndarray = field(repr=False)
     select_index: np.ndarray = field(repr=False)
     n_test_docs: int
+    truncated: int = 0
+    train_labels: Optional[np.ndarray] = field(default=None, repr=False)
 
 
 def lm_split(
@@ -535,6 +573,52 @@ def encode_rows(docs: Sequence[np.ndarray], spec: TokenizerSpec, seq_len: int) -
         ids[row, 1:1 + take] = doc[:take]
         truncated += len(doc) > seq_len - 1
     return ids, truncated
+
+
+def class_stream(ids: np.ndarray, labels: np.ndarray, *, batch_size: int, seed: int) -> TextStream:
+    """The train stream of classifier rows: epoch ``e`` puts the rows, and their labels with them, in an order keyed on ``(seed, e)``."""
+    if len(ids) != len(labels):
+        raise ValueError(f"{len(ids)} rows and {len(labels)} labels")
+
+    def epoch_rows(epoch: int) -> Tuple[np.ndarray, np.ndarray]:
+        order = _hash_order(seed, epoch, "rows", len(ids))
+        # DECISION plan-2026-11-24T092348-7806a290/D-056
+        # A row and its label are moved by the SAME index array: `ids[order]` with `labels` left in document order would train every
+        # step on the label of another document, and the loss would still fall (the model learns the majority class). Do NOT
+        # permute the two separately and do NOT permute only the ids.
+        return ids[order], labels[order]
+
+    return TextStream(epoch_rows, len(ids), batch_size)
+
+
+def class_split(
+        train_docs: Sequence[np.ndarray], train_labels: np.ndarray, test_docs: Sequence[np.ndarray], test_labels: np.ndarray, *,
+        spec: TokenizerSpec, seq_len: int, batch_size: int, seed: int, stream_seed: Optional[int] = None, validation_split: float,
+        num_classes: int,
+) -> TextSplit:
+    """Split ``train_docs`` into train and selection rows and encode them with the test rows; see the module contract."""
+    train_docs, test_docs = list(train_docs), list(test_docs)
+    train_labels, test_labels = np.asarray(train_labels, np.int64), np.asarray(test_labels, np.int64)
+    if len(train_docs) != len(train_labels) or len(test_docs) != len(test_labels):
+        raise ValueError("every document needs one label")
+    # The same rule as the language task's split (D-003): the selection documents of the two tasks are one set for one seed.
+    train_index, select_index = split_documents(len(train_docs), seed, validation_split)
+    ids, cut = encode_rows(train_docs, spec, seq_len)
+    test_ids, test_cut = encode_rows(test_docs, spec, seq_len)
+    for name, part in (("train", train_labels[train_index]), ("selection", train_labels[select_index])):
+        missing = [index for index, count in enumerate(np.bincount(part, minlength=num_classes)) if count == 0]
+        if missing:
+            raise ValueError(
+                f"the {name} documents ({len(part)} of them) hold no document of class {missing[0]}: the majority share and "
+                "the accuracy would be about fewer classes than the model has; raise data.max_samples or change "
+                "data.validation_split")
+    stream = class_stream(ids[train_index], train_labels[train_index], batch_size=batch_size,
+                          seed=seed if stream_seed is None else stream_seed)
+    logger.info(
+        f"classification split: {len(train_index)} train, {len(select_index)} selection, {len(test_docs)} test documents; "
+        f"{cut + test_cut} documents cut at {seq_len - 1} tokens")
+    return TextSplit(stream, (ids[select_index], train_labels[select_index]), (test_ids, test_labels), train_index, select_index,
+                     len(test_docs), cut + test_cut, train_labels[train_index])
 
 
 # ---------------------------------------------------------------------
@@ -644,3 +728,15 @@ def lm_batches(
         seed=seed,
         batch_size=batch_size,
     )
+
+
+def class_batches(
+        split: TextSplit, *, spec: TokenizerSpec, seq_len: int, batch_size: int, seed: int, validation_split: float, num_classes: int,
+) -> TextBatches:
+    """The three datasets of a classifier :class:`TextSplit` and their counts (rows, one per document); see the module contract."""
+    batches = lm_batches(split, spec=spec, seq_len=seq_len, batch_size=batch_size, seed=seed, validation_split=validation_split)
+    return dataclasses.replace(
+        batches, num_classes=num_classes,
+        selection_split=(f"the documents whose sha256 of '{seed}:{SELECT_TAG}:<index>' is below validation_split={validation_split} "
+                         "of the train documents, one row each"),
+        test_split="the test documents of the corpus, one row each")

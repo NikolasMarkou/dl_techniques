@@ -32,8 +32,8 @@ from typing import List, Tuple
 import pytest
 
 from train.api import cli, predictor, trainer
+from train.api import text_models
 from train.api.forecast_models import HORIZON, LOOKBACK
-from train.api.tasks import language_model_pretraining as language_task
 from train.api.text_tokenizer import tokenizer_spec
 
 from ._forecast_fixtures import world, write_series_csv  # noqa: F401  (``world`` is a fixture)
@@ -175,7 +175,8 @@ def test_a_documented_language_command_passes_the_cli_up_to_the_claim(source, ta
     (reviews / "dataset_info.json").write_text("{}")
     monkeypatch.setenv("TFDS_DATA_DIR", str(tmp_path / "tfds"))
     asked: List[Tuple[str, object]] = []
-    monkeypatch.setattr(language_task, "check_tokenizer_dir", lambda name, directory=None: asked.append((name, directory)))
+    # the check both text tasks make before the claim (`text_models.check_text_window`) reads the name in `text_models`
+    monkeypatch.setattr(text_models, "check_tokenizer_dir", lambda name, directory=None: asked.append((name, directory)))
     claimed: List[Path] = []
 
     def open_run(run_dir, resume):

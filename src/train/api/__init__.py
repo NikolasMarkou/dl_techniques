@@ -83,6 +83,8 @@ _LAZY: Dict[str, str] = {
     "load_text_data_config": ".text_args",
     "LanguageModelPretrainingConfig": ".tasks.language_model_pretraining",
     "train_language_model_pretraining": ".tasks.language_model_pretraining",
+    "TextClassificationConfig": ".tasks.text_classification",
+    "train_text_classification": ".tasks.text_classification",
 }
 
 __all__ = sorted(_LAZY)
