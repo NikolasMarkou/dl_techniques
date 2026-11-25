@@ -21,18 +21,27 @@ trained and exited 2 on every checkout (the 4g README).
 
 A text command needs two things a fresh checkout lacks: the TFDS reviews and the pinned tokenizer files. The test stands in for both
 (see the anchor in the claim test), so it passes on any machine and still names the tokenizer the check was asked for.
+
+A ``beit_tokenizer`` command and a ``pretrain`` command that reads a tokenizer run (``model_args.tokenizer_checkpoint=``) are run the same way
+(plan fa94f59c step 9). Each tokenizer run a command names, as ``init=<out>`` or as ``tokenizer_checkpoint=<out>/best_model.keras``, is the ``out`` of a
+documented ``beit_tokenizer`` command, whose stand-in is the record the task writes for that very command and an EMPTY archive: both checks
+before the claim read the record only. A path no documented command trains, or a file other than ``best_model.keras`` (the file the verdict of the
+run describes), fails by name.
 """
 
 import json
 import re
 import shlex
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Tuple
 
 import pytest
 
-from train.api import cli, predictor, trainer
+from train.api import cli, predictor, registry, trainer
 from train.api import text_models
+from train.api.config import validate
+from train.api.tasks.beit_tokenizer import BeitTokenizerConfig, BeitTokenizerTrainer
 from train.api.text_args import CLASS_NAMES
 from train.api.forecast_models import HORIZON, LOOKBACK
 from train.api.text_tokenizer import tokenizer_spec
@@ -42,9 +51,11 @@ from ._forecast_fixtures import world, write_series_csv  # noqa: F401  (``world`
 ROOT = Path(__file__).resolve().parents[3]
 DOCUMENTS = [ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "src" / "train" / "README.md", ROOT / "src" / "train" / "AGENTS.md"]
 FORECASTING, LANGUAGE, CLASSIFICATION = "time_series_forecasting", "language_model_pretraining", "text_classification"
+TOKENIZER, PRETRAIN = "beit_tokenizer", "pretrain"
 #: The recipe's 128 batch needs 21,600 rows of a csv at the default window; the csv the README names is written at this length.
 CSV_ROWS = 25_000
 OUT, INIT = re.compile(r"(?:^|\s)out=(\S+)"), re.compile(r"(?:^|\s)init=(\S+)")
+CHECKPOINT = re.compile(r"(?:^|\s)model_args\.tokenizer_checkpoint=(\S+)")
 
 
 class Claimed(Exception):
@@ -67,6 +78,10 @@ FOUND = documented()
 FOUND_LANGUAGE = documented(LANGUAGE)
 FOUND_CLASSIFICATION = documented(CLASSIFICATION)
 FOUND_TEXT = [(LANGUAGE, source, tail) for source, tail in FOUND_LANGUAGE] + [(CLASSIFICATION, source, tail) for source, tail in FOUND_CLASSIFICATION]
+FOUND_TOKENIZER = documented(TOKENIZER)
+#: The ``pretrain`` commands that read a tokenizer run (the others, and the sentences that say a pretrain request is refused, are not run here).
+FOUND_PRETRAIN = [(source, tail) for source, tail in documented(PRETRAIN) if CHECKPOINT.search(tail)]
+FOUND_TOKENIZER_COMMANDS = [(TOKENIZER, source, tail) for source, tail in FOUND_TOKENIZER] + [(PRETRAIN, source, tail) for source, tail in FOUND_PRETRAIN]
 
 
 def a_documented_source(name: str, root: Path) -> Path:
@@ -105,6 +120,33 @@ def a_documented_text_source(name: str, root: Path) -> Path:
     record = (predictor.build_language_model_record(**common) if task == LANGUAGE
               else predictor.build_text_classification_record(**common, class_names=CLASS_NAMES))
     return stand_in(name, root, args["model"], record)
+
+
+def a_documented_tokenizer_run(name: str, root: Path) -> Path:
+    """The stand-in of the run the documented ``beit_tokenizer`` command with ``out=name`` trains, written under ``root``.
+
+    The record is the one the task writes for THAT command (parsed by the real command line, resolved by the real trainer), and the archive is empty:
+    ``init`` reads the record and the file's sha256, and ``beit_mim`` reads the record only, before the claim.
+    """
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-056
+    # The record is written by the real task for the documented command (parsed and resolved by the real code), never built by hand from the
+    # geometry and codebook tables: a hand copy would agree with itself, and the pre-claim checks of `init` and of `beit_mim` (the tokenizer run's
+    # own patch, size and statistics) would then judge the README against a record the task never writes. Do NOT stand in a placeholder that
+    # satisfies the path check alone, and do NOT name a run no documented command trains: that fails here, by name.
+    trained = [tail for _, tail in FOUND_TOKENIZER if (out := OUT.search(tail)) and out.group(1) == name]
+    assert trained, f"{name} names a tokenizer run no documented command trains (no `python -m train beit_tokenizer` command has out={name})"
+    config_path, raw = cli.parse_task_arguments(BeitTokenizerConfig, shlex.split(trained[0]))
+    config = validate(BeitTokenizerConfig, cli.layer_command_line(BeitTokenizerConfig, config_path, raw))
+    run = BeitTokenizerTrainer(config)
+    family, variant = registry.parse_model_name(config.model, task=run.task)
+    resolved, context = run._resolve(run.describe_data(config), family, variant)
+    side = resolved.transform_args.image_size
+    source = root / "tokenizers" / Path(name).name
+    source.mkdir(parents=True)
+    (source / "task.json").write_text(json.dumps(run.task_record(resolved, context, SimpleNamespace(input_shape=(side, side, 3)))))
+    (source / "config.json").write_text(json.dumps({"model": config.model, "used": {"model_args": {}}}))
+    (source / "best_model.keras").write_bytes(b"")
+    return source
 
 
 #: Any task's command line, for the init check below.
@@ -205,3 +247,45 @@ def test_a_documented_text_command_passes_the_cli_up_to_the_claim(task, source, 
     if code is None:
         named = dict(arg.split("=", 1) for arg in shlex.split(tail) if "=" in arg).get("data.tokenizer", "gpt2")
         assert [name for name, _ in asked] == [named], "the pinned-files check ran once, for the tokenizer the command names"
+
+
+def test_the_documents_hold_the_tokenizer_commands_to_run():
+    """Vacuity guard: the bare command, a cifar10 run, an ``init`` whose source a documented tokenizer command trains, and every ``beit_mim``
+    command that reads a tokenizer run names the ``best_model.keras`` of a documented one; no command line of the legacy trainer is printed."""
+    tails = [tail for _, tail in FOUND_TOKENIZER]
+    assert "" in tails and any("data.dataset=cifar10" in tail and "epochs=5" in tail for tail in tails)
+    outs = {out.group(1) for tail in tails if (out := OUT.search(tail))}
+    inits = [init.group(1) for tail in tails if (init := INIT.search(tail))]
+    assert inits and [name for name in inits if name not in outs] == [], "a tokenizer `init` names a run no documented command trains"
+    named = [checkpoint.group(1) for _, tail in FOUND_PRETRAIN if (checkpoint := CHECKPOINT.search(tail))]
+    assert len(named) >= 2, f"the pretrain section's example and the init section's name a tokenizer run: {named}"
+    wrong = [path for path in named if not path.endswith("/best_model.keras") or path[: -len("/best_model.keras")] not in outs]
+    assert wrong == [], f"a tokenizer_checkpoint must be the best_model.keras of a documented beit_tokenizer out (those are {sorted(outs)}): {wrong}"
+    assert not any("python -m train.beit.train_tokenizer" in document.read_text() for document in DOCUMENTS if document.is_file()), (
+        "a document prints a command line of the legacy tokenizer trainer: the command that makes a tokenizer is `python -m train beit_tokenizer`")
+
+
+@pytest.mark.parametrize("task, source, tail", FOUND_TOKENIZER_COMMANDS, ids=[f"{task}:{source}:{tail[:60] or 'bare'}" for task, source, tail in FOUND_TOKENIZER_COMMANDS])
+def test_a_documented_tokenizer_command_passes_the_cli_up_to_the_claim(task, source, tail, world, tmp_path, monkeypatch, capsys):
+    claimed: List[Path] = []
+
+    def open_run(run_dir, resume):
+        claimed.append(run_dir)
+        raise Claimed(str(run_dir))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(trainer, "open_run", open_run)
+    if init := INIT.search(tail):
+        tail = tail.replace(f"init={init.group(1)}", f"init={a_documented_tokenizer_run(init.group(1), tmp_path)}")
+    if checkpoint := CHECKPOINT.search(tail):
+        named = checkpoint.group(1)
+        assert named.endswith("/best_model.keras"), f"{source}: tokenizer_checkpoint={named}: a tokenizer run is read by its best_model.keras, the file its verdict describes"
+        run = a_documented_tokenizer_run(named[: -len("/best_model.keras")], tmp_path)
+        tail = tail.replace(f"tokenizer_checkpoint={named}", f"tokenizer_checkpoint={run / 'best_model.keras'}")
+    try:
+        code = cli.main([task, *shlex.split(tail)])
+    except Claimed:
+        code = None
+    error = capsys.readouterr().err
+    assert code in (0, None), f"{source}: `python -m train {task} {tail}` exited {code}:\n{error[-1500:]}"
+    assert code == 0 or len(claimed) == 1, "a command that is not help reaches the claim exactly once, and the claim is never made"

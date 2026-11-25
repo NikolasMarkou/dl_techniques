@@ -743,7 +743,7 @@ classification task calls the same `train.common.classification_run` helpers as 
     `et_pos_refused`, which only refuses; plan 5c6cc105 D-005), `grow` (a regex of the depth-indexed blocks a
     deeper variant adds), `pinned` (factory arguments the target takes from the source's `used.model_args`, or from a source of
     another task the keys its record holds, plan 5c6cc105 D-036), `fixed` (`channels`, `lookback`, `horizon`, `input_size`,
-    `patch_size`, `vocab_size`, `tokenizer`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask` of a target
+    `patch_size`, `vocab_size`, `tokenizer`, `num_embeddings`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask` of a target
     prefix and the dropped source head) and `positional` (top-level components whose weights pair by order, xlstm only, D-031).
     `transfer_reason` is gone (plan 5c6cc105 D-011), and a `None` spec, left
     to test fixtures, gets one generic refusal. `ModelSpec` does not enforce the declaration (Adapter rules above)
@@ -754,16 +754,16 @@ classification task calls the same `train.common.classification_run` helpers as 
     for one change of each kind and every cross-task pair.
   - **Two hooks.** `TaskTrainer.init_identity(config, context)`, before the claim and without TensorFlow, returns the record keys
     this run will write about its input (`channels`, `lookback`, `horizon`, `normalize`, `data_range`, `input_size`, `patch_size`, `vocab_size`,
-    `tokenizer`; those its record has), which `read_source` compares with the source's record; the base class refuses `init` naming the task
-    (every built-in task overrides it; pretrain's reads the RESOLVED size and patch, plan 5c6cc105 D-037). `TaskTrainer.init_overlap(source, config, data)`, after `build_data` on a fresh run, returns the `split` of the
+    `tokenizer`, `num_embeddings`; those its record has), which `read_source` compares with the source's record; the base class refuses `init` naming the task
+    (every built-in task overrides it; pretrain's reads the RESOLVED size and patch, plan 5c6cc105 D-037, and the tokenizer's also the resolved codebook size, plan fa94f59c D-050). `TaskTrainer.init_overlap(source, config, data)`, after `build_data` on a fresh run, returns the `split` of the
     block through `init_from.split_block` (helpers `same_split`, `counted_split`, `seeded_rows_split`); the base class returns
     `unknown` with "this task does not rebuild a source's rows". It never refuses: an overlap is counted and marked (D-012, D-038).
   - **The summary and the bar.** `TaskTrainer._summary_head` takes a keyword `init_block`, `None` for a run without `init`, so
     its other callers are unchanged; with a block it writes `init`, `epoch_zero_of` and the three flags of `init_from.bias_of`
     after `init_scale_warning`, for a finished and a diverged run alike (D-040). Under `init` `run_sequence.epoch_zero` calls
     `init_from.evaluate_loaded` instead of the task's `initial_loss_check`, and a task whose bar is absolute returns
-    `Evaluation.loaded` from `evaluate_and_report` (`init_from.loaded_value`, the fit sidecar's `initial.metrics`; pretrain and
-    language_model_pretraining do not, their bar is a loss whose epoch-zero term is the loaded weights', plan 5c6cc105 D-012); `report`
+    `Evaluation.loaded` from `evaluate_and_report` (`init_from.loaded_value`, the fit sidecar's `initial.metrics`; pretrain,
+    language_model_pretraining and beit_tokenizer do not, their bar is a loss whose epoch-zero term is the loaded weights', plan 5c6cc105 D-012); `report`
     passes it to `bar_is_met(..., loaded=)`, which checks `init_from.beats_loaded` (D-039, D-050); no trainer attribute carries
     it. Tests: `tests/test_train/test_api/test_init_from_engine.py`, `test_init_from_families.py` and `test_init_from_runs.py`.
 - **The mask-key rule** (D-004, D-005; why a pretrain run is reproducible and a resume does not leak). A mask is a function of a key
@@ -910,6 +910,22 @@ classification task calls the same `train.common.classification_run` helpers as 
   predictor shares `_TextPredictor` with the language model's (D-064); the export rule has a served function and a sample and refuses no cell (D-063).
   Tests, in `tests/test_train/test_api/`: `test_text_classification_{task,resume,families,predictor_and_export}.py` and `test_text_init_pairs.py`,
   sharing `_text_world.py`. The user-facing description is in [`README.md`](README.md), whose gate block covers both text tasks.
+- **The `beit_tokenizer` task** (plan fa94f59c, Phase 4j; the D-NNN below are that plan's): `BeitTokenizerTrainer` (`api/tasks/beit_tokenizer.py`) supplies hooks and no stage and
+  overrides `fit_kwargs` and `resume_stream`. One family, `vq_vae_rotation` (one variant, `small`): `api/tokenizer_models.py` holds the adapter `create_vq_tokenizer` (the library
+  CLASS built with the encoder's stride set to the patch, the code grid proved by running it), the flat tables `ALLOWED`, `REFUSED` and `SUPPLIED` (held to the constructor's
+  signature by `signature_census`), `RECIPE` (held equal to the legacy `TrainingConfig`), `observe_tokenizer` and `builtin_tokenizer_models`; `api/tokenizer_args.py` the groups
+  (`TokenizerData`, `TokenizerMetricArgs`) and the geometry check; `common/tokenizer_data.py` the batches, the constant-image baseline and `TokenizerCodes`. Rules a change must
+  keep: the task adds no `train_step`, no loss and no metric, because the file it saves is the `VQVAERotationTrick` that `beit_mim` loads (D-003, D-037:
+  `test_the_task_compiles_no_loss_and_no_metric`, `test_the_task_adds_no_train_step_no_figure_and_no_callback`); `bar_is_met` reads both parts of the bar, each through the repo's
+  one definition (`forecast_run.beats_bar`, `pretrain_run.usage_meets_floor`), never a bare compare (D-038: `test_the_bar_needs_both_parts`,
+  `test_eight_compiled_constant_models_are_not_called_a_success_though_a_bare_compare_would_call_some`); the usage is counted once, after `fit`, on the BEST weights and before
+  `report_data_free_run` swaps the last epoch's in (D-039: `test_a_best_epoch_that_is_not_the_last_reports_the_best_weights_usage_and_not_the_last_ones`); `resume_stream` is
+  the batches object's `with_stream(completed_steps)` and `resume_stream_exact` stays false (D-040: `test_resume_stream_returns_a_stream_that_is_not_the_fresh_one_and_keeps_what_the_sequence_checks`); the row's `fixed` holds the codebook size and the image size, the second by POLICY, since every
+  weight copies across sizes (D-050: `test_production_order_the_image_size_is_refused_before_the_claim_by_policy_though_every_weight_would_copy`); `served` is the registered
+  layer `TokenizerCodes`, because a functional model over `encode_to_indices` builds and fails when it runs (D-045: `test_the_served_layer_returns_int32_grids_and_names_its_model_in_its_config`). `beit_mim` holds a tokenizer run's own `task.json` to its patch,
+  size and statistics before the claim (D-052: `test_beit_mim_reads_a_tokenizer_run.py`). Tests, in `tests/test_train/test_api/`:
+  `test_beit_tokenizer_{task,resume,families,predictor_and_export,init}.py` and `test_common_tokenizer_data.py`, sharing `_tokenizer_world.py`. The user-facing description is in
+  [`README.md`](README.md), whose gate block is empty until the gate has run.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `MODEL_CHECKS`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served, sample)`: the shape `export` traces, the cells it refuses, the

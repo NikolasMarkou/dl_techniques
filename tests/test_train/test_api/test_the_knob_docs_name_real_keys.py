@@ -16,7 +16,8 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
   :class:`~train.api.tasks.image_denoising.ImageDenoisingConfig` and its ``DenoisingData``, step 10 of plan 46e5318f
   :class:`~train.api.tasks.pretrain.PretrainConfig` and its ``PretrainData``, step 7 of plan 7806a290
   :class:`~train.api.tasks.language_model_pretraining.LanguageModelPretrainingConfig` and its ``TextData``, step 13 the
-  :class:`~train.api.tasks.text_classification.TextClassificationConfig` (``TextData`` again): the lists below name the
+  :class:`~train.api.tasks.text_classification.TextClassificationConfig` (``TextData`` again), step 9 of plan fa94f59c the
+  :class:`~train.api.tasks.beit_tokenizer.BeitTokenizerConfig` and its ``TokenizerData``: the lists below name the
   tasks, so a task the lists do not name has every ``data.<field>`` of its own refused as "not a field of a task config" and its
   fenced commands are never parsed); a backticked ``<name>_args`` alone must be a group; a ``<group>``
   that is not a group is refused; digits count in a field name;
@@ -94,7 +95,9 @@ from train.api.denoising_args import DenoisingData
 from train.api.depth_args import DepthData
 from train.api.forecast_args import TimeSeriesData
 from train.api.pretrain_args import PretrainData
+from train.api.tokenizer_args import TokenizerData
 from train.api.segmentation_args import BuiltinSegData, CsvSegData, FolderSegData
+from train.api.tasks.beit_tokenizer import BeitTokenizerConfig, BeitTokenizerTrainer
 from train.api.tasks.depth_estimation import DepthEstimationConfig, DepthEstimationTrainer
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
 from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoisingTrainer
@@ -123,6 +126,7 @@ CLASSES = {
     "TimeSeriesForecastingTrainer": TimeSeriesForecastingTrainer,
     "DepthEstimationTrainer": DepthEstimationTrainer,
     "LanguageModelPretrainingTrainer": LanguageModelPretrainingTrainer,
+    "BeitTokenizerTrainer": BeitTokenizerTrainer,
     "AnalysisArgs": AnalysisArgs,
     "LoggerArgs": LoggerArgs,
     "ImageClassificationConfig": ImageClassificationConfig,
@@ -132,6 +136,7 @@ CLASSES = {
     "TimeSeriesForecastingConfig": TimeSeriesForecastingConfig,
     "DepthEstimationConfig": DepthEstimationConfig,
     "LanguageModelPretrainingConfig": LanguageModelPretrainingConfig,
+    "BeitTokenizerConfig": BeitTokenizerConfig,
 }
 #: Module aliases the docs use for ``module.function``; a ``train.`` or ``dl_techniques.`` path is
 #: imported as written.
@@ -182,13 +187,13 @@ ANALYZER_BLOCK_KEYS = set(skipped_analysis_status()) | {"failed_analyses"}
 #: writes must exist in at least one task, and a value it writes after ``=`` must be valid there.
 CONFIGS = (
     ImageClassificationConfig, ImageSegmentationConfig, ImageDenoisingConfig, PretrainConfig, TimeSeriesForecastingConfig,
-    DepthEstimationConfig, LanguageModelPretrainingConfig, TextClassificationConfig,
+    DepthEstimationConfig, LanguageModelPretrainingConfig, TextClassificationConfig, BeitTokenizerConfig,
 )
 
 #: Every data class of those configs, in the order of :data:`CONFIGS`.
 DATA_CLASSES = (
     BuiltinImageData, FolderImageData, CsvImageData, BuiltinSegData, FolderSegData, CsvSegData, DenoisingData,
-    PretrainData, TimeSeriesData, DepthData, TextData,
+    PretrainData, TimeSeriesData, DepthData, TextData, TokenizerData,
 )
 
 
@@ -473,6 +478,7 @@ TASK_CONFIGS = {
     "depth_estimation": DepthEstimationConfig,
     "language_model_pretraining": LanguageModelPretrainingConfig,
     "text_classification": TextClassificationConfig,
+    "beit_tokenizer": BeitTokenizerConfig,
 }
 
 

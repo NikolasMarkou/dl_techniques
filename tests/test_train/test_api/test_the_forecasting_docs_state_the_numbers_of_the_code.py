@@ -394,6 +394,105 @@ def test_the_classification_section_and_the_init_pairs_state_the_numbers_of_the_
     assert "a rounding band and not a noise margin" in text, "under init the loaded weights' term is the shared one, named for what it is"
 
 
+def test_the_tokenizer_section_states_the_numbers_of_the_code(world):
+    """Plan fa94f59c step 9: the variant, the model keys, the recipe, the geometry, the floor, the selection split and four refusals of the ``beit_tokenizer`` section."""
+    from dl_techniques.datasets.vision.classification import get_spec
+    from train.api import recipes, tokenizer_args, tokenizer_models as tm
+    from train.api.errors import ConfigError
+    from train.api.pretrain_args import GEOMETRY
+    from train.common import pretrain_run
+    from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
+
+    text = " ".join(README.read_text().split())
+    start = text.index("**`beit_tokenizer`** (plan fa94f59c")
+    section = text[start:text.index("<!-- tokenizer-gate:end -->", start)]
+    words = {4: "four", 5: "five", 6: "six"}
+    small, (side, patch), codes = tm.VARIANTS["small"], GEOMETRY["cifar10"], tm.CODEBOOK["cifar10"]
+    model = recipes.build_model(registry.MODELS[tm.FAMILY], "small", None, (side, side, 3), {"num_embeddings": codes, "patch_size": patch})
+    assert f"{model.count_params():,} parameters in {len(model.weights)} weights at {side} px with {codes} codes" in section
+    assert f"{small['hidden_channels']} hidden channels, {small['num_res_blocks']} residual blocks and an embedding of {small['embedding_dim']}" in section
+    offered = ", ".join(f"`{key}`" for key in tm.ALLOWED[:-1]) + f", `{tm.ALLOWED[-1]}`"
+    assert f"{words[len(tm.ALLOWED)].capitalize()} `model_args` are offered ({offered}), {len(tm.SUPPLIED)} are given by the task and {len(tm.REFUSED)} more are refused" in section
+    optim = tm.RECIPE["optim_args"]
+    assert (f"AdamW at {optim['lr']:.0e}".replace("e-0", "e-") + f", weight decay {optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epochs, cosine decay over "
+            f"the whole run to {optim['min_lr_ratio']:g} of the peak, a global gradient clip of {optim['global_clipnorm']:.1f}, batch {tm.BATCH_SIZE}, {tm.EPOCHS} epochs, "
+            f"patience {tm.PATIENCE}") in section
+    assert " and ".join(f"`{name}` is {size} px at patch {cell} (grid {size // cell} x {size // cell}, {tm.CODEBOOK[name]:,} codes)"
+                        for name, (size, cell) in GEOMETRY.items()) in section
+    floor, cells = pretrain_run.MIN_TOKENIZER_PERPLEXITY, (side // patch) ** 2
+    selection = round(DEFAULT_VALIDATION_SPLIT * get_spec("cifar10").train_size)
+    batches = -(-selection // tm.BATCH_SIZE)
+    assert f"is at least the floor of {floor:g} effective codes" in section
+    assert f"({forecast_run.tie_band(batches)} at the {batches} selection batches of CIFAR-10 at the defaults)" in section
+    assert f"({selection:,} rows of seed 42)" in section and f"({selection:,} images x {cells} cells = {selection * cells:,} positions)" in section
+    refusals = []
+    for call in (lambda: registry.parse_model_name("vit/vit_pico", task=tm.TASK),
+                 lambda: tokenizer_args.check_geometry(3, side, codes, floor=floor, smoke=False),
+                 lambda: tokenizer_args.check_geometry(patch, side, 32, floor=floor, smoke=False)):
+        with pytest.raises(ConfigError) as caught:
+            call()
+        refusals.append(str(caught.value))
+    refusals.append(tm.problems_of({"kmeans_init": True})[0])
+    assert len(refusals) == 4 and all(f"`{message}`" in section for message in refusals), refusals
+    # the file `beit_mim` takes is best_model.keras: the checkpoint is selected on the reconstruction alone, so it holds the epoch the verdict judged (D-006)
+    assert "**`best_model.keras` is the file `beit_mim` takes.**" in section and "so give it `best_model.keras`" in section and "the last epoch's" in section
+
+
+def test_the_tokenizer_record_and_the_init_keys_the_documents_name_are_the_codes():
+    """Plan fa94f59c step 9: the ninth record kind's keys and the keys a resume compares (README and AGENTS), and the geometry keys of ``init`` (AGENTS)."""
+    from train.api import init_from
+
+    task, text = "beit_tokenizer", " ".join(README.read_text().split())
+    agents = " ".join(AGENTS.read_text().split())
+    assert list(predictor.RECORD_KEYS).index(task) == 8, "the ninth kind"
+    keys = [key for key in predictor.RECORD_KEYS[task] if key not in ("schema_version", "task", "model", "family", "variant")]
+    own = ", ".join(f"`{key}`" for key in keys[:-1]) + f" and `{keys[-1]}`"
+    assert f"writes `task.json` (schema version 2, the ninth record kind) before its first epoch: {own} (`{predictor.TOKENIZER_OUTPUTS[0]}`)" in text
+    compared = predictor.DATA_KEYS[task]
+    assert f"a resume compares the {('zero', 'one', 'two', 'three', 'four', 'five', 'six')[len(compared)]} from `{compared[0]}` to `{compared[-1]}`" in text
+    assert "a tokenizer record (the ninth kind" in agents and "a resume compares `" + "`, `".join(compared[:-1]) + f"` and `{compared[-1]}`" in agents
+    assert "`fixed` (" + ", ".join(f"`{key}`" for key in init_from.GEOMETRY_NAMES) + ": refused before the claim)" in agents
+    assert all(f"`{key}`" in agents[agents.index("returns the record keys this run will write"):][:400] for key in (*init_from.GEOMETRY_NAMES, "normalize", "data_range"))
+    assert tuple(init_from.HEAD_KEYS[task]) == () and "neither has a tokenizer" in text, "a tokenizer has no head to reset"
+
+
+def test_every_test_the_agents_bullet_of_the_tokenizer_task_names_exists():
+    """Plan fa94f59c step 9: a rule line of the ``beit_tokenizer`` bullet names the test that holds it; a name that is no test is a rule held by nothing."""
+    agents = AGENTS.read_text()
+    start = agents.index("- **The `beit_tokenizer` task**")
+    bullet = agents[start:agents.index("\n- **", start + 10)]
+    names = re.findall(r"`(test_[a-z0-9_]+)(\.py)?`", bullet)
+    assert len(names) >= 8, names
+    directory = ROOT / "tests" / "test_train" / "test_api"
+    sources = [path.read_text() for path in directory.glob("test_*.py")]
+    missing = [name + suffix for name, suffix in names if not ((directory / f"{name}.py").is_file() if suffix else any(f"def {name}(" in source for source in sources))]
+    assert missing == [], f"the AGENTS bullet names tests that do not exist: {missing}"
+
+
+def test_the_lost_tokenizers_sha256_is_quoted_in_full_once():
+    """Plan fa94f59c step 9: the 4h gate's tokenizer file is lost; its sha256 survives in two runs' ``task.json`` (read from them by ``scratch_docs/derive_docs_numbers.py``)."""
+    text = README.read_text()
+    shas = re.findall(r"cdb578c7[0-9a-f]*", text)
+    assert shas == ["cdb578c78471b4198b502401c9c0db153f613df8816dc96b20ab66bb1bdfd3f8"], "the full 64 digits, once, and no shortened form"
+    assert "lost" in text[text.index(shas[0]) - 600:text.index(shas[0]) + 600] and "are NOT reproduced" in text
+
+
+def test_the_repo_map_and_the_roadmaps_count_the_tasks_the_registry_has(world):
+    """Plan fa94f59c step 9: three documents no other test reads say how many tasks there are and which is the newest (a stale count stayed in the roadmap)."""
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    names = [spec.name for spec in BUILTIN_TASKS]
+    newest = names[-1]
+    ordinal = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth")[len(names) - 1]
+    assert newest == "beit_tokenizer" and len(names) == len(registry.TASKS)
+    repo_map = " ".join((ROOT / "REPO_MAP.md").read_text().split())
+    scripts = " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split())
+    init = " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split())
+    assert f"The {ordinal} task, `{newest}`, trains the BEiT tokenizer that a `beit_mim` run reads" in repo_map
+    assert f"`python -m train <task> help` of all {words[len(names)]};" in scripts and f"and `{newest}` (Phase 4j), in that order" in scripts
+    assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Code done, GPU gate NOT run" in scripts
+    assert "Phase 4j (plan fa94f59c, branch `train-api/phase-4j`: code done, GPU gate NOT run)" in init and f"`{newest}` in Phase 4j" in init
+
+
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")
 
 
