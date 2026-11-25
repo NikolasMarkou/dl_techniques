@@ -142,7 +142,6 @@ METRIC_NAMES = (ACCURACY,)
 # What each family offers, refuses and is given
 # ---------------------------------------------------------------------
 
-_BY_VARIANT = f"the variant fixes it: choose model={GPT2_LM}/<variant>"
 _FRESH_WEIGHTS = "a model is built with fresh weights; an earlier run's weights come through init"
 _NO_LM_HEAD = "a classifier has no language-model head"
 

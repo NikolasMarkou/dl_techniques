@@ -152,7 +152,7 @@ trainer's own `train(config)`; the shipped design is a `TaskTrainer` sequence wi
 | `src/train/api/init_from.py` | `init`: start a run from an earlier run's weights (Phase 4g). |
 | `src/train/api/convert.py` | `python -m train convert`: ADE20K and COCO as index masks and listings. |
 
-Config fields every task has (from `python -m train <task> help` of all seven; a task adds its own, such as `loss_args`
+Config fields every task has (from `python -m train <task> help` of all eight; a task adds its own, such as `loss_args`
 or `jit_compile`):
 
 | Field | Type | Default |

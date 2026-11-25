@@ -34,11 +34,11 @@ from train.api import cli, exporting, init_from
 from train.api import text_models as tm
 from train.api import text_tokenizer as tt
 from train.api.errors import ConfigError
-from train.api.exporting import FORMATS, SUFFIX, TFLITE_CHECK_RTOL
+from train.api.exporting import FORMATS, SUFFIX
 from train.api.tasks.text_classification import train_text_classification
 from train.common import text_data as td
 
-from ._text_world import CLASSIFIER_ARGS, SEQ_LEN, classifier_request, world  # noqa: F401  (``world`` is a fixture)
+from ._text_world import CLASSIFIER_ARGS, SEQ_LEN, classifier_request, within_the_shared_check, world  # noqa: F401  (a fixture)
 from .test_export_roundtrip import read_back
 
 TASK = "text_classification"
@@ -357,14 +357,6 @@ def valid_rows(spec: tt.TokenizerSpec, length: int, seed: int = 11) -> np.ndarra
     return rows
 
 
-def within_the_shared_check(got: np.ndarray, expected: np.ndarray) -> float:
-    assert got.shape == expected.shape
-    scale = max(1.0, float(np.abs(expected).max()))
-    worst = float(np.abs(got.astype(np.float64) - expected).max())
-    assert worst <= TFLITE_CHECK_RTOL * scale, f"{worst} against an allowance of {TFLITE_CHECK_RTOL * scale}"
-    return worst
-
-
 @pytest.mark.parametrize("fmt", FORMATS)
 def test_each_export_equals_the_model_on_valid_rows(run, fmt, tmp_path):
     out = tmp_path / f"exported{SUFFIX.get(fmt, '')}"
@@ -411,14 +403,6 @@ def test_another_input_shape_is_refused_before_a_file_is_written(run, fmt, tmp_p
     with pytest.raises(ConfigError, match=rf"\(64,\) is not the trained length \({SEQ_LEN},\) \(seq_len\) of this text_classification model"):
         exporting.export(model=run.model, out=out, format=fmt, input_shape=(64,), record=record_of(run))
     assert list(tmp_path.iterdir()) == []
-
-
-def test_a_vocabulary_a_float32_id_cannot_carry_exactly_is_refused_by_name_for_a_classifier_too(run):
-    from train.api.text_predictor import check_export
-
-    check_export({**record_of(run), "vocab_size": 2 ** 24 - 1}, "onnx", (SEQ_LEN,))
-    with pytest.raises(ConfigError, match=r"vocab_size 16777216 .*float32.*exactly"):
-        check_export({**record_of(run), "vocab_size": 2 ** 24}, "onnx", (SEQ_LEN,))
 
 
 def test_the_rule_feeds_the_check_valid_ids_and_a_file_wrong_only_above_id_zero_is_refused(run, tmp_path, monkeypatch):

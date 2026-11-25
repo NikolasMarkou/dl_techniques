@@ -14,7 +14,7 @@ language tasks read. What is pinned here, on tiny hand-made corpora and the offl
 * the windows: the concatenation of the documents with an end-of-text id after each, cut into windows of ``seq_len + 1``;
   the labels are the inputs shifted by one; the count is the same for every order of the documents;
 * the stream: epoch ``e`` is a hash-keyed permutation of the documents and then of the windows, ``batch_at(step)`` is a
-  function of ``(seed, step)``, ``iterate`` and ``with_start`` yield the same batches, every epoch has the same number of steps;
+  function of ``(seed, step)`` in any reading order, ``with_start`` is the same stream, every epoch has the same number of steps;
 * a selection dataset states its length; the train dataset is infinite and yields the stream's batches;
 * the TensorFlow-free half loads neither TensorFlow nor Keras nor tiktoken (fresh interpreter), and the two ``train.common``
   modules import none of them at module scope (the package ``__init__`` of ``train.common`` does, so they are loaded here
@@ -24,7 +24,6 @@ language tasks read. What is pinned here, on tiny hand-made corpora and the offl
 import ast
 import dataclasses
 import hashlib
-import itertools
 import os
 import re
 import subprocess
@@ -642,18 +641,19 @@ def test_the_labels_are_the_inputs_shifted_by_one():
     np.testing.assert_array_equal(stream.batch_at(0)[1][:, -1], expected[:BATCH, -1])
 
 
-def test_batch_at_iterate_and_with_start_yield_the_same_batches():
+def test_batch_at_gives_the_same_batches_in_any_order_and_with_start_is_the_same_stream():
     stream = stream_of()
-    run = list(itertools.islice(stream.iterate(0), 2 * stream.steps_per_epoch + 3))
-    for step in (0, 1, 7, stream.steps_per_epoch - 1, stream.steps_per_epoch, 2 * stream.steps_per_epoch + 2):
-        for got, want in zip(stream.batch_at(step), run[step]):
+    run = [stream.batch_at(step) for step in range(2 * stream.steps_per_epoch + 3)]
+    cold = stream_of()  # a stream that has read nothing: random access gives what a sequential read gave
+    for step in (7, 0, 2 * stream.steps_per_epoch + 2, stream.steps_per_epoch - 1, 1, stream.steps_per_epoch):
+        for got, want in zip(cold.batch_at(step), run[step]):
             np.testing.assert_array_equal(got, want)
     for start in (0, 5, stream.steps_per_epoch, stream.steps_per_epoch + 4):
         resumed = stream.with_start(start)
         assert resumed.start_step == start and stream.start_step == 0
-        for offset, (x, y) in enumerate(itertools.islice(resumed.iterate(), 6)):
-            np.testing.assert_array_equal(x, run[start + offset][0])
-            np.testing.assert_array_equal(y, run[start + offset][1])
+        for offset in range(6):
+            for got, want in zip(resumed.batch_at(start + offset), run[start + offset]):
+                np.testing.assert_array_equal(got, want)
         np.testing.assert_array_equal(resumed.batch_at(start)[0], stream.batch_at(start)[0])
     assert resumed.n_rows == stream.n_rows and resumed.steps_per_epoch == stream.steps_per_epoch
 

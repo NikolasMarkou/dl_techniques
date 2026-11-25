@@ -278,7 +278,7 @@ def test_the_language_section_states_the_numbers_of_the_code():
     assert f"exact below 2^24 = {text_predictor.FLOAT_ID_LIMIT:,}" in text and text_predictor.FLOAT_ID_LIMIT == 2 ** 24
     assert text_predictor.TOP_K == 5 and "the five most likely ids" in text
     assert f"export check and its tests allow {TFLITE_CHECK_RTOL:.0e}".replace("e-0", "e-") in text
-    assert f"64 float32 steps at those 183 batches" in text and forecast_run.tie_band(183) == 64
+    assert "64 float32 steps at those 183 batches" in text and forecast_run.tie_band(183) == 64
     assert f"synthetic: {text_args.SYNTHETIC_TRAIN_DOCUMENTS} train and {text_args.SYNTHETIC_TEST_DOCUMENTS} test when null" in text
     assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in text and f"`data.max_samples` {SMOKE_MAX_SAMPLES} when it is null" in text
     assert all(name in text for name, _ in tt.GPT2_FILES) and tt.DEFAULT_TOKENIZER_DIR in text
@@ -322,7 +322,7 @@ def test_the_agents_counts_about_the_tasks_their_hooks_and_the_language_record_a
     assert all(f"`{key}`" in agents[start:start + 700] for key in keys) and f"the {ordinal} record kind" in readme
     exact = [trainer for trainer in trainers if trainer.resume_stream_exact]
     sets = f"{words[len(exact)]} task sets it today" if len(exact) == 1 else f"{words[len(exact)]} tasks set it today"
-    assert f"`TaskTrainer.resume_stream_exact`" in agents and sets in agents
+    assert "`TaskTrainer.resume_stream_exact`" in agents and sets in agents
     compared = predictor.DATA_KEYS["language_model_pretraining"]
     resume = "a resume compares " + ", ".join(f"`{key}`" for key in compared[:-1]) + f" and `{compared[-1]}`"
     assert resume in agents[start:start + 900] and resume in readme, "the keys a resume compares"

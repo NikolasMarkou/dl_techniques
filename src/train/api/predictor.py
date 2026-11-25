@@ -2419,19 +2419,19 @@ def _pretrain_export_note(record: Mapping[str, Any]) -> str:
     return export_note(record)
 
 
-def _language_model_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+def _text_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
     from .text_predictor import check_export
 
     check_export(record, format, shape)
 
 
-def _language_model_served(model: Any, record: Mapping[str, Any]) -> Any:
+def _text_served(model: Any, record: Mapping[str, Any]) -> Any:
     from .text_predictor import served
 
     return served(model, record)
 
 
-def _language_model_sample(record: Mapping[str, Any], shape: Tuple[int, ...]) -> Any:
+def _text_sample(record: Mapping[str, Any], shape: Tuple[int, ...]) -> Any:
     from .text_predictor import sample_ids
 
     return sample_ids(record, shape)
@@ -2449,7 +2449,7 @@ def _text_classification_export_note(record: Mapping[str, Any]) -> str:
     return classifier_export_note(record)
 
 
-def _language_model_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
+def _text_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
     return (record["seq_len"],)
 
 
@@ -2486,8 +2486,8 @@ INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
     FORECASTING: _forecast_input_shape,
     DEPTH: _segmentation_input_shape,
     PRETRAIN: _segmentation_input_shape,
-    LANGUAGE_MODEL: _language_model_input_shape,
-    TEXT_CLASSIFICATION: _language_model_input_shape,
+    LANGUAGE_MODEL: _text_input_shape,
+    TEXT_CLASSIFICATION: _text_input_shape,
 }
 
 #: The record key that holds the input geometry, per task (a denoiser's is its channel count).
@@ -2554,16 +2554,16 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     # is the model with ``training=False`` (a rule with none is written with no tflite check), ``sample`` the seeded ids the check is
     # fed (plan 7806a290 D-008, D-032). Every cell converts (``test_language_model_pretraining_predictor_and_export.py``), so ``check`` refuses a length only.
     LANGUAGE_MODEL: ExportRule(
-        _language_model_input_shape, _language_model_export_check, _language_model_export_note, _language_model_served,
-        _language_model_sample),
+        _text_input_shape, _text_export_check, _language_model_export_note, _text_served,
+        _text_sample),
     # DECISION plan-2026-11-24T092348-7806a290/D-063
     # A text classifier's file is the language model's rule with its own note: float ids at the trained length in, class logits out. The
     # shape, the check, the served function and the sample read only ``seq_len``, ``vocab_size`` and ``pad_id``, which its record holds too.
     # Do NOT give it ``served=None`` or no ``sample`` (the built-in tflite file would then be written with no numeric check, or checked on
     # random floats that are all id 0), and do NOT refuse a cell: every one converts and matches on valid rows (measured, D-063).
     TEXT_CLASSIFICATION: ExportRule(
-        _language_model_input_shape, _language_model_export_check, _text_classification_export_note, _language_model_served,
-        _language_model_sample),
+        _text_input_shape, _text_export_check, _text_classification_export_note, _text_served,
+        _text_sample),
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of

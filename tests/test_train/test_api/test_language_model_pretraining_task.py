@@ -34,7 +34,6 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict
 
 import keras
 import numpy as np
@@ -48,11 +47,7 @@ from dl_techniques.utils.logger import logger
 from train.api import cli, registry
 from train.api import text_tokenizer as tt
 from train.api.errors import ConfigError
-from train.api.tasks.language_model_pretraining import (
-    LanguageModelPretrainingConfig,
-    LanguageModelPretrainingTrainer,
-    train_language_model_pretraining,
-)
+from train.api.tasks.language_model_pretraining import LanguageModelPretrainingTrainer, train_language_model_pretraining
 from train.api.text_models import create_gpt2_lm, language_loss_and_metrics
 from train.api.trainer import REQUIRED_HOOKS, TaskTrainer
 from train.common import text_run

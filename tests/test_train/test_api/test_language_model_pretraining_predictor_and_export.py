@@ -34,12 +34,12 @@ import pytest
 from train.api import cli, exporting
 from train.api import text_tokenizer as tt
 from train.api.errors import ConfigError
-from train.api.exporting import FORMATS, SUFFIX, TFLITE_CHECK_RTOL
+from train.api.exporting import FORMATS, SUFFIX
 from train.api.tasks.language_model_pretraining import train_language_model_pretraining
 from train.api.text_models import create_gpt2_lm
 from train.common import text_data as td
 
-from ._text_world import ASCII_VOCAB, SEQ_LEN, TINY_MODEL_ARGS, request, world  # noqa: F401  (``world`` is a fixture)
+from ._text_world import ASCII_VOCAB, SEQ_LEN, TINY_MODEL_ARGS, request, within_the_shared_check, world  # noqa: F401  (a fixture)
 from .test_export_roundtrip import read_back
 
 TASK = "language_model_pretraining"
@@ -548,14 +548,6 @@ def valid_ids(vocab: int, length: int, seed: int = 11) -> np.ndarray:
     ids = rng.integers(0, vocab, size=(3, length)).astype(np.float32)
     ids[-1, length - length // 4:] = vocab - 2          # the top of the vocabulary: the ids a random float would never reach
     return ids
-
-
-def within_the_shared_check(got: np.ndarray, expected: np.ndarray) -> float:
-    assert got.shape == expected.shape
-    scale = max(1.0, float(np.abs(expected).max()))
-    worst = float(np.abs(got.astype(np.float64) - expected).max())
-    assert worst <= TFLITE_CHECK_RTOL * scale, f"{worst} against an allowance of {TFLITE_CHECK_RTOL * scale}"
-    return worst
 
 
 @pytest.mark.parametrize("fmt", FORMATS)

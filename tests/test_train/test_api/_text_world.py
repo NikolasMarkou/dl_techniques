@@ -1,10 +1,12 @@
-"""The shared pieces of the language-model tests; no ``test_`` prefix, so pytest does not collect it.
+"""The shared pieces of the text tasks' tests; no ``test_`` prefix, so pytest does not collect it.
 
-``language_model_pretraining`` is tested on the offline ``synthetic`` bank with the character tokenizer ``ascii95`` (101 ids,
-no file): a tiny GPT-2 (64 wide, 2 blocks, 2 heads) over windows of 32 tokens trains in seconds on a CPU. This module holds
-what the task, resume, families and (later) predictor tests have in common: the request of a tiny run, the world (an empty
-registry holding every built-in family and task), what a resolved trainer looks like before its data is built, a directory that
-looks like the pinned tokenizer directory but holds other bytes, and the children of the real-kill resume test.
+``language_model_pretraining`` and ``text_classification`` are tested on the offline ``synthetic`` bank with the character tokenizer
+``ascii95`` (101 ids, no file): a tiny GPT-2 or BERT (64 wide, 2 blocks, 2 heads) over windows or rows of 32 tokens trains in seconds
+on a CPU. This module holds what the task, resume, families and predictor-and-export tests of the two tasks, their init-pair tests and
+the init tests that read a text run have in common: the request of a tiny run of either task, the world (an empty registry holding
+every built-in family and task), what a resolved trainer looks like before its data is built, a directory that looks like the pinned
+tokenizer directory but holds other bytes, and the bound an exported file's answer must meet. The children of the real-kill resume
+tests are ``_language_child.py``'s.
 
 Interface contract
 ------------------
@@ -27,16 +29,22 @@ Interface contract
 ``classifier_request(out, family="gpt2", **changes)`` / ``classifier_prepared(out, family="gpt2", **changes)``
     The ``text_classification`` twins of ``request`` and ``prepared``: a tiny run of ``<family>/tiny`` on the labelled synthetic bank
     (``CLASSIFIER_DOCUMENTS`` documents, 60 percent of them class 0, a quarter selecting), ``CLASSIFIER_EPOCHS`` epochs.
+
+``within_the_shared_check(got, expected)``
+    The bound of the export check (``TFLITE_CHECK_RTOL`` times the larger of 1 and the largest absolute value of ``expected``) as an
+    assertion: ``got`` has the shape of ``expected`` and is within it of it. :return: the largest absolute difference.
 """
 
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+import numpy as np
 import pytest
 
 from train.api import recipes, registry
 from train.api import text_tokenizer as tt
 from train.api.config import validate
+from train.api.exporting import TFLITE_CHECK_RTOL
 from train.api.tasks import register_builtin_tasks
 from train.api.tasks.language_model_pretraining import LanguageModelPretrainingConfig, LanguageModelPretrainingTrainer
 
@@ -129,3 +137,12 @@ def classifier_prepared(out: Any, family: str = "gpt2", **changes: Any) -> Tuple
     parsed, variant = registry.parse_model_name(config.model, task=trainer.task)
     resolved, context = trainer._resolve(trainer.describe_data(config), parsed, variant)
     return trainer, resolved, context
+
+
+def within_the_shared_check(got: np.ndarray, expected: np.ndarray) -> float:
+    """Assert ``got`` is ``expected`` within the export check's bound; see the module contract."""
+    assert got.shape == expected.shape
+    scale = max(1.0, float(np.abs(expected).max()))
+    worst = float(np.abs(got.astype(np.float64) - expected).max())
+    assert worst <= TFLITE_CHECK_RTOL * scale, f"{worst} against an allowance of {TFLITE_CHECK_RTOL * scale}"
+    return worst

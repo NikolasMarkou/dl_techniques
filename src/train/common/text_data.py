@@ -77,9 +77,9 @@ Interface contract
 
 ``TextStream``
     ``batch_at(step)`` is a pure function of ``(seed, step)``: ``(x, y)`` int32 ``(batch_size, seq_len)``, fresh arrays;
-    ``iterate(start_step=None)`` yields ``batch_at`` from ``start_step`` (default ``self.start_step``) for ever; ``with_start(step)``
-    is the same stream starting at ``step``; ``steps_per_epoch = n_rows // batch_size`` is the same for every epoch (the number of
-    windows does not depend on the order). :raises ValueError: a corpus of fewer than ``batch_size`` rows, a bad step.
+    ``with_start(step)`` is the same stream starting at ``step``, where :func:`train_dataset` begins;
+    ``steps_per_epoch = n_rows // batch_size`` is the same for every epoch (the number of windows does not depend on the order).
+    :raises ValueError: a corpus of fewer than ``batch_size`` rows, a bad step.
 
 ``lm_stream(docs, *, seq_len, batch_size, seed, eot)`` / ``lm_split(train_docs, test_docs, *, spec, seq_len, batch_size, seed,
 stream_seed=None, validation_split)``
@@ -486,8 +486,8 @@ class TextStream:
 
     :param epoch_rows: ``epoch -> (x_rows, y_rows)``, the ``n_rows`` rows of that epoch in the order they are consumed; a pure
         function of the epoch (and of what the stream was built from).
-    :param n_rows: rows in an epoch (the same for every epoch); ``batch_size``: rows in a batch; ``start_step``: where
-        :meth:`iterate` and a dataset begin.
+    :param n_rows: rows in an epoch (the same for every epoch); ``batch_size``: rows in a batch; ``start_step``: where a dataset
+        begins (:func:`train_dataset`).
     """
 
     epoch_rows: Callable[[int], Tuple[np.ndarray, np.ndarray]] = field(repr=False)
@@ -519,13 +519,6 @@ class TextStream:
         x, y = self._cache.get(epoch, self.epoch_rows)
         rows = slice(position * self.batch_size, (position + 1) * self.batch_size)
         return x[rows].copy(), y[rows].copy()
-
-    def iterate(self, start_step: Optional[int] = None) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
-        """The batches of steps ``start_step``, ``start_step + 1``, ... for ever (``None``: from ``self.start_step``)."""
-        step = self.start_step if start_step is None else start_step
-        while True:
-            yield self.batch_at(step)
-            step += 1
 
     def with_start(self, step: int) -> "TextStream":
         """The same stream beginning at ``step``."""

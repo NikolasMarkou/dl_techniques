@@ -228,7 +228,7 @@ def test_bert_takes_no_earlier_run_and_the_refusal_says_what_it_does_take(world,
 
 
 def vit_record():
-    """An image-classification record: a run of another task, the case "a classifier source" can be before Step 11 has a record."""
+    """An image-classification record: a run of another task, which no text classifier's declared sources name."""
     return predictor.build_task_record(
         task="image_classification", model="vit/vit_pico", family="vit", variant="vit_pico", class_names=["a", "b"],
         input_shape=[32, 32, 3], normalize="standardize", mean=[0.5] * 3, std=[0.25] * 3, data_kind="cifar10", source_channels=3)

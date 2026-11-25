@@ -264,9 +264,9 @@ def test_the_batch_at_a_step_is_a_pure_function_of_the_seed_and_the_step_and_the
         np.testing.assert_array_equal(one.batch_at(step)[0], two.batch_at(step)[0])
     assert not all(np.array_equal(one.batch_at(s)[0], other.stream.batch_at(s)[0]) for s in range(steps)), "another seed, another order"
     resumed = one.with_start(steps)
-    for position, (x, y) in zip(range(3), resumed.iterate()):
-        np.testing.assert_array_equal(x, one.batch_at(steps + position)[0])
-        np.testing.assert_array_equal(y, one.batch_at(steps + position)[1])
+    for position in range(3):
+        for got, want in zip(resumed.batch_at(steps + position), one.batch_at(steps + position)):
+            np.testing.assert_array_equal(got, want)
     # another stream seed orders the same train rows differently and moves no selection document
     np.testing.assert_array_equal(restreamed.select_index, first.select_index)
     np.testing.assert_array_equal(restreamed.select[0], first.select[0])
