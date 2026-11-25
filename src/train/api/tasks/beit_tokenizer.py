@@ -48,6 +48,15 @@ Interface contract
     the run changed. A resume compares its ``DATA_KEYS`` (the geometry, the scaling and the patch) and leaves the file as it is.
     ``predict`` and ``export`` of the run directory answer the int32 code grid (:mod:`train.api.tokenizer_predictor`).
 
+    ``init`` (D-012, D-050). A run starts from an earlier ``beit_tokenizer`` run (the family's one row declares no head and no source of
+    another task). ``init_identity`` gives the channels, the scaling and the RESOLVED size, patch and codebook size this run's record will hold,
+    so a source of another channel count, size, patch or codebook size is refused before the claim, naming both values; ``init_overlap`` counts
+    the source's seeded train rows among this run's selection rows. Epoch zero is then the LOADED weights' ``val_reconstruction_loss``
+    (``initial_loss_ratio`` and ``init_scale_warning`` are null, and the sequence's note says why), so the threshold is ``min(baseline,
+    loaded)``, still strictly below; ``Evaluation.loaded`` stays ``None``, since the other tasks' higher-is-better comparison with the loaded
+    value would judge a loss backwards. A width, a depth or an embedding size the record does not carry is refused by the engine after the
+    claim, complete-or-raise.
+
     Reporting. ``evaluate_and_report`` follows the pretrain order: the best checkpoint reloaded and scored on the TEST split, the usage of
     the best weights, the data-free analysis (``run_analysis``: the weights and spectral analyses; the stock analysis reads class
     probabilities, which an image is not), the last epoch's weights scored, saved and reloaded. ``Evaluation.extras`` carries ``baseline``,
@@ -59,8 +68,8 @@ Interface contract
     :param data: a mapping (``{"dataset": "cifar10"}``), a :class:`~train.api.tokenizer_args.TokenizerData`, or the path of a YAML file
         holding one.
     :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` / ``model_args`` and the groups: as in
-        :func:`~train.api.tasks.image_classification.train_image_classification`; ``precision`` is ``float32`` only. ``init`` is not offered
-        yet: the task declares no ``init_identity``, so the base class refuses it by name before the claim.
+        :func:`~train.api.tasks.image_classification.train_image_classification`; ``precision`` is ``float32`` only; ``init`` is the
+        directory of an earlier ``beit_tokenizer`` run of the same image size, patch and codebook size (see ``init`` above).
     :return: the :class:`~train.api.trainer.TrainResult`.
     :raises ConfigValidationError: for every bad key, listed together.
     :raises ConfigError: for a request that cannot be honoured; see :meth:`~train.api.trainer.TaskTrainer.run`. A family that does not
@@ -96,7 +105,7 @@ from ..config import (
     validate,
 )
 from ..data_args import DataFacts
-from ..predictor import build_tokenizer_record, overrides_of_variant
+from ..predictor import PRETRAIN_CHANNELS, PRETRAIN_NORMALIZE, build_tokenizer_record, overrides_of_variant
 from ..pretrain_args import PretrainTransformArgs
 from ..run_dir import CHECKPOINTS_DIR
 from ..tokenizer_args import (
@@ -281,6 +290,28 @@ class BeitTokenizerTrainer(TaskTrainer):
             mean=mean, std=std, patch_size=config.data.patch_size, num_embeddings=kwargs["num_embeddings"],
             variant_overrides=overrides_of_variant(table[context.variant], kwargs),
         )
+
+    def init_identity(self, config: BeitTokenizerConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the channels, scaling, size, patch and codebook size this run's record will hold, for an ``init`` source."""
+        # DECISION plan-2026-11-25T124419-fa94f59c/D-050
+        # The RESOLVED size, patch and codebook, as `task_record` writes them (the size a list, the record's JSON form), never the dataset's
+        # table or the recipe's: a typed transform_args.image_size, data.patch_size or model_args.num_embeddings is what the record will hold,
+        # and a source of another one would pass this check and be refused only after the claim, by its weights (for the size, never: every
+        # weight copies). Do NOT read GEOMETRY[dataset] or CODEBOOK[dataset] here.
+        size = config.transform_args.image_size
+        return {
+            "channels": PRETRAIN_CHANNELS, "normalize": PRETRAIN_NORMALIZE, "input_size": [size, size], "patch_size": config.data.patch_size,
+            "num_embeddings": self._model_kwargs(config, context).get("num_embeddings"),
+        }
+
+    def init_overlap(self, source: Any, config: BeitTokenizerConfig, data: Any) -> Dict[str, Any]:
+        """The source's seeded train cut against this run's selection rows (:func:`train.api.init_from.seeded_rows_split`): the streams cut
+        a dataset's rows as classification does, and the dataset's train size backs a capped run."""
+        from dl_techniques.datasets.vision.classification import get_spec
+
+        from .. import init_from
+
+        return init_from.seeded_rows_split(source, config, data, get_spec(config.data.dataset).train_size)
 
     def used_arguments(self, config: BeitTokenizerConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run was built with, for ``config.json``: the model keywords."""

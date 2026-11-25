@@ -32,8 +32,9 @@ Interface contract
     match is refused while planning; ``grow``: a regex matched at the start of a path, naming a
     depth-indexed block a deeper variant may add; ``pinned``: factory arguments the target takes
     from the source (a cross-task source pins those its record holds); ``fixed``: geometry keys the
-    family cannot change (``channels``, ``lookback``, ``horizon``, ``input_size``, ``patch_size``, and for the language
-    model ``vocab_size`` and ``tokenizer``, a tokenizer's digest; each needs a name in :data:`GEOMETRY_NAMES`);
+    family cannot change (``channels``, ``lookback``, ``horizon``, ``input_size``, ``patch_size``, for the language
+    model ``vocab_size`` and ``tokenizer``, a tokenizer's digest, and for the BEiT tokenizer ``num_embeddings``, its codebook size; each
+    needs a name in :data:`GEOMETRY_NAMES`);
     ``sources``: ``(task, family)`` of another task to the
     :class:`~train.api.registry.CrossTask` that maps its paths; ``positional``: regexes, each
     matching whole top-level path components, inside which weights whose paths differ pair by
@@ -451,7 +452,8 @@ SOURCE_FILES = ("task.json", "config.json", "best_model.keras")
 #: How a refusal names a geometry key of the records.
 GEOMETRY_NAMES = {"channels": "the input channels", "lookback": "data.lookback", "horizon": "data.horizon",
                   "input_size": "transform_args.image_size", "patch_size": "data.patch_size",
-                  "vocab_size": "the model's vocabulary size", "tokenizer": "the tokenizer (data.tokenizer, as its digest)"}
+                  "vocab_size": "the model's vocabulary size", "tokenizer": "the tokenizer (data.tokenizer, as its digest)",
+                  "num_embeddings": "the codebook size (model_args.num_embeddings)"}
 
 #: How a refusal describes an input scaling, by the value :func:`_scaling` gives it.
 SCALING_WORDS = {"standardize": "standardizes its input", "unit": "takes its input in [0, 1]",
@@ -667,11 +669,18 @@ HEAD_KEYS: Dict[str, Tuple[str, ...]] = {
     # source of another one is refused before the claim. Do NOT add "tokenizer" "for symmetry" (it never fires) and do NOT drop the row:
     # `head_differs` indexes this table for every same-task transfer, which a classifier run now is (a source of its own family).
     "text_classification": ("class_names",),
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-050
+    # A tokenizer has NO head: both convolution stacks and the codebook are what `init` moves, so its row is empty. It exists because
+    # `head_differs` indexes this table by task for every same-task transfer (a missing row is a KeyError after the claim). Do NOT add
+    # "num_embeddings" or the input statistics "for symmetry with pretrain": another codebook size or geometry is refused BEFORE the claim
+    # (`fixed`), so a same-task head can never differ, and the statistics change no shape.
+    "beit_tokenizer": (),
 }
 
 #: The source record's keys the ``init`` block keeps as its geometry (those its task's record has). The language record's
 #: ``tokenizer`` is not one: the pretrain record has a key of that name too (a file's sha256), and its block must not change (D-041).
-GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon", "patch_size", "seq_len", "vocab_size")
+#: The tokenizer record's ``num_embeddings`` (its codebook size) is, and no other record has a key of that name (D-050).
+GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon", "patch_size", "seq_len", "vocab_size", "num_embeddings")
 
 
 def head_differs(task: str, source_record: Mapping[str, Any], target_record: Mapping[str, Any]) -> bool:

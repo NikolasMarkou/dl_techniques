@@ -59,8 +59,9 @@ Interface contract
         refuses ``None`` ("holds no layer of that family") and any key that differs from the record's variant and overrides.
 
 ``builtin_tokenizer_models()``
-    :return: the one :class:`~train.api.registry.ModelSpec` row, freshly built, with its ``init`` transfer (size, patch and channels are
-        fixed, so a source of another geometry is refused before the claim) and its ``observe``.
+    :return: the one :class:`~train.api.registry.ModelSpec` row, freshly built, with its ``init`` transfer (channels, size, patch and
+        codebook size are fixed, so a source of another one is refused before the claim, naming both values; no head, no source of another
+        task) and its ``observe``.
 
 Recipe
 ------
@@ -344,8 +345,6 @@ def builtin_tokenizer_models() -> Tuple[ModelSpec, ...]:
     # that added the `beit_tokenizer` TaskSpec (step 6). A family whose task is not in `registry.TASKS` is a family `python -m train
     # list_models` lists and no command can run, and the count guard (`sum(counts) == len(MODELS)` over the registered tasks) goes red
     # or the documents false. Do NOT remove the call without the TaskSpec, nor the TaskSpec without the call.
-    # `fixed` is the geometry a weight depends on: the stem's kernel (channels), the grid the quantizer sees (size and patch). The
-    # codebook size is the init engine's geometry key (step 8). The model has no head: the whole network is the thing `init` moves.
     return (
         ModelSpec(
             family=FAMILY,
@@ -355,6 +354,14 @@ def builtin_tokenizer_models() -> Tuple[ModelSpec, ...]:
             defaults=RECIPE,
             resolve_model_args=f"{_HERE}:resolve_tokenizer_args",
             observe=f"{_HERE}:observe_tokenizer",
-            transfer=TransferSpec(fixed=("channels", "input_size", "patch_size")),
+            # DECISION plan-2026-11-25T124419-fa94f59c/D-050
+            # `fixed` is what `init` refuses BEFORE the claim, naming both values. The input channels (the stem's kernel), the patch (the number of
+            # stride-2 stages) and the codebook size (the quantizer's table) change a weight's shape, which the census holds at the weight level. The
+            # image SIZE changes none (a convolutional tokenizer has no weight that depends on it: MEASURED, every weight copies from 32 px to 64 px)
+            # and is fixed by POLICY, the plan's contract being the same size; a test says so. The width, the depth and the embedding size are model
+            # keys the record does not carry, so the engine refuses them after the claim. Do NOT drop `num_embeddings` (another codebook would be
+            # refused after the claim, with a run directory left claimed), and do NOT pin the architecture keys to the source's (a source of another
+            # size would then be copied silently). The model has no head: the whole network is what `init` moves.
+            transfer=TransferSpec(fixed=("channels", "input_size", "patch_size", "num_embeddings")),
         ),
     )

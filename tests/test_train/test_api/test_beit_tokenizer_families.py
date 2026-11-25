@@ -566,8 +566,9 @@ def test_the_row_is_one_family_one_variant_and_declares_its_transfer():
     assert ta.FAMILY == "vq_vae_rotation", "the library package's name"
     assert sorted(row.load_variants()) == ["small"] and row.load_factory() is tm.create_vq_tokenizer
     assert row.load_resolver() is tm.resolve_tokenizer_args and row.defaults is tm.RECIPE
-    # `init` takes an earlier tokenizer run of the same size, patch and channels only (the codebook size is the engine's geometry key).
-    assert row.transfer is not None and row.transfer.fixed == ("channels", "input_size", "patch_size")
+    # `init` takes an earlier tokenizer run of the same channels, size, patch and codebook size only (D-050 of plan fa94f59c: Step 5 declared
+    # the first three, and the codebook joined them in Step 8, the only way another codebook is refused before the claim).
+    assert row.transfer is not None and row.transfer.fixed == ("channels", "input_size", "patch_size", "num_embeddings")
     assert row.transfer.head == () and not row.transfer.sources
 
 
