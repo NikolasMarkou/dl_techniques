@@ -397,8 +397,9 @@ def test_a_fine_tune_that_learns_meets_the_bar_and_beats_the_loaded_weights(worl
     logger.info(f"CLS-INIT-LEARNS epoch zero {loaded:.4f}, bar {summary['success_threshold']:.4f}, best {summary['success_value']:.4f}")
 
 
-def test_the_overlap_of_a_language_source_with_the_imdb_selection_is_counted_as_the_oracle(world, tmp_path):  # noqa: F811
+def test_the_overlap_of_a_language_source_with_the_imdb_selection_is_counted_as_the_oracle(world, tmp_path, monkeypatch):  # noqa: F811
     """The same reviews serve both tasks, so by document index the count is exact (the synthetic banks are other texts)."""
+    use_reviews(monkeypatch, tmp_path)    # a TFDS directory of its own: no TFDS_DATA_DIR of the machine is read
     import dataclasses
     import hashlib
 
