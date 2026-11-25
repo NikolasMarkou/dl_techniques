@@ -861,10 +861,10 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   `research/roadmap/20261117_train_api_init_from.md`). The pretrain record with `predict` and `export`, and the `beit` and
   `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code and their GPU gate has run (Phase 4h,
   plan 5c6cc105, with the gate under "Measured: the Phase 4h gate" below). `language_model_pretraining` and `text_classification`, the
-  two language tasks, are in the code and their GPU gate has not run (Phase 4i, their sections below). Named and not started:
-  DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`). `load_model`, `export`, `list_models` and `list_tasks` were built in
-  the earlier phases and stay on `train.api` (since plan 98c9aac5 `list_tasks` and `list_models` register the built-in tasks
-  and families themselves, so they answer in a fresh process), and the repo map entry is `REPO_MAP.md`, section "Entry points".
+  two language tasks, are in the code and their GPU gate has run (Phase 4i, with the gate under "Measured: the language gate" below).
+  Named and not started: DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`). `load_model`, `export`, `list_models` and
+  `list_tasks` were built in the earlier phases and stay on `train.api` (since plan 98c9aac5 `list_tasks` and `list_models` register the
+  built-in tasks and families themselves, so they answer in a fresh process), and the repo map entry is `REPO_MAP.md`, section "Entry points".
 
 **`time_series_forecasting`** (plan 3a8319ef): trains a forecaster on windows of a series, either a synthetic bank of the library's
 generator patterns or one csv of your own. `out`, `model` and `data` are required (every key of `data` has a default, but the group `data` itself must be named: `data.format=builtin` is the synthetic bank); `data.lookback` and `data.horizon` come from the family's recipe. The family chooses the model. Every series is cut BY TIME into a training slice, a slice that selects the best epoch and a
@@ -1351,8 +1351,8 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
 <!-- depth-gate:end -->
 
 **`language_model_pretraining`** (plan 7806a290, Phase 4i, first half): trains the library's GPT-2 as a causal language model on windows cut
-from tokenized documents. `out`, `model` and `data.dataset` are required. It is built and tested on a CPU; **its GPU gate has not run** (the
-one block for the phase's two tasks, after the `text_classification` section below, is empty until it has).
+from tokenized documents. `out`, `model` and `data.dataset` are required. It is built and tested on a CPU, and **its GPU gate has run** (its numbers are in the
+one block for the phase's two tasks, after the `text_classification` section below).
 
 ```bash
 python -m train list_models task=language_model_pretraining
@@ -1472,7 +1472,7 @@ result = train_language_model_pretraining(out="auto", model="gpt2_lm/tiny", data
   batches of a resume) were measured on the CPU only.
 
 **`text_classification`** (plan 7806a290, Phase 4i, second half): trains a BERT or a GPT-2 as a classifier of labelled texts. `out`, `model` and
-`data.dataset` are required. It is built and tested on a CPU; **its GPU gate has not run** (the block that ends this section is empty until it has).
+`data.dataset` are required. It is built and tested on a CPU, and **its GPU gate has run** (its numbers are in the block that ends this section).
 
 ```bash
 python -m train list_models task=text_classification
@@ -1579,9 +1579,62 @@ result = train_text_classification(out="auto", model="gpt2/tiny", data={"dataset
   unmeasured.
 
 <!-- language-gate:begin -->
-**Measured: the language gate.** Not run. The GPU gate of the phase's two tasks, `language_model_pretraining` and `text_classification`, run once at
-night on the final code of this phase, has not been run, so this block holds no measurement: it is filled from the gate's own files by script when
-it has.
+**Measured: the language gate** (plan 7806a290: `language_model_pretraining` on the IMDB reviews, then `text_classification`
+from that run and from scratch, and `predict` and `export` of both). Run on the code HEAD `37e2697ba` of the branch
+`train-api/phase-4i` (the commits after it change under `src/` only this README and under `tests/` only two test files,
+described below), one job at a time, at the recipes' rates and seed 42: no optimizer key and no batch key is on any command
+line, so the batch is 16 for the language model and 32 for the classifiers. The four training runs ran on an NVIDIA GeForce RTX
+4090 (`CUDA_VISIBLE_DEVICES=0`, no `--gpu`), `predict` and `export` on the CPU. Each log names the HEAD and the worktree `src`
+as the origin of `dl_techniques` and `train`; the three pinned tokenizer files and the language run's `best_model.keras` kept
+their sha256 through every job. With none of the new rows used nothing changed: three CPU reference runs (API classification,
+the legacy convnext trainer, API segmentation) reproduce the runs recorded before Phase 4g exactly (`GOLDEN: EXACT for api,
+convnext, seg`), the `checkpoint` key that Phase 4g renamed `init` aside. Before those, the same night ran this work's targeted
+tests on the CPU at that HEAD: 109 pytest commands, which overlap (a file run whole and again by selector, or named by more than
+one command), so 5,578 test executions (5,574 passed, 4 skipped, none failed) of 5,321 distinct tests, of which 5,317 passed and
+4 were skipped, and 105 of 107 planted mutants made their tests fail (0 specs stale, not run). The other 2 (X11.6 and X15.N6c)
+did not, so the night's Phase A verdict was FAIL: in each the planted fault changed what the code does and no test saw it (a
+record of another tokenizer digest whose [CLS] id is its pad id; a document boundary moved with the number of documents kept), a
+hole in a test and not a defect of the code; a case added to each of the two test files after the night fails its planted fault
+now, with the bytes restored, and the code of the gate HEAD is unchanged. Every one of the gate's 70 claims holds (9 further
+checks, marked extra in `gate_numbers.md`, hold too). The night's first summary counted 4 claims as misses, the claim that a
+run's `config.json` is the plan's arm in each training run, because it read the typed `optim_args` from `config.json`, which
+holds the resolved ones (the request as typed is `config_requested.json`): the claim was defined wrong and not the runs, it
+reads the right file now, on the night's own files, and nothing was run again. The predictions below are reported apart. Every
+number is read by script from the runs' own files and the night's logs. Step is the median epoch after the first over its steps,
+peak memory TensorFlow's GPU allocator peak. The bar of a classifier is the majority-class share of its selection split (0.5028)
+plus its margin (0.0300), three binomial standard errors of the share capped at half the way to a perfect score, so the table
+reports each arm's best `val_accuracy` and the accuracy of its best checkpoint on the test reviews beside it.
+
+| Arm | Run | Init | Bar | Loaded weights at epoch zero | Best (epoch of) | Test (best checkpoint) | Verdict | Step | Peak memory | Wall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `lm_imdb` | `gpt2_lm/tiny`, imdb_reviews, the `gpt2` tokenizer (50,261 ids), windows of 256, 12 epochs | - | `val_loss` below min(unigram 7.1161, untrained 10.8626) | - | 4.4467 (9 of 12) | 4.5709 (loss) | met, exit 0 | 28.0 ms | 2,575.6 MiB | 726 s |
+| `cls_gpt2_init` | `gpt2/tiny`, imdb_reviews, 8 epochs, from `lm_imdb` | `cross_task`, `same_split`: copied 54, reset 8, dropped 0 | `val_accuracy` above 0.5328 and above the loaded weights | 0.5164 | 0.8723 (3 of 7) | 0.8414 | met, exit 0 | 19.6 ms | 1,040.6 MiB | 233 s |
+| `cls_gpt2_scratch` | `gpt2/tiny`, imdb_reviews, 8 epochs | - | `val_accuracy` above 0.5328 | - | 0.8607 (2 of 6) | 0.8292 | met, exit 0 | 19.6 ms | 1,038.1 MiB | 213 s |
+| `cls_bert_scratch` | `bert/tiny`, imdb_reviews, 8 epochs | - | `val_accuracy` above 0.5328 | - | 0.8651 (2 of 6) | 0.8220 | met, exit 0 | 20.8 ms | 1,307.2 MiB | 223 s |
+
+**The language model.** `lm_imdb` trained 12 epochs of windows of 256 ids over the 22,502 train documents that the split left it
+(26,328 windows; 2,498 documents and 2,920 windows select the best epoch, 28,581 windows score the test reviews). Its best
+`val_loss` 4.4467 at epoch 9 is below the unigram's 7.1161 and the untrained 10.8626: a perplexity of 85.34 on the selection
+windows against the unigram's 1,231.60 (0.069 of it) and 96.63 on the test windows. The prediction written before the run, at
+least 30 percent below the unigram's perplexity (a ratio of at most 0.7), held.
+
+**The classifiers.** `cls_gpt2_init` started from `lm_imdb`: copied 54 weights path for path, reset the 8 of its head and
+dropped 0, the counts of the production-order census at the gate's geometry (54 weights in the source, 62 in the target),
+relation `cross_task`, split `same_split`. Its loaded weights scored 0.5164 at epoch zero, its best `val_accuracy` was 0.8723
+and its test accuracy 0.8414. `cls_gpt2_scratch` reached 0.8607 (test 0.8292) and `cls_bert_scratch` 0.8651 (test 0.8220).
+**Predictions** (written before the runs; reported, not counted among the claims): the init arm's best `val_accuracy` on the
+selection split was above the scratch arm's and its test accuracy above the scratch arm's, so the prediction that it would be
+above held; nothing was tuned or run again. The BERT arm had no prediction: it is reported next to the two `gpt2` arms (the plan
+flagged the assumption that a BERT classifier is the family wanted).
+
+**`predict` and `export`** of both runs, on the CPU: 22 checks, all holding. `predict` on the first 8 IMDB test reviews (2,211
+tokens in all) gave the language model's `mean_nll` of every review within 1e-4 of an independent float64 computation from the
+run's best model on the same windows (largest gap 0.0) and of the loss the run compiled with (largest gap 4.0e-7); `export`
+wrote 8 files, the four formats of each run, each answered the same reviews within the check's bound, 1e-4 times the largest
+absolute value (24.82 for the language model, 2.865 for the classifier). The largest absolute difference from the model's own
+output, in the order `keras`, `saved_model`, `tflite`, `onnx`: 0.0, 7.3e-5, 9.2e-5, 5.4e-5 for `lm_imdb` and 2.4e-7, 1.9e-6,
+1.3e-6, 1.2e-6 for `cls_gpt2_init`. The gate added only `p4i_gate_<arm>_37e2697b` run directories to `results/`: 21 entries
+before, 25 after.
 <!-- language-gate:end -->
 
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);

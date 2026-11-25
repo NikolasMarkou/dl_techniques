@@ -253,7 +253,7 @@ BEiT relative position bias is resampled by unilm's rule, checked against unilm'
 Transformer table, which no reference resizes, is refused at another grid. Pretrain is an `init` target too, from its own family
 only. What changed against the 4g design: `research/roadmap/20261117_train_api_init_from.md`, Section 0.
 
-**Phase 4i: the language tasks. Both tasks' code done, GPU gate not run** (branch `train-api/phase-4i`, plan 7806a290; two tasks in one plan, the first
+**Phase 4i: the language tasks. Both tasks' code done, GPU gate run** (branch `train-api/phase-4i`, plan 7806a290; two tasks in one plan, the first
 finished, and kept as the local branch `train-api/phase-4i-lm`, before the second started). `language_model_pretraining` is built and tested on a CPU:
 the seventh task, one family `gpt2_lm` (a functional model over the library GPT-2, trained by the stock `fit`), a text stream that is a
 function of `(seed, step)` so that a resume continues it, a bar strictly below `min(unigram, epoch zero)`, the seventh record kind with
@@ -262,8 +262,8 @@ pinned outside the repository because tiktoken's own cache is in `/tmp`. `text_c
 two families, `bert` and `gpt2` (functional classifiers over the library encoder and decoder with the sentiment head, the padding mask read from the
 pad id), the language task's stream, split and tokenizer, a bar strictly above the majority share of the selection split plus three binomial standard errors of it (so
 the gate reports the accuracies beside it), the eighth record kind with `predict` (`labels` and `scores`) and `export`, and `init` from its own family and,
-for `gpt2`, from a `gpt2_lm` run (`bert` has no cross-task source). Not done: the GPU gate. Nothing of either task has run on a GPU; its one block in
-`src/train/README.md`, "Measured: the language gate", is empty. User-facing rules: `src/train/README.md`, the two task sections.
+for `gpt2`, from a `gpt2_lm` run (`bert` has no cross-task source). The GPU gate has run, once, on the code of its night; its numbers are in
+`src/train/README.md`, "Measured: the language gate". User-facing rules: `src/train/README.md`, the two task sections.
 
 **Phase 5: `load_model`, `export`, `list_models`, `list_tasks`. Done** (plan 98c9aac5, branch `train-api/phase-5-6`):
 built inside Phases 1 to 4h (`api/predictor.py`, `api/exporting.py`, `api/registry.py`, `api/cli.py`), on `train.api`
