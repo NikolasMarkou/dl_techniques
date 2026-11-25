@@ -33,18 +33,26 @@ Interface contract
     The constant BEiT logits broadcast to ``(batch, N, V)``: 32 * 196 * 8192 * 4 bytes, about
     205 MB per evaluation batch at imagenette with the 8192-code head.
 
-``MIN_TOKENIZER_PERPLEXITY`` and ``checked_tokenizer_usage(code_ids, *, path)``
+``MIN_TOKENIZER_PERPLEXITY`` and ``usage_meets_floor(usage)``
+    :param usage: a :class:`train.common.pretrain_data.TokenizerUsage`.
+    :return: whether its perplexity reaches the floor ``MIN_TOKENIZER_PERPLEXITY`` (effective codes), judged as the entropy
+        at least ``log`` of it less ``ENTROPY_ROUNDING_TOLERANCE`` (so exactly the floor passes). The ONE definition of the
+        floor: ``checked_tokenizer_usage`` refuses on ``False`` and the ``beit_tokenizer`` task reports it. It reads the
+        module constant when it is called, so a test that patches ``MIN_TOKENIZER_PERPLEXITY`` moves it.
+
+``checked_tokenizer_usage(code_ids, *, path)``
     :param code_ids: the masked target ids of one pass of the select stream (1-D integers).
     :param path: the tokenizer file, named in the refusal.
     :return: the :class:`train.common.pretrain_data.TokenizerUsage` of ``code_ids``.
-    :raises ValueError: for no ids, and for a perplexity below the floor ``MIN_TOKENIZER_PERPLEXITY`` (effective codes), judged
-        as the entropy below ``log`` of it by more than ``ENTROPY_ROUNDING_TOLERANCE`` (so exactly the floor passes);
-        the message gives the distinct count, the perplexity and the top-1 share.
+    :raises ValueError: for no ids, and for a usage that does not meet the floor (:func:`usage_meets_floor`); the message
+        gives the distinct count, the perplexity and the top-1 share.
 
-``epoch_zero_val_loss(sidecar_path)``
+``epoch_zero_val_loss(sidecar_path, key="loss")``
     :param sidecar_path: ``<run>/checkpoints/fit_state.json``, the fit sidecar.
-    :return: the ``val_loss`` of the UNTRAINED model on the select stream, which the fresh run's epoch-zero
-        evaluation wrote there (``initial.metrics.loss``); a resume reads the same number.
+    :param key: the metric of ``initial.metrics`` to read: ``loss`` for a task whose ``val_loss`` is the bar's metric (the
+        default, and what every caller before the tokenizer read), ``reconstruction_loss`` for the tokenizer's.
+    :return: the ``val_<key>`` of the UNTRAINED model on the select stream, which the fresh run's epoch-zero
+        evaluation wrote there (``initial.metrics.<key>``); a resume reads the same number.
     :raises ValueError: if the sidecar has no such value (a missing file, or a run that never evaluated epoch zero).
 """
 
@@ -145,6 +153,16 @@ def constant_baseline(
     return Baseline("unigram_codes", _evaluate(model, select_ds, method))
 
 
+def usage_meets_floor(usage: TokenizerUsage) -> bool:
+    """Whether ``usage`` reaches :data:`MIN_TOKENIZER_PERPLEXITY`; see the module contract."""
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-028
+    # ONE definition of "meets the floor", called by the refusal below and by the `beit_tokenizer` task's verdict. It compares the
+    # ENTROPY with a slack, never the perplexity: `exp(log(64))` is 63.99999999999998, so `usage.perplexity >= 64` refuses a codebook
+    # that uses exactly 64 codes equally. Do NOT copy the comparison into a task, and do NOT read the floor into a default argument or
+    # a copy: the toy-run tests patch the module constant and this function must see the patched value.
+    return usage.entropy >= math.log(MIN_TOKENIZER_PERPLEXITY) - ENTROPY_ROUNDING_TOLERANCE
+
+
 def checked_tokenizer_usage(code_ids: Any, *, path: str) -> TokenizerUsage:
     """The usage of ``code_ids``, refused below :data:`MIN_TOKENIZER_PERPLEXITY`; see the module contract."""
     usage = tokenizer_usage(code_ids)
@@ -155,7 +173,7 @@ def checked_tokenizer_usage(code_ids: Any, *, path: str) -> TokenizerUsage:
     # of the codebook, and it is a REFUSAL, not a warning: a bar that cannot fail must not be reported as a verdict. Do NOT
     # lower it to let a small tokenizer through (a test patches this constant for the toy tokenizer it builds), and do NOT
     # turn it into a log line.
-    if usage.entropy < math.log(MIN_TOKENIZER_PERPLEXITY) - ENTROPY_ROUNDING_TOLERANCE:
+    if not usage_meets_floor(usage):
         raise ValueError(
             f"the tokenizer {path!r} uses its codebook too narrowly: {usage.distinct} distinct codes over the "
             f"{usage.n_codes} masked positions of the selection split, perplexity {usage.perplexity:.2f} (top-1 share "
@@ -167,8 +185,8 @@ def checked_tokenizer_usage(code_ids: Any, *, path: str) -> TokenizerUsage:
     return usage
 
 
-def epoch_zero_val_loss(sidecar_path: Any) -> float:
-    """The untrained model's ``val_loss`` as the fit sidecar holds it; see the module contract."""
+def epoch_zero_val_loss(sidecar_path: Any, key: str = "loss") -> float:
+    """The untrained model's ``val_<key>`` as the fit sidecar holds it; see the module contract."""
     # DECISION plan-2026-11-12T015747-46e5318f/D-009
     # The epoch-zero term of the bar is read from the SIDECAR, always, and never from an attribute the first
     # process set: a resume (and a reporting-only resume) never calls `initial_loss_check`, so the attribute is
@@ -177,10 +195,10 @@ def epoch_zero_val_loss(sidecar_path: Any) -> float:
     state = read_fit_state(sidecar_path)
     initial = state.get("initial")
     metrics = initial.get("metrics") if isinstance(initial, dict) else None
-    loss = metrics.get("loss") if isinstance(metrics, dict) else None
+    loss = metrics.get(key) if isinstance(metrics, dict) else None
     if isinstance(loss, bool) or not isinstance(loss, (int, float)):
         raise ValueError(
-            f"the epoch-zero val_loss is not in {sidecar_path}: the fit sidecar holds no initial.metrics.loss, so the "
+            f"the epoch-zero val_{key} is not in {sidecar_path}: the fit sidecar holds no initial.metrics.{key}, so the "
             "success bar cannot be cut (a run writes it before its first epoch)"
         )
     return float(loss)
