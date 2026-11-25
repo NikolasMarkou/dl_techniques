@@ -262,8 +262,8 @@ pinned outside the repository because tiktoken's own cache is in `/tmp`. `text_c
 two families, `bert` and `gpt2` (functional classifiers over the library encoder and decoder with the sentiment head, the padding mask read from the
 pad id), the language task's stream, split and tokenizer, a bar strictly above the majority share of the selection split plus three binomial standard errors of it (so
 the gate reports the accuracies beside it), the eighth record kind with `predict` (`labels` and `scores`) and `export`, and `init` from its own family and,
-for `gpt2`, from a `gpt2_lm` run (`bert` has no cross-task source). The GPU gate has run, once, on the code of its night; its numbers are in
-`src/train/README.md`, "Measured: the language gate". User-facing rules: `src/train/README.md`, the two task sections.
+for `gpt2`, from a `gpt2_lm` run (`bert` has no cross-task source). The GPU gate has run on the final code, after a first night whose findings (holes in
+tests, a wrongly defined claim) were fixed; its numbers are in `src/train/README.md`, "Measured: the language gate". User-facing rules: `src/train/README.md`, the two task sections.
 
 **Phase 5: `load_model`, `export`, `list_models`, `list_tasks`. Done** (plan 98c9aac5, branch `train-api/phase-5-6`):
 built inside Phases 1 to 4h (`api/predictor.py`, `api/exporting.py`, `api/registry.py`, `api/cli.py`), on `train.api`
