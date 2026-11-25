@@ -491,8 +491,12 @@ def test_the_corpus_digest_sees_a_token_a_label_the_order_and_a_boundary_and_the
     base = td.corpus_digest((docs, labels), (test, None))
     assert len(base) == 64 and base == td.corpus_digest((list(docs), labels.copy()), (test, None))
     for name, part in {"a token": ([docs[0] + 1, *docs[1:]], labels), "a label": (docs, np.array([0, 1, 1])),
-                       "the order": (docs[::-1], labels[::-1]), "a boundary": ([docs[0][:2], docs[0][2:], *docs[1:]], np.array([0, 0, 1, 0]))}.items():
+                       "the order": (docs[::-1], labels[::-1]), "a boundary": ([docs[0][:2], docs[0][2:], *docs[1:]], np.array([0, 0, 1, 0])),
+                       # D-093: the same ids, labels and number of documents, one boundary moved: only the length of each document tells them apart
+                       "a boundary with the count kept": ([docs[0][:2], np.concatenate([docs[0][2:], docs[1]]), docs[2]], labels)}.items():
         assert td.corpus_digest(part, (test, None)) != base, name
+    # D-093: a document moved to the other part keeps every length and id (no labels): only each part's document count tells the corpora apart
+    assert td.corpus_digest((docs[:2], None), ([docs[2], *test], None)) != td.corpus_digest((docs, None), (test, None)), "the count of a part"
     assert td.corpus_digest((docs, labels), ([test[0] + 1], None)) != base, "a test document"
     assert split_of().fingerprint == td.corpus_digest((corpus(60, seed=1), None), (corpus(30, seed=2), None)) != split_of(train=corpus(60, seed=3)).fingerprint
     assert split_of().documents_fingerprint == split_of().fingerprint, "a language split has no labels: its two digests are one"

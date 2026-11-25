@@ -140,13 +140,15 @@ def test_a_record_missing_any_key_is_refused(key):
     [
         ({"seq_len": 0}, "'seq_len'"), ({"seq_len": 32.0}, "'seq_len'"), ({"vocab_size": 0}, "'vocab_size'"), ({"n_vocab": 200}, "'n_vocab'"),
         ({"pad_id": 101}, "'pad_id'"), ({"eot_id": -1}, "'eot_id'"), ({"cls_id": 101}, "'cls_id'"), ({"cls_id": 0}, "'cls_id'"),
+        # D-093: the record above is refused twice (the pin check of its digest names 'cls_id' too); this one, of a digest this code does not pin, only here
+        ({"cls_id": 0, "tokenizer": "0" * 64}, "'cls_id' and 'pad_id' are both"),
         ({"encoding": "cl100k_base"}, "'encoding'"), ({"tokenizer": "abc"}, "'tokenizer'"), ({"tokenizer_files": ["a"]}, "'tokenizer_files'"),
         ({"tokenizer_files": {"abc": "0" * 64}}, "'tokenizer_files'"), ({"class_names": []}, "'class_names'"),
         ({"class_names": ["a", "a"]}, "'class_names'"), ({"layout": "cls_tail_pad"}, "'layout'"),
         ({"output": "next_token_logits"}, "'output'"),
     ],
     ids=["seq_zero", "seq_float", "vocab_zero", "n_vocab_above_vocab", "pad_outside", "eot_negative", "cls_outside", "cls_is_pad",
-         "other_encoding", "short_digest", "files_not_object", "ascii_with_files", "no_classes", "repeated_class", "other_layout",
+         "cls_is_pad_of_another_digest", "other_encoding", "short_digest", "files_not_object", "ascii_with_files", "no_classes", "repeated_class", "other_layout",
          "the_language_models_output"],
 )
 def test_a_record_of_impossible_values_is_refused_naming_the_key(change, fragment):
