@@ -44,11 +44,20 @@ Interface contract
     :param model: a model with ``encode_to_indices`` (a ``VQVAERotationTrick``), run eagerly in inference mode.
     :return: the integer code ids of EVERY image of one pass of ``select_ds``, in row order, shape ``(n, grid_h, grid_w)``.
     :raises TypeError: for a model with no ``encode_to_indices``. :raises ValueError: for an empty or an endless stream.
+
+``TokenizerCodes(model)``
+    A Keras layer, the function an exported tokenizer file runs (``train.api.tokenizer_predictor.served``): ``layer(images)`` is
+    ``model.encode_to_indices(images)``, the int32 code grid ``(batch, height // patch, width // patch)`` of float32 images
+    ``(batch, height, width, channels)`` standardized as the run's streams are. Registered under ``train_tokenizer``, a package of the
+    ``train`` tree, which the wheel does not ship: a ``.keras`` file that holds the layer loads only where ``train`` is importable. Its config
+    names the model; the weights ride in the archive beside it. ``tests/test_train/test_api/test_beit_tokenizer_predictor_and_export.py``
+    holds it to the model's own codes in all four export formats.
 """
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Optional, Tuple
 
+import keras
 import numpy as np
 import tensorflow as tf
 
@@ -202,3 +211,30 @@ def code_ids_of(model: Any, select_ds: "tf.data.Dataset") -> np.ndarray:
     if not parts:
         raise ValueError("the selection stream is empty: there are no images to encode")
     return np.concatenate(parts)
+
+
+@keras.saving.register_keras_serializable(package="train_tokenizer")
+class TokenizerCodes(keras.layers.Layer):
+    """An image to its code grid, as a layer: what an exported tokenizer file runs; see the module contract."""
+
+    def __init__(self, model: Any, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # DECISION plan-2026-11-25T124419-fa94f59c/D-045
+        # The function a file runs is a REGISTERED layer around the loaded model, not a functional `keras.Model(image,
+        # model.encode_to_indices(image))`: that model is built (the shape inference passes) and fails when it RUNS, because the quantizer's
+        # `get_codebook_indices` reshapes to a shape tuple read off the symbolic input, `(None, 8, 8)`, and the `None` batch reaches the
+        # Reshape op as a value ("Attempt to convert a value (None) with an unsupported type", measured). Inside a layer's `call` the
+        # shape is dynamic and the same method runs. Do NOT wrap the call in a `keras.layers.Lambda` (it saves and does not load under
+        # Keras's default safe mode, `forecast_run.ServedForecaster`'s measurement), and do NOT move this class into `dl_techniques` to
+        # make the `.keras` file load without `train` (a library change outside this task).
+        self.model = model
+
+    def call(self, images: Any) -> Any:
+        return self.model.encode_to_indices(images)
+
+    def get_config(self) -> Dict[str, Any]:
+        return {**super().get_config(), "model": keras.saving.serialize_keras_object(self.model)}
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "TokenizerCodes":
+        return cls(**{**config, "model": keras.saving.deserialize_keras_object(config["model"])})

@@ -39,6 +39,7 @@ from train.api.predictor import (
     build_segmentation_record,
     build_task_record,
     build_text_classification_record,
+    build_tokenizer_record,
     check_record,
     load_model,
     read_record,
@@ -57,6 +58,7 @@ DEPTH = "depth_estimation"
 PRETRAIN = "pretrain"
 LANGUAGE = "language_model_pretraining"
 TEXT_CLASSIFICATION = "text_classification"
+BEIT_TOKENIZER = "beit_tokenizer"
 
 #: The keys and order of a version 1 classification record, written out (not read from the module).
 V1_KEYS = [
@@ -133,6 +135,15 @@ def text_classification(**changes):
     return value
 
 
+def tokenizer(**changes):
+    value = build_tokenizer_record(
+        model="vq_vae_rotation/small", family="vq_vae_rotation", variant="small", input_size=(32, 32), channels=3,
+        mean=[0.49, 0.48, 0.45], std=[0.25, 0.24, 0.26], patch_size=4, num_embeddings=512,
+    )
+    value.update(changes)
+    return value
+
+
 def without(value, *keys):
     value = dict(value)
     for key in keys:
@@ -145,10 +156,10 @@ def without(value, *keys):
 # ---------------------------------------------------------------------
 
 
-def test_the_version_is_two_and_the_tables_are_the_eight_tasks():
+def test_the_version_is_two_and_the_tables_are_the_nine_tasks():
     assert SCHEMA_VERSION == 2
     assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH, PRETRAIN, LANGUAGE,
-                                          TEXT_CLASSIFICATION])
+                                          TEXT_CLASSIFICATION, BEIT_TOKENIZER])
     assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
     assert OPTIONAL_RECORD_KEYS == ("variant_overrides", "init", "tokenizer_dir")
 
@@ -234,6 +245,21 @@ def test_a_text_classification_record_is_the_language_models_with_the_classifier
     assert not {"mean", "std", "normalize", "input_shape", "input_size", "lookback"} & set(record)
 
 
+def test_a_tokenizer_record_is_the_pretrain_records_geometry_with_the_codebook_and_no_tokenizer_file():
+    record = tokenizer()
+    assert list(record) == list(RECORD_KEYS[BEIT_TOKENIZER]) == [
+        "schema_version", "task", "model", "family", "variant", "input_size", "channels", "normalize", "mean", "std", "patch_size",
+        "num_embeddings", "output",
+    ]
+    assert (record["task"], record["input_size"], record["channels"], record["patch_size"]) == (BEIT_TOKENIZER, [32, 32], 3, 4)
+    assert (record["normalize"], record["num_embeddings"], record["output"]) == ("standardize", 512, "code_ids")
+    assert not {"class_names", "input_shape", "lookback", "tokenizer", "seq_len"} & set(record)
+    with pytest.raises(ConfigError, match="unknown key.*tokenizer"):
+        check_record(tokenizer(tokenizer="ab" * 32), "task.json")
+    with pytest.raises(ConfigError, match="unknown key.*num_embeddings"):
+        check_record(pretrain(num_embeddings=512), "task.json")
+
+
 @pytest.mark.parametrize("make, ids", [(language, ("eot_id", "pad_id")), (text_classification, ("eot_id", "pad_id", "cls_id"))],
                          ids=[LANGUAGE, TEXT_CLASSIFICATION])
 def test_a_text_record_that_names_the_pinned_digest_holds_the_ids_that_digest_is_made_of(make, ids):
@@ -251,8 +277,8 @@ def test_a_text_record_that_names_the_pinned_digest_holds_the_ids_that_digest_is
     assert record_problems({**forged, "tokenizer": "f" * 64}) == [], "another digest, another files: judged by format alone"
 
 
-@pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth, pretrain, language, text_classification],
-                         ids=[CLASSIFICATION, SEGMENTATION, FORECASTING, DEPTH, PRETRAIN, LANGUAGE, TEXT_CLASSIFICATION])
+@pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth, pretrain, language, text_classification, tokenizer],
+                         ids=[CLASSIFICATION, SEGMENTATION, FORECASTING, DEPTH, PRETRAIN, LANGUAGE, TEXT_CLASSIFICATION, BEIT_TOKENIZER])
 def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp_path):
     record = make()
     check_record(record, "<built>")
@@ -262,7 +288,7 @@ def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp
 
 
 def test_the_optional_key_rides_on_every_task():
-    for make in (classification, segmentation, forecasting, depth, pretrain, language, text_classification):
+    for make in (classification, segmentation, forecasting, depth, pretrain, language, text_classification, tokenizer):
         with_overrides = make(variant_overrides={"depth": 4})
         check_record(with_overrides, "<built>")
     assert "variant_overrides" not in segmentation()

@@ -43,6 +43,11 @@ Interface contract
     The epoch-0 check is the untrained model's reconstruction loss over the baseline's (``initial_loss_ratio``); no verdict on the
     initialization is given (``unjudged_note`` says why); a non-finite loss is refused.
 
+    The record (D-044). ``task_record`` writes a ``beit_tokenizer`` ``task.json`` before ``fit``: the trained side, channels and patch, the word,
+    mean and std the streams standardized with (``train.common.image_streams.stream_statistics``), the codebook size, and the variant keys
+    the run changed. A resume compares its ``DATA_KEYS`` (the geometry, the scaling and the patch) and leaves the file as it is.
+    ``predict`` and ``export`` of the run directory answer the int32 code grid (:mod:`train.api.tokenizer_predictor`).
+
     Reporting. ``evaluate_and_report`` follows the pretrain order: the best checkpoint reloaded and scored on the TEST split, the usage of
     the best weights, the data-free analysis (``run_analysis``: the weights and spectral analyses; the stock analysis reads class
     probabilities, which an image is not), the last epoch's weights scored, saved and reloaded. ``Evaluation.extras`` carries ``baseline``,
@@ -91,6 +96,7 @@ from ..config import (
     validate,
 )
 from ..data_args import DataFacts
+from ..predictor import build_tokenizer_record, overrides_of_variant
 from ..pretrain_args import PretrainTransformArgs
 from ..run_dir import CHECKPOINTS_DIR
 from ..tokenizer_args import (
@@ -256,6 +262,25 @@ class BeitTokenizerTrainer(TaskTrainer):
     def _model_kwargs(config: BeitTokenizerConfig, context: AutoContext) -> Dict[str, Any]:
         """Return the family adapter's keywords: the recipe's, then the caller's (the resolver refuses the rest)."""
         return registry.MODELS[context.family].load_resolver()(context, config.optim_args, config.model_args)
+
+    def task_record(self, config: BeitTokenizerConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
+        """Return the ``beit_tokenizer`` ``task.json`` record (schema in :mod:`train.api.predictor`).
+
+        The size and channels are ``data.input_shape`` (``build_model`` builds the model at it), the patch is the data's (the encoder's
+        total stride), the statistics are the ones the streams standardize with and the codebook is the resolved ``num_embeddings``. Nothing
+        of the model is needed, so a resume asks for it before ``build_model``.
+        """
+        from train.common.image_streams import stream_statistics
+
+        height, width, channels = data.input_shape
+        mean, std = stream_statistics(config.data.dataset)
+        kwargs = self._model_kwargs(config, context)
+        table = registry.MODELS[context.family].load_variants()
+        return build_tokenizer_record(
+            model=config.model, family=context.family, variant=context.variant, input_size=(height, width), channels=channels,
+            mean=mean, std=std, patch_size=config.data.patch_size, num_embeddings=kwargs["num_embeddings"],
+            variant_overrides=overrides_of_variant(table[context.variant], kwargs),
+        )
 
     def used_arguments(self, config: BeitTokenizerConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run was built with, for ``config.json``: the model keywords."""

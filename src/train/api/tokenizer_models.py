@@ -53,9 +53,14 @@ Interface contract
 ``recipe_notices_of(dataset)``
     :return: ``[(level, text)]``, the recipe's numbers no run of this task measured, which the task's ``recipe_notices`` hook prints.
 
+``observe_tokenizer(model)``
+    The row's ``ModelSpec.observe``. :return: the variant-table keys (:data:`TABLE_KEYS`) of the loaded ``model``'s own ``get_config()``
+        when it is a ``VQVAERotationTrick``, ``None`` for a model of any other class. ``train.api.predictor.check_model_against_record``
+        refuses ``None`` ("holds no layer of that family") and any key that differs from the record's variant and overrides.
+
 ``builtin_tokenizer_models()``
     :return: the one :class:`~train.api.registry.ModelSpec` row, freshly built, with its ``init`` transfer (size, patch and channels are
-        fixed, so a source of another geometry is refused before the claim).
+        fixed, so a source of another geometry is refused before the claim) and its ``observe``.
 
 Recipe
 ------
@@ -87,6 +92,9 @@ _MODEL = "dl_techniques.models.vision.vq_vae_rotation.model"
 #: The one named scale: the legacy trainer's widths (``TrainingConfig`` defaults), the gate's model. The keys are constructor arguments of
 #: the model, so a caller's ``model_args`` replaces them (``small`` is then a name, not a size).
 VARIANTS: Dict[str, Dict[str, int]] = {"small": {"hidden_channels": 128, "num_res_blocks": 2, "embedding_dim": 32}}
+
+#: The keys of a variant's table, which a loaded model's ``get_config()`` shows too: what :func:`observe_tokenizer` reads.
+TABLE_KEYS: Tuple[str, ...] = tuple(VARIANTS["small"])
 
 # ---------------------------------------------------------------------
 # What the family offers, refuses and is given
@@ -234,6 +242,22 @@ def create_vq_tokenizer(
     return model
 
 
+def observe_tokenizer(model: Any) -> Optional[Dict[str, Any]]:
+    """Return the variant-table keys of ``model``, a ``VQVAERotationTrick``, and ``None`` for a model of another class; see the contract."""
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-044
+    # The row HAS an `observe`: its variant table is module-level (no class carries it), so without one `load_model` checks neither the
+    # family nor the variant of a record against the file (the same defect the pretrain rows closed, plan 5c6cc105 D-042: a file of one size
+    # loaded under a record naming another variant, and `export` wrote that record beside it). The loaded model is the class itself, so its
+    # own `get_config()` carries the keys. Do NOT drop `observe` "because the model is a class": `check_model_against_record` takes the
+    # class path only for a table that lives on a class, and this one does not.
+    from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
+
+    if not isinstance(model, VQVAERotationTrick):
+        return None
+    config = model.get_config()
+    return {key: config[key] for key in TABLE_KEYS}
+
+
 # ---------------------------------------------------------------------
 # The resolver
 # ---------------------------------------------------------------------
@@ -330,6 +354,7 @@ def builtin_tokenizer_models() -> Tuple[ModelSpec, ...]:
             tasks=(TASK,),
             defaults=RECIPE,
             resolve_model_args=f"{_HERE}:resolve_tokenizer_args",
+            observe=f"{_HERE}:observe_tokenizer",
             transfer=TransferSpec(fixed=("channels", "input_size", "patch_size")),
         ),
     )

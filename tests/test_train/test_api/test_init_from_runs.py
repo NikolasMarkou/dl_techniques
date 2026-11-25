@@ -1606,7 +1606,7 @@ def test_record_a_fine_tuned_run_loads_predicts_and_exports_at_its_size_with_its
     np.testing.assert_allclose(again["scores"], answer["scores"], atol=1e-5)
 
 
-#: One record of each of the eight kinds, built by the predictor's own builders.
+#: One record of each of the nine kinds, built by the predictor's own builders.
 RECORD_KINDS = {
     "image_classification": classification_record,
     "image_segmentation": segmentation_record,
@@ -1617,6 +1617,9 @@ RECORD_KINDS = {
     "pretrain": pretrain_record,
     "language_model_pretraining": language_record,
     "text_classification": text_classification_record,
+    "beit_tokenizer": lambda: predictor.build_tokenizer_record(
+        model="vq_vae_rotation/small", family="vq_vae_rotation", variant="small", input_size=(32, 32), channels=3,
+        mean=[0.49, 0.48, 0.45], std=[0.25, 0.24, 0.26], patch_size=4, num_embeddings=512),
 }
 
 

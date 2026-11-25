@@ -999,7 +999,7 @@ def test_every_earlier_tasks_input_spec_sentence_is_the_one_it_always_was_and_th
     ranks = {task: len(rule.shape_of(SHAPE_RECORD)) for task, rule in predictor.EXPORT_RULES.items()}
     assert ranks == {
         "image_classification": 3, "image_segmentation": 3, "image_denoising": 3, "time_series_forecasting": 2,
-        "depth_estimation": 3, "pretrain": 3, "language_model_pretraining": 1, "text_classification": 1,
+        "depth_estimation": 3, "pretrain": 3, "language_model_pretraining": 1, "text_classification": 1, "beit_tokenizer": 3,
     }
     for task, rank in ranks.items():
         bad = (0,) * rank
