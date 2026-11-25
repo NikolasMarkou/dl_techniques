@@ -52,6 +52,15 @@ from .config import StrictConfig
 from .errors import ConfigError
 from .run_dir import BACKUP_DIR, TASK_FILE, check_model_file, load_resume_point
 
+#: The three phrases of the refusal of a resume over other data, for data made of FILES: why two schemes cannot be compared, what a
+#: different digest means, and what a resume would get wrong. A data object that carries ``fingerprint_words`` (the text tasks': their
+#: documents) says its own, and one that carries ``fingerprint_scheme`` names the rule its digest follows in the sidecar (D-084).
+FILE_WORDS = (
+    "the run recorded its files by a rule that could not tell a reordered CSV, so it cannot be shown that the split is the same",
+    "a file, its class, its size, the order of the files or, with data.fingerprint=content, its bytes is not the one the run started with",
+    "a resume would standardize, split and label differently; restore the data as it was",
+)
+
 
 def resume_point(run_dir: Path, resolved: StrictConfig, request: Any) -> Any:
     """Read where the killed run stopped, or refuse to resume it.
@@ -319,7 +328,8 @@ def check_data_unchanged(
     statistics pass by this point, so the check costs nothing more.
 
     :raises ConfigError: naming each difference as ``key: earlier -> now``, and that
-        the run cannot be continued on other data.
+        the run cannot be continued on other data; the three phrases are the data's ``fingerprint_words`` when it
+        carries them, else :data:`FILE_WORDS`.
     """
     from .predictor import read_record, record_differences
 
@@ -354,6 +364,11 @@ def check_data_unchanged(
     now_mode = now_fields.get("data_fingerprint_mode")
     earlier_scheme = resume.state.get("data_fingerprint_scheme")
     now_scheme = now_fields.get("data_fingerprint_scheme")
+    # DECISION plan-2026-11-24T092348-7806a290/D-084
+    # The phrases are the DATA's when it carries them (the text tasks': documents and a tokenizer, no file), else those of files. Do NOT
+    # put "CSV" or "standardize" in front of a text run, and do NOT tolerate a sidecar with no scheme (a run made before the corpus digest
+    # existed): it is refused, naming that fact. The scheme is the data's too (`data_fingerprint_field`).
+    scheme_words, print_words, closing = getattr(data, "fingerprint_words", FILE_WORDS)
     if earlier_scheme != now_scheme:
         # DECISION plan-2026-10-31T180033-2faf890a/D-025
         # A sidecar of another scheme is refused, and its digest is NOT compared: the
@@ -361,9 +376,7 @@ def check_data_unchanged(
         # a "fallback to the old comparison" would pass exactly the reordered CSV this
         # exists to refuse. No legacy path (user rule).
         lines.append(
-            f"data_fingerprint_scheme: {earlier_scheme or 'none'} -> {now_scheme or 'none'} "
-            "(the run recorded its files by a rule that could not tell a reordered CSV, so "
-            "it cannot be shown that the split is the same)")
+            f"data_fingerprint_scheme: {earlier_scheme or 'none'} -> {now_scheme or 'none'} ({scheme_words})")
     elif earlier_mode != now_mode:
         lines.append(
             f"data_fingerprint_mode: {earlier_mode or 'none'} -> {now_mode or 'none'} (the "
@@ -372,16 +385,12 @@ def check_data_unchanged(
         lines.append(
             "data_fingerprint: "
             f"{'none' if earlier_print is None else str(earlier_print)[:12]} -> "
-            f"{'none' if now_print is None else str(now_print)[:12]} (a file, its class, "
-            "its size, the order of the files or, with data.fingerprint=content, its bytes is "
-            "not the one the run started with)")
+            f"{'none' if now_print is None else str(now_print)[:12]} ({print_words})")
     if lines:
         raise ConfigError(
             f"Cannot resume {run_dir}: the data is not the data the run started with ("
             + "; ".join(lines)
-            + "). The earlier epochs trained on the earlier data, and a resume would "
-            "standardize, split and label differently; restore the data as it was, or "
-            "choose a new 'out'"
+            + f"). The earlier epochs trained on the earlier data, and {closing}, or choose a new 'out'"
         )
 
 
@@ -470,8 +479,8 @@ def data_fingerprint_field(config: Any, data: Any) -> Dict[str, str]:
     ``data_fingerprint`` is the digest and ``data_fingerprint_mode`` the ``data.fingerprint``
     value that made it (``listing`` or ``content``), so a resume can say which of the two
     changed. ``data_fingerprint_scheme`` is how the rows were ordered and hashed
-    (``classification_data.FINGERPRINT_SCHEME``): a sidecar without it, or with another one,
-    was written by a fingerprint that could not tell a reordered CSV, and is refused.
+    (``classification_data.FINGERPRINT_SCHEME``, or the data's own ``fingerprint_scheme``): a sidecar without it, or with another
+    one, was written by a fingerprint that could not tell a reordered CSV, and is refused.
     """
     fingerprint = getattr(data, "fingerprint", None)
     if fingerprint is None:
@@ -481,5 +490,5 @@ def data_fingerprint_field(config: Any, data: Any) -> Dict[str, str]:
     return {
         "data_fingerprint": fingerprint,
         "data_fingerprint_mode": getattr(config.data, "fingerprint", None),
-        "data_fingerprint_scheme": FINGERPRINT_SCHEME,
+        "data_fingerprint_scheme": getattr(data, "fingerprint_scheme", FINGERPRINT_SCHEME),
     }

@@ -6,12 +6,13 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 ## `python -m train` and `train.api`
 
-A key=value command line over strict configs. It has six tasks, `image_classification`
+A key=value command line over strict configs. It has eight tasks, `image_classification`
 (families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`, `beit`, `energy_transformer`),
 `image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), `image_denoising`
 (families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), `pretrain` (families `et_mim`, `beit_mim`),
 `time_series_forecasting` (families `nbeats`, `prism`, `tirex`, `xlstm`, `ets`, `timestral`, `mdn`) and
-`depth_estimation` (family `depth_anything`), and the same code is a Python function. Run it from the repo root with `.venv`, with
+`depth_estimation` (family `depth_anything`), `language_model_pretraining` (family `gpt2_lm`) and `text_classification`
+(families `bert`, `gpt2`), and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
 ```bash
@@ -306,7 +307,7 @@ denoised = load_model("<run>/final_model.keras").predict("noisy.png")["denoised"
 ```
 
 * **Families** (`train/api/denoising_models.py`; each trains this task only: `python -m train image_denoising model=vit/vit_pico` exits 2 naming
-  the families of this task, and the other five tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
+  the families of this task, and the other seven tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
   `"bias_free"`: no additive constant anywhere, so `f(a x) = a f(x)`; the three are checked, see Homogeneity below);
   `convunext_biased` (ConvUNext with `use_bias=true`, its own family because the segmentation family forces
   `output_channels` to the class count) and `scunet` carry constants and are never checked. `scunet` has no variants table in the
@@ -621,7 +622,7 @@ result = train_pretrain(out="auto", model="et_mim/et_tiny", data={"dataset": "ci
 
 * **Families** (`train/api/pretrain_models.py`; the variants are the keys of each model module's `MODEL_VARIANTS`, and
   `python -m train list_models task=pretrain` prints them). Each family trains this task only: a `vit/vit_pico` model given to `pretrain`
-  exits 2 naming the families of this task, and the other five tasks refuse these two the same way. The names before plan 5c6cc105,
+  exits 2 naming the families of this task, and the other seven tasks refuse these two the same way. The names before plan 5c6cc105,
   `energy_transformer` and `beit`, are the classifiers of `image_classification` now, with no alias (Limits).
 
 | Family | Method | Variants | Recipe (the legacy trainer's) |
@@ -859,11 +860,11 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   `init`, "Starting from an earlier run" below, with the gate under "Measured: the `init` gate"; design and decisions in
   `research/roadmap/20261117_train_api_init_from.md`). The pretrain record with `predict` and `export`, and the `beit` and
   `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code and their GPU gate has run (Phase 4h,
-  plan 5c6cc105, with the gate under "Measured: the Phase 4h gate" below). Named and not started: the language tasks (the
-  next user of `fit_kwargs` and `resume_stream`, after `time_series_forecasting` and `depth_estimation` below), DINO, the BEiT
-  tokenizer as a method of its own (`beit_tokenizer`). `load_model`, `export`, `list_models` and `list_tasks` were built in
-  the earlier phases and stay on `train.api` (since plan 98c9aac5 `list_tasks` and `list_models` register the built-in tasks
-  and families themselves, so they answer in a fresh process), and the repo map entry is `REPO_MAP.md`, section "Entry points".
+  plan 5c6cc105, with the gate under "Measured: the Phase 4h gate" below). `language_model_pretraining` and `text_classification`, the
+  two language tasks, are in the code and their GPU gate has run (Phase 4i, with the gate under "Measured: the language gate" below).
+  Named and not started: DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`). `load_model`, `export`, `list_models` and
+  `list_tasks` were built in the earlier phases and stay on `train.api` (since plan 98c9aac5 `list_tasks` and `list_models` register the
+  built-in tasks and families themselves, so they answer in a fresh process), and the repo map entry is `REPO_MAP.md`, section "Entry points".
 
 **`time_series_forecasting`** (plan 3a8319ef): trains a forecaster on windows of a series, either a synthetic bank of the library's
 generator patterns or one csv of your own. `out`, `model` and `data` are required (every key of `data` has a default, but the group `data` itself must be named: `data.format=builtin` is the synthetic bank); `data.lookback` and `data.horizon` come from the family's recipe. The family chooses the model. Every series is cut BY TIME into a training slice, a slice that selects the best epoch and a
@@ -886,7 +887,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 
 * **Families** (`train/api/forecast_models.py`; the variants are the keys of each family's variants table, `python -m train list_models
   task=time_series_forecasting` prints them). Each family trains this task only; `model=vit/vit_pico` exits 2 naming the families of
-  this task, and the other five tasks refuse these seven the same way. Every row is held to its library factory's signature by
+  this task, and the other seven tasks refuse these seven the same way. Every row is held to its library factory's signature by
   `signature_census`: a key the family offers is passed through (and may override a variant's value), a key it refuses or forces is
   named in the refusal, and a key the adapter takes from the data (`lookback`, `horizon`, the channels) is refused as `model_args`.
 
@@ -1160,7 +1161,7 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
 ```
 
 * **Family** (`train/api/depth_models.py`; `python -m train list_models task=depth_estimation` prints the variants). `depth_anything`
-  trains this task only: `model=vit/vit_pico` exits 2 naming it, and the other five tasks refuse it the same way. Its variants are
+  trains this task only: `model=vit/vit_pico` exits 2 naming it, and the other seven tasks refuse it the same way. Its variants are
   `vit_s`, `vit_b` and `vit_l` (DINOv2 small, base and large). The adapter is held to the factory's signature by `signature_census`:
   it offers one key, `model_args.pretrained`; it supplies `variant`, `encoder_type` and `image_shape` itself (the last from
   `transform_args.image_size`); it forces `encoder_kind` to `"real"`, `use_feature_alignment` to false, `include_top` to true and
@@ -1349,6 +1350,291 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
   with one seed (layout 1.0687 here); the crops differ, so the two are not a paired comparison and no parity is claimed.
 <!-- depth-gate:end -->
 
+**`language_model_pretraining`** (plan 7806a290, Phase 4i, first half): trains the library's GPT-2 as a causal language model on windows cut
+from tokenized documents. `out`, `model` and `data.dataset` are required. It is built and tested on a CPU, and **its GPU gate has run** (its numbers are in the
+one block for the phase's two tasks, after the `text_classification` section below).
+
+```bash
+python -m train list_models task=language_model_pretraining
+python -m train language_model_pretraining     # every key of the task, its type and default
+# offline and CPU-sized: the synthetic bank read as characters, a 64-wide model of 2 blocks
+python -m train language_model_pretraining out=results/lm_synthetic model=gpt2_lm/tiny data.dataset=synthetic data.tokenizer=ascii95 \
+    data.seq_len=32 data.max_samples=200 epochs=3 batch_size=16 optim_args.lr=3e-3 \
+    model_args.embed_dim=64 model_args.depth=2 model_args.num_heads=2
+# the local IMDB reviews with the GPT-2 BPE (needs the pinned tokenizer files and the TFDS reviews: "The tokenizer" below)
+python -m train language_model_pretraining out=auto model=gpt2_lm/tiny data.dataset=imdb_reviews data.tokenizer=gpt2 data.seq_len=256 epochs=12
+```
+
+```python
+from train.api import train_language_model_pretraining
+result = train_language_model_pretraining(out="auto", model="gpt2_lm/tiny", data={"dataset": "imdb_reviews"})
+```
+
+* **Family** (`train/api/text_models.py`). `gpt2_lm` trains this task only: a family of another task given here exits 2 naming the families of
+  this one, and the other seven tasks refuse `gpt2_lm` the same way. Its variants are the keys of the library's `GPT2.MODEL_VARIANTS`: `tiny`
+  (256 wide, 4 blocks, 4 heads, a position table of 512 rows), `small` (768, 12, 12), `medium` (1,024, 24, 16), `large` (1,280, 36, 20) and
+  `xl` (1,600, 48, 25), the last four with 1,024 rows. The model is a FUNCTIONAL `keras.Model`: float32 token ids in, a cast to int32 inside
+  the graph, the library GPT-2 (a layer named `gpt2_backbone`, the key `init` transfers by), logits `(seq_len, vocab_size)` out. `compile`
+  is the stock sparse categorical cross entropy from logits and `fit` the stock one: the library's `CausalLanguageModel` owns a custom
+  `train_step` and is not used, and `tests/test_train/test_api/test_language_model_pretraining_task.py` holds its loss equal to the compiled
+  one. `vocab_size` is the tokenizer's, never the library's default of 100,277, and `model_args` cannot set it.
+* **Recipe** (`LM_RECIPE`): AdamW at 3e-4, weight decay 0.01, 1 warmup epoch, cosine decay over the whole run, a global gradient clip of 1.0,
+  batch 16, 10 epochs, patience 5. No language-model run existed before this task, so none of it is measured: `run.log` carries a recipe
+  notice that says so, and the gate below reports what the numbers give, with no tuning.
+* **Keys of the task** (`python -m train language_model_pretraining` lists all, with their help; the shared groups and top-level keys mean
+  what they mean for the other tasks). `data.dataset` is required: `synthetic` (an offline bank of seeded documents) or `imdb_reviews` (the
+  local TFDS reviews, never downloaded). `transform_args` has no key (the token ids are the data) and there is no `loss_args` group.
+
+<!-- keys-of: language_model_pretraining -->
+| Key | Default | Read at |
+|---|---|---|
+| `data.format` | `"builtin"` | `TextData`; the only value |
+| `data.tokenizer` | `"gpt2"` | `tokenizer_spec`, `check_tokenizer_dir` (before the claim), `text_data.open_tokenizer`; `ascii95` or `gpt2` |
+| `data.tokenizer_dir` | `null` | `check_tokenizer_dir` (before the claim), `open_tokenizer`: where the two BPE files are, which `predict` reads there too (the record's `tokenizer_dir`, or the pinned copy when that directory is gone and the pinned files hash to the record's); null is the pinned copy; refused for `ascii95` |
+| `data.seq_len` | `256` | `LanguageModelPretrainingTrainer.check_model_args` (at most the variant's `max_seq_len`, before the claim), `build_data` (a window is `seq_len + 1` ids) |
+| `data.validation_split` | `0.1` | `text_data.lm_split`: the share of the train DOCUMENTS held out to select the best epoch |
+| `data.max_samples` | `null` | `text_data.corpus_documents`: the first N documents of each split in read order (synthetic: 600 train and 150 test when null, else N and max(1, N // 4)); `debug_args.smoke` sets 512 when null |
+| `metric_args.watch_metric` | `"auto"` | `LanguageMetricArgs.problems`, `fit_callbacks.build_callbacks`; auto is `val_loss`, the only value accepted |
+| `metric_args.watch_mode` | `"auto"` | the same path; auto is `min`, the only value accepted |
+
+  `debug_args.smoke` runs one epoch (with `data.max_samples` 512 when it is null) and applies no bar. `analysis_args.conformal_alpha` is
+  refused (a conformal set is a set of classes) and `precision` other than `float32` was not run for this task. `model_args` offers the
+  backbone's size and regularization keys (`ALLOWED`, held to the factory's signature by `signature_census`); `vocab_size`, `input_shape`,
+  `variant` and the library GPT-2's head keys (`include_top`, `task_config`, `pad_token_id`, `head_type`, `pretrained` and the rest of
+  `REFUSED`) are refused by name.
+* **The data and the stream.** The corpus is tokenized once into memory (IMDB: 25,000 train and 25,000 test reviews, 7,491,889 and 7,320,543
+  gpt2 ids). The train reviews are split by DOCUMENT: review `i` selects the best epoch when `sha256(f"{seed}:select:{i}")`, read as a unit
+  float, is below `data.validation_split`, so the split is a function of `(seed, i)` and never follows the stream; the corpus's own test
+  reviews are scored once, after `fit`. Epoch `e` orders the train documents by sha256 keys of `(seed, e, position)`, writes an end-of-text
+  id after each, cuts windows of `seq_len + 1` ids (inputs and targets shifted by one; the tail shorter than a window is dropped) and orders
+  the windows the same way (not numpy's generator, which no release promises to keep). An epoch is `n_windows // batch_size` steps, batch
+  `i` is a function of `(seed, i)` alone, and the selection and test windows are fixed, so `val_loss` is a function of the weights alone.
+  IMDB at the defaults (gpt2, `seq_len` 256, batch 16, seed 42): 22,502 train and 2,498 selection reviews, 26,328 train windows (1,645 steps
+  an epoch), 2,920 selection windows (183 batches), 28,581 test windows. A resume CONTINUES the stream at the settled step, also from a copy
+  taken inside an epoch: its first batch is the one the unkilled run reads there (a test kills a run twice and compares digests of the
+  batches `fit` reads), where the other stream tasks derive a new stream seed. So the four sentences about a resume from such a copy (the
+  help of `resume_interrupted` and of `checkpoint_args.backup_every_steps`, the `Resume:` log line, the summary note) say, for this task,
+  that the remaining batches come "from the stream at the step that backup holds (the batches the unkilled run reads next)", so no example
+  repeats and none is missed, and not, as for every other task, "from a fresh pass of the data" with examples repeated and missed: the
+  task sets `TaskTrainer.resume_stream_exact`, which the others leave `False`.
+* **The bar and its two baselines.** `success_value` is the lowest `val_loss` of the selection windows and `success_threshold` the smaller of
+  two numbers: the UNIGRAM, the entropy of the selection targets (what a model that ignores its context can do; counted from the token
+  counts and never evaluated, since a constant model over 50,261 ids is 0.4 GB of logits a forward; 7.1161 nats, perplexity 1,231.6, on the
+  IMDB windows above), and the untrained model's `val_loss` (epoch zero, read from the fit sidecar, so a resume judges the same number). The
+  bar is STRICTLY below, in float32, by more than the tie band of the repo's loss bar, `forecast_run.tie_band(n_batches)` (64 float32 steps
+  at those 183 batches, about 3e-5 nats): a model that merely equals the unigram misses it, and so does a compiled constant unigram model,
+  which Keras scores a few float32 steps either side of the analytic value. Met is exit 0, missed exit 1; `results_summary.json` holds
+  `baseline`, `epoch_zero` (and whether it `binds`), `documents`, `stream` and `perplexity` (the exponential of each loss).
+* **The tokenizer, and the pinned files.** `data.tokenizer` is `ascii95` (offline, a character tokenizer: 101 ids, no file) or
+  `gpt2` (tiktoken's BPE: 50,257 ids, the end-of-text id 50,256 among them, then `cls`, `sep`, `pad` and `mask` at 50,257 to 50,260, so
+  `vocab_size` is 50,261, the layout of the legacy GPT-2 trainers); `cl100k_base` is not offered (a 100,277-wide logits tensor). The record
+  holds the tokenizer's fields, its file hashes and one digest, which `init` and a resume compare. tiktoken keeps its BPE files in
+  `/tmp/data-gym-cache`, which a reboot can wipe, so real runs read a pinned copy, `/media/arxwn/data0_4tb/datasets/tiktoken_cache`
+  (`data.tokenizer_dir` names another): two read-only files named by the sha1 of their URL, `6c7ea1a7e38e3a7f062df639a5b80947f075ffe6`
+  (`encoder.json`, 1,042,301 bytes) and `6d1cbeee0f20b3d9449abfede4726ed8212e3aee` (`vocab.bpe`, 456,318 bytes), beside a `cl100k_base`
+  file the tasks do not use. Before the run directory is claimed their sha256 are checked against `GPT2_FILES` in
+  `train/api/text_tokenizer.py`: a missing or different file is refused by name with the pinned hash, with no fallback to `/tmp` or the
+  network, and before tiktoken's loader, which DELETES a cache file whose hash differs. To restore the pin, `cp -n` those two files from a kept
+  copy (`/tmp/data-gym-cache` while it exists, or a directory that a `get_encoding("gpt2")` call with a network filled) and check their sha256.
+  To give the legacy trainers tiktoken's own cache back after a reboot, copy the two files into `/tmp/data-gym-cache`. Do not point
+  `TIKTOKEN_CACHE_DIR` at the pinned directory: it is writable, so that loader could delete a file there; the tasks set it themselves, for one call.
+* **The record.** A run writes `task.json` (schema version 2, the seventh record kind) before its first epoch: `seq_len`, `encoding`,
+  `n_vocab`, `vocab_size`, `eot_id`, `pad_id`, `tokenizer` (the digest), `tokenizer_files`, `tokenizer_dir` (if set: `predict` reads the BPE files there, or from
+  the pinned copy when it is gone) and `output` (`next_token_logits`); a resume compares `seq_len`, `encoding`, `vocab_size` and `tokenizer`, and the corpus digest (`corpus_sha256`).
+* **`predict`**: `python -m train predict model=results/lm_synthetic data=documents.jsonl out=predictions.json` reads one `.txt` file (a
+  document per line) or one `.jsonl` file (a `{"text": ...}` object per line) and writes one JSON file, last, with per document `n_tokens`,
+  `mean_nll` (nats per predicted id), `perplexity` and `next_tokens` (the five most likely ids after the last, each with `token`, `text` and
+  `probability`). It scores by the training windows' rule: the ids and an end-of-text id are cut into consecutive windows of `seq_len + 1`,
+  the first id of a window is context only, a short last window is padded and scored on its real positions, so a document that is exactly
+  one window gets the `val_loss` Keras reports for it. It generates no text.
+* **`export`**: `python -m train export model=results/lm_synthetic out=lm.onnx format=onnx` writes `keras`, `saved_model`, `tflite` or
+  `onnx` at the trained `seq_len` only (another length, and a `vocab_size` of 2^24 or more, are refused by name before a file is written).
+  The file takes float32 token ids `(batch, seq_len)`, each a whole number written as a float (`3.0`, not `3`; the model casts in its graph,
+  exact below 2^24 = 16,777,216), right-padded with the pad id, and returns the raw logits `(batch, seq_len, vocab_size)`. Every cell
+  converts, and the tflite check feeds valid ids (a file wrong only above id 0 is refused). Measured on the CPU on the trained 64-wide run
+  above, each file is within 1.5e-6 of the largest logit (`keras` 0.0, `saved_model` 1.4e-6, `tflite` 1.5e-6, `onnx` 1.0e-6), where the
+  export check and its tests allow 1e-4.
+* **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed) unless said:
+
+| Case | Message |
+|---|---|
+| a family of another task | `Invalid value for 'model': the family 'vit' trains image_classification, not 'language_model_pretraining'; the families of 'language_model_pretraining' are gpt2_lm` |
+| `data.seq_len` above the position table | `Invalid value for 'data.seq_len': 1024 is above the 512 rows of the position table of gpt2_lm/tiny (max_seq_len), so the model cannot be built at it; lower data.seq_len, or raise model_args.max_seq_len` |
+| a tokenizer directory that is missing, or holds a file of another hash | `Invalid value for 'data.tokenizer_dir': '<dir>' is not a directory; the tokenizer reads its BPE files from it (the pinned copy is /media/arxwn/data0_4tb/datasets/tiktoken_cache)`; `... '<dir>/6c7ea1a7e38e3a7f062df639a5b80947f075ffe6' has sha256 <found>, not the pinned 196139668be63f3b5d6574427317ae82f612a97c5d1cdaf36ed2256dbf636783: it is not the file this tokenizer was built from ...` |
+| `imdb_reviews` with no TFDS records | `Invalid value for 'data.dataset': imdb_reviews reads the TFDS records under '<dir>/imdb_reviews/plain_text', and none are there (TFDS directory '<dir>' from $TFDS_DATA_DIR); nothing is downloaded. Set TFDS_DATA_DIR to the directory that holds imdb_reviews/` |
+| `init` from another tokenizer or vocabulary | `Invalid value for 'init': gpt2_lm sizes its weights by the model's vocabulary size and the tokenizer (data.tokenizer, as its digest); the source trained at 101 and <digest>, this run asks for 50261 and <digest>` |
+| `init` from another family or task | `Invalid value for 'init': tirex (time_series_forecasting) cannot seed gpt2_lm (language_model_pretraining); gpt2_lm takes weights from gpt2_lm (language_model_pretraining)` |
+| after the claim: fewer train windows than a batch | `Invalid argument for the data loader: the train stream holds 8 rows per epoch, fewer than one batch of 16: lower the batch size, raise data.max_samples, or lower the validation share. The run directory <out> was claimed before this failed, ...` (a selection or test part with no window is refused at the same point) |
+
+* **Limits.** The corpus lives in memory, so there is no Wikipedia-scale run through this command (`train.gpt2.pretrain` stays for that), and
+  `data.max_samples` caps the test split too, so a capped run's test score is on fewer documents. Only the built-in corpora and the two
+  tokenizers are offered. The recipe is unmeasured. The equalities claimed here (the same `val_loss` across passes, epochs and a resume; the
+  batches of a resume) were measured on the CPU only.
+
+**`text_classification`** (plan 7806a290, Phase 4i, second half): trains a BERT or a GPT-2 as a classifier of labelled texts. `out`, `model` and
+`data.dataset` are required. It is built and tested on a CPU, and **its GPU gate has run** (its numbers are in the block that ends this section).
+
+```bash
+python -m train list_models task=text_classification
+python -m train text_classification     # every key of the task, its type and default
+# offline and CPU-sized: the synthetic labelled bank read as characters, a 64-wide model of 2 blocks
+python -m train text_classification out=results/cls_synthetic model=gpt2/tiny data.dataset=synthetic data.tokenizer=ascii95 \
+    data.seq_len=32 data.max_samples=200 epochs=3 batch_size=16 optim_args.lr=3e-3 \
+    model_args.embed_dim=64 model_args.depth=2 model_args.num_heads=2
+python -m train text_classification out=results/bert_synthetic model=bert/tiny data.dataset=synthetic data.tokenizer=ascii95 \
+    data.seq_len=32 data.max_samples=200 epochs=3 batch_size=16 optim_args.lr=3e-3 \
+    model_args.hidden_size=64 model_args.num_layers=2 model_args.num_heads=2 model_args.intermediate_size=128
+# the local IMDB reviews with the GPT-2 BPE (needs the pinned tokenizer files and the TFDS reviews: "The tokenizer" of the language section)
+python -m train text_classification out=auto model=gpt2/tiny data.dataset=imdb_reviews data.tokenizer=gpt2 data.seq_len=256 epochs=8
+```
+
+```python
+from train.api import train_text_classification
+result = train_text_classification(out="auto", model="gpt2/tiny", data={"dataset": "imdb_reviews"})
+```
+
+* **Families** (`train/api/text_models.py`). `bert` and `gpt2` train this task only: a family of another task given here, `gpt2_lm` included, exits
+  2 naming these two, and the other seven tasks refuse `bert` and `gpt2` the same way. `model` has no default: `bert` is the library's encoder
+  classifier the phase assumed, and `gpt2` the only one a language-model run can seed (`init`, below). Both are FUNCTIONAL `keras.Model`s: float32
+  token ids in, a cast to int32 inside the graph, the library backbone (a layer named `bert_backbone` or `gpt2_backbone`, the key `init` transfers
+  by) and the library's sentiment head (`task_head`), the logits of the classes out; `compile` and `fit` are the stock ones. `bert` is read at the
+  `[CLS]` position, its attention mask derived inside the graph from the pad id; `gpt2` at the last position the pad id leaves, so a right-padded
+  row answers as its text does (a test pads one text to two lengths and holds the logits equal). The variants of `bert` are the keys of
+  `BERT.MODEL_VARIANTS`: `tiny` (256 wide, 4 blocks, 4 heads), `small` (512, 6, 8), `base` (768, 12, 12) and `large` (1,024, 24, 16), each with a
+  position table of 512 rows; those of `gpt2` are the language section's. The vocabulary, the pad id and the `[CLS]` id are the tokenizer's, so
+  `model_args` cannot set them, nor the head and its pooling (`include_top`, `task_config`, `head_config_overrides`), nor, for `gpt2`, the keys of a
+  language-model head (`tie_word_embeddings`, `head_type`, ...): each is refused by name.
+* **Recipe** (`CLASSIFIER_RECIPE`, both families): AdamW at 3e-4, weight decay 0.01, 1 warmup epoch, cosine decay over the whole run, a global
+  gradient clip of 1.0, batch 32, 8 epochs, patience 4. No text-classification run existed before this task, so none of it is measured: `run.log`
+  carries a recipe notice that says so and what the bar is (the majority-class share of the selection split plus three binomial standard errors of it), and the gate below reports what the numbers give, with no tuning.
+* **Keys of the task** (`python -m train text_classification` lists all, with their help; the shared groups and top-level keys mean what they mean
+  for the other tasks, and `data` is the language task's `TextData`). `data.dataset` is required: `synthetic` (an offline labelled bank: 60 percent
+  class `neg`, each text with cue words of its class) or `imdb_reviews` (the local TFDS reviews, `neg` 0 and `pos` 1, never downloaded).
+  `transform_args` has no key (the token ids are the data) and there is no `loss_args` group.
+
+<!-- keys-of: text_classification -->
+| Key | Default | Read at |
+|---|---|---|
+| `data.format` | `"builtin"` | `TextData`; the only value |
+| `data.tokenizer` | `"gpt2"` | `tokenizer_spec`, `check_tokenizer_dir` (before the claim), `text_data.open_tokenizer`; `ascii95` or `gpt2`; the pinned BPE files and their restore are the language section's, and the record holds the digest that `init` and a resume compare |
+| `data.tokenizer_dir` | `null` | `check_tokenizer_dir` (before the claim), `open_tokenizer`: where the two BPE files are, which `predict` reads there too (the record's `tokenizer_dir`, or the pinned copy when that directory is gone and the pinned files hash to the record's); null is the pinned copy; refused for `ascii95` |
+| `data.seq_len` | `256` | `check_text_window` (at most the position table, before the claim), `text_data.encode_rows` (a row is `seq_len` ids) |
+| `data.validation_split` | `0.1` | `text_data.class_split`: the share of the train DOCUMENTS held out to select the best epoch |
+| `data.max_samples` | `null` | `text_data.corpus_documents` (the language row's rule); `debug_args.smoke` sets 512 when null |
+| `metric_args.watch_metric` | `"auto"` | `ClassifierMetricArgs.problems`, `fit_callbacks.build_callbacks`; auto is `val_accuracy`, the only value accepted |
+| `metric_args.watch_mode` | `"auto"` | the same path; auto is `max`, the only value accepted |
+
+  `debug_args.smoke` runs one epoch and applies no bar. `analysis_args.conformal_alpha` is refused and `precision` other than `float32` was not run.
+* **The data and the rows.** The corpus is tokenized once into memory (IMDB: 25,000 train and 25,000 test reviews, 12,500 of each class in each,
+  20,589 of the 50,000 longer than the 255 ids a row keeps at 256; at the defaults, gpt2 with batch 32 and seed 42: 22,502 train rows, 703 steps an
+  epoch, 2,498 selection rows, 79 batches, and 25,000 test rows). The train reviews are split by DOCUMENT with the language task's rule, so for one
+  seed and one `data.validation_split` the two tasks select the same documents (a test holds it); the corpus's own test reviews are scored once,
+  after `fit`. A row is `[CLS]`, the first `seq_len - 1` ids of the review and the pad id up to `seq_len`: a longer review loses its tail. Epoch `e`
+  puts the train rows, each with its label, in an order keyed on sha256 of `(seed, e, row)` by ONE index array, so a row never trains under another
+  review's label (a test follows a labelled row through every epoch); batch `i` is a function of `(seed, i)` and the selection and test rows are
+  fixed, so `val_accuracy` is a function of the weights alone. A resume continues the stream at the settled step, as the language task's does (the
+  task sets `resume_stream_exact`, so the four sentences about a resume from a copy taken inside an epoch say so for it too).
+* **The bar is the share plus a margin.** `success_value` is the highest `val_accuracy` of the selection rows and `success_threshold` the share of their
+  majority class, counted from their labels, plus three binomial standard errors of that share on those rows, `3 * sqrt(share * (1 - share) / rows)`, at
+  most half the way to 1.0 (so the bar is attainable). IMDB: `pos` is 1,256 of the 2,498 selection rows above, so 0.5028 + 0.0300 = 0.5328, which a model
+  that guesses clears in 0.44 percent of 8-epoch runs (the bare share let 97.9 percent through); the 19 selection rows of the first command above hold 12
+  `neg` and 7 `pos`: 0.6316, a margin capped at 0.1842, a bar of 0.8158. The bar is STRICTLY above it, in float32 and with no band: a model that answers one
+  class to every row scores the share to the last bit and misses it, and under `init` the best value must also beat the loaded weights' epoch-zero accuracy.
+  Met is exit 0, missed exit 1. It says the model learned something, not how much: the gate below reports each arm's best `val_accuracy`, the accuracy of
+  its best checkpoint on the test reviews (`test_metrics_best`), the share and the margin. `results_summary.json` holds `baseline` (the class, its share,
+  `margin`, `standard_errors`, `rows`), `class_counts` and `documents` by part, `corpus_sha256`, `truncated_documents` and `stream`.
+* **The record.** A run writes `task.json` (schema version 2, the eighth record kind) before its first epoch: the language record's `seq_len`,
+  `encoding`, `n_vocab`, `vocab_size`, `eot_id`, `pad_id`, `tokenizer`, `tokenizer_files` and `tokenizer_dir`, then `cls_id`, `class_names`, `layout`
+  (`cls_head_pad`: a row is `[CLS]`, the head of the text, pad) and `output` (`logits`); a resume compares `seq_len`, `encoding`, `vocab_size`,
+  `tokenizer` and `class_names`, and the corpus digest. The `init` block rides in it, so a resume reports it without opening the source.
+* **`predict`**: `python -m train predict model=results/cls_synthetic data=reviews.jsonl out=predictions.json` reads one `.txt` file (a document per
+  line) or one `.jsonl` file (a `{"text": ...}` object per line), as the language task does, and writes one JSON list, last, of `{"index", "labels",
+  "scores"}` per document: the class names best first and their softmax probabilities (the image classifier's shape). A text becomes a row by the
+  function that made the training rows, so a text longer than `seq_len - 1` ids loses its tail, with no word in the file; an empty line is refused
+  by its number.
+* **`export`**: `python -m train export model=results/cls_synthetic out=cls.onnx format=onnx` writes `keras`, `saved_model`, `tflite` or `onnx` at
+  the trained `seq_len` only (another length, through the Python function's `input_shape`, and a `vocab_size` of 2^24 or more, are refused by name
+  before a file is written). The file takes float32 token ids `(batch, seq_len)`, each a whole number written as a float, in the row layout above,
+  and returns the raw logits `(batch, classes)` in the order of `class_names` in `<out>.task.json`, with no softmax. No cell is refused: a test
+  converts each of the 16 (both families, a tiny build and a build at the 50,261-id vocabulary, four formats) and holds the file within the export
+  check's tolerance of the model on valid rows. Measured on the CPU on the trained 64-wide run above, each file is within 3.4e-7 of the model's
+  largest logit, 1.15 (`keras` 0.0, `saved_model` 2.6e-7, `tflite` 3.4e-7, `onnx` 1.0e-7), where the check allows 1e-4.
+* **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed) unless said; a tokenizer directory that is
+  missing or holds a file of another hash, and `imdb_reviews` without TFDS records, are refused as in the language section:
+
+| Case | Message |
+|---|---|
+| a family of another task, `gpt2_lm` included | `Invalid value for 'model': the family 'vit' trains image_classification, not 'text_classification'; the families of 'text_classification' are bert, gpt2`; and `gpt2` under the language task: `... 'model': the family 'gpt2' trains text_classification, not 'language_model_pretraining'; the families of 'language_model_pretraining' are gpt2_lm` |
+| `data.seq_len` above the position table, or below 2 | `Invalid value for 'data.seq_len': 1024 is above the 512 rows of the position table of bert/tiny (max_position_embeddings), so the model cannot be built at it; lower data.seq_len, or raise model_args.max_position_embeddings`; `Invalid value for 'data.seq_len': a row is [CLS] and at least one token, expected an int of at least 2, got 1` |
+| `init` from a language-model run into `bert` | `Invalid value for 'init': gpt2_lm (language_model_pretraining) cannot seed bert (text_classification); bert takes weights from bert (text_classification)` |
+| `init` from another tokenizer or vocabulary | `Invalid value for 'init': gpt2 sizes its weights by the model's vocabulary size and the tokenizer (data.tokenizer, as its digest); the source trained at 101 and <digest>, this run asks for 50261 and <digest>` |
+| `init` from a classifier run into the language task, or from `bert` into `gpt2` | `Invalid value for 'init': gpt2 (text_classification) cannot seed gpt2_lm (language_model_pretraining); gpt2_lm takes weights from gpt2_lm (language_model_pretraining)`; `... 'init': bert (text_classification) cannot seed gpt2 (text_classification); gpt2 takes weights from gpt2 (text_classification) or gpt2_lm (language_model_pretraining)` |
+| a key of `gpt2`'s language-model head | `Invalid value for 'model_args.tie_word_embeddings': tie_word_embeddings is not offered by 'gpt2' (it ties the language-model head to the embeddings, and a classifier has no language-model head), got False` |
+| `metric_args.watch_metric` other than `val_accuracy`, `analysis_args.conformal_alpha` | `Invalid value for 'metric_args.watch_metric': expected auto or 'val_accuracy', got 'val_loss'; ...`; `Invalid value for 'analysis_args.conformal_alpha': a conformal prediction set is the image classifier's calibrated set, which a text_classification run does not produce; ...` |
+| after the claim: a part with no document of a class, or fewer train rows than a batch | `Invalid argument for the data loader: the selection documents (1 of them) hold no document of class 0: the majority share and the accuracy would be about fewer classes than the model has; raise data.max_samples or change data.validation_split. The run directory <out> was claimed before this failed, ...`; `Invalid argument for the data loader: the train stream holds 72 rows per epoch, fewer than one batch of 128: ...` |
+
+* **Limits.** As the language task's (the corpus lives in memory, `data.max_samples` caps the test split too, only the built-in corpora and the two
+  tokenizers are offered, the equalities were measured on the CPU only), and: two classes, `neg` and `pos`; `predict` has no `top_k` or `threshold`
+  (a Python caller slices the lists); the analysis is data-free, with no calibration, conformal or information-flow report; the recipe is
+  unmeasured.
+
+<!-- language-gate:begin -->
+**Measured: the language gate** (plan 7806a290: `language_model_pretraining` on the IMDB reviews, then `text_classification`
+from that run and from scratch, and `predict` and `export` of both). Run on the code HEAD
+`93512320402070ab62a0c262f32517b2f976f202` of the branch `train-api/phase-4i` (the commits after it change under `src/` only
+this README and 0 files under `tests/`), one job at a time, at the recipes' rates and seed 42: no optimizer key and no batch key
+is on any command line, so the batch is 16 for the language model and 32 for the classifiers. The four training runs ran on an
+NVIDIA GeForce RTX 4090 (`CUDA_VISIBLE_DEVICES=0`, no `--gpu`), `predict` and `export` on the CPU. Each log names the HEAD and
+the worktree `src` as the origin of `dl_techniques` and `train`; the three pinned tokenizer files and the language run's
+`best_model.keras` kept their sha256 through every job. With none of the new rows used nothing changed: three CPU reference runs
+(API classification, the legacy convnext trainer, API segmentation) reproduce the runs recorded before Phase 4g exactly
+(`GOLDEN: EXACT for api, convnext, seg`), the `checkpoint` key that Phase 4g renamed `init` aside. Before those, the same night
+ran this work's targeted tests on the CPU at that HEAD: 109 pytest commands, which overlap (a file run whole and again by
+selector, or named by more than one command), so 5,577 test executions (5,573 passed, 4 skipped, none failed) of 5,320 distinct
+tests, of which 5,316 passed and 4 were skipped, and 108 of 108 planted mutants made their tests fail (0 survived, 0 specs
+stale, not run), so the Phase A verdict was PASS. Every one of the gate's 70 claims holds (9 further checks, marked extra in
+`plans/plan-*-7806a290/scratch_gate/gate_numbers.md`, hold too). A first night (`p4i_gate_<arm>_37e2697b`) found 2 holes in
+tests (planted faults that no test caught) and a wrongly defined claim (it read the typed `optim_args` from `config.json`, which
+holds the resolved ones, where the request as typed is `config_requested.json`, so 4 runs counted as misses): both were fixed,
+and the 4 run directories of that night remain in `results/`. The predictions below are reported apart. Every number is read by
+script from the runs' own files and the night's logs. Step is the median epoch after the first over its steps, peak memory
+TensorFlow's GPU allocator peak. The bar of a classifier is the majority-class share of its selection split (0.5028) plus its
+margin (0.0300), three binomial standard errors of the share capped at half the way to a perfect score, so the table reports
+each arm's best `val_accuracy` and the accuracy of its best checkpoint on the test reviews beside it.
+
+| Arm | Run | Init | Bar | Loaded weights at epoch zero | Best (epoch of) | Test (best checkpoint) | Verdict | Step | Peak memory | Wall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `lm_imdb` | `gpt2_lm/tiny`, imdb_reviews, the `gpt2` tokenizer (50,261 ids), windows of 256, 12 epochs | - | `val_loss` below min(unigram 7.1161, untrained 10.8626) | - | 4.4454 (9 of 12) | 4.5678 (loss) | met, exit 0 | 27.3 ms | 2,575.6 MiB | 722 s |
+| `cls_gpt2_init` | `gpt2/tiny`, imdb_reviews, 8 epochs, from `lm_imdb` | `cross_task`, `same_split`: copied 54, reset 8, dropped 0 | `val_accuracy` above 0.5328 and above the loaded weights | 0.5380 | 0.8719 (1 of 5) | 0.8526 | met, exit 0 | 19.5 ms | 1,040.6 MiB | 198 s |
+| `cls_gpt2_scratch` | `gpt2/tiny`, imdb_reviews, 8 epochs | - | `val_accuracy` above 0.5328 | - | 0.8603 (2 of 6) | 0.8291 | met, exit 0 | 18.1 ms | 1,038.1 MiB | 209 s |
+| `cls_bert_scratch` | `bert/tiny`, imdb_reviews, 8 epochs | - | `val_accuracy` above 0.5328 | - | 0.8655 (2 of 6) | 0.8219 | met, exit 0 | 20.4 ms | 1,307.2 MiB | 223 s |
+
+**The language model.** `lm_imdb` trained 12 epochs of windows of 256 ids over the 22,502 train documents that the split left it
+(26,328 windows; 2,498 documents and 2,920 windows select the best epoch, 28,581 windows score the test reviews). Its best
+`val_loss` 4.4454 at epoch 9 is below the unigram's 7.1161 and the untrained 10.8626: a perplexity of 85.24 on the selection
+windows against the unigram's 1,231.60 (0.069 of it) and 96.34 on the test windows. The prediction written before the run, at
+least 30 percent below the unigram's perplexity (a ratio of at most 0.7), held.
+
+**The classifiers.** `cls_gpt2_init` started from `lm_imdb`: copied 54 weights path for path, reset the 8 of its head and
+dropped 0, the counts of the production-order census at the gate's geometry (54 weights in the source, 62 in the target),
+relation `cross_task`, split `same_split`. Its loaded weights scored 0.5380 at epoch zero, its best `val_accuracy` was 0.8719
+and its test accuracy 0.8526. `cls_gpt2_scratch` reached 0.8603 (test 0.8291) and `cls_bert_scratch` 0.8655 (test 0.8219).
+**Predictions** (written before the runs; reported, not counted among the claims): the init arm's best `val_accuracy` on the
+selection split was above the scratch arm's and its test accuracy above the scratch arm's, so the prediction that it would be
+above held; nothing was tuned or run again. The BERT arm had no prediction: it is reported next to the two `gpt2` arms (the plan
+flagged the assumption that a BERT classifier is the family wanted).
+
+**`predict` and `export`** of both runs, on the CPU: 22 checks, all holding. `predict` on the first 8 IMDB test reviews (2,211
+tokens in all) gave the language model's `mean_nll` of every review within 1e-4 of an independent float64 computation from the
+run's best model on the same windows (largest gap 0.0) and of the loss the run compiled with (largest gap 5.4e-7); `export`
+wrote 8 files, the four formats of each run, each answered the same reviews within the check's bound, 1e-4 times the largest
+absolute value (25.26 for the language model, 2.109 for the classifier). The largest absolute difference from the model's own
+output, in the order `keras`, `saved_model`, `tflite`, `onnx`: 0.0, 3.5e-5, 5.7e-5, 1.0e-4 for `lm_imdb` and 2.4e-7, 5.7e-7,
+9.5e-7, 1.3e-6 for `cls_gpt2_init`. The first night added only `p4i_gate_<arm>_37e2697b` and this one only
+`p4i_gate_<arm>_93512320` run directories to `results/`, and nothing was removed: it held 21 entries before the first night, 25
+before this one and 29 after it.
+<!-- language-gate:end -->
+
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
 the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). A list is JSON with every text
@@ -1359,7 +1645,7 @@ problems and a "did you mean". `auto` asks for the family's recipe default.
 images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns `path` and `label`).
 **A data file and dotted keys are two layers of one group** (plan 98b866fb 7.1, D-021): `data=<file>` is the path of a YAML
 file holding the group, and `data.<key>=` tokens put over it, key by key, so a capped or tweaked run needs no copy of the file.
-The same rule holds for all six tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
+The same rule holds for all eight tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
 the group's file, then the dotted keys, and the file's `format` reads dotted keys that state none (`data.path_column=` after a
 csv file); a `data.format=` that differs from the file's is refused naming both formats (give a file of that format, or every key on the command line with no file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
 refused as a repeated key. `config.json` records the resolved values, as for every key, and not which layer a value came from.
@@ -1371,7 +1657,7 @@ python -m train image_segmentation out=auto model=convunext/tiny data=<out>/data
 **The run directory**: `out=auto` makes `results/<timestamp>...`; an existing `out` is refused,
 nothing is overwritten or deleted. A run writes `config_requested.json` (what was asked),
 `config.json` (resolved), `run.log`, `training_log.csv`, `results_summary.json`, `task.json`
-(class names, input shape, mean and std: what a model needs to be used without its config; a segmentation, denoising, forecasting, depth or `pretrain` run writes the keys of its own record),
+(class names, input shape, mean and std: what a model needs to be used without its config; a segmentation, denoising, forecasting, depth, `pretrain`, language-model or text-classification run writes the keys of its own record),
 `best_model.keras`, `final_model.keras`, the figures and analysis, and `checkpoints/`
 (`backup/`, `fit_state.json`) and `run.lock` for resume. `run.lock` is a kernel `flock` held for the
 life of the run and released when the process ends, a SIGKILL included, so two resumes cannot both run
@@ -1380,7 +1666,7 @@ and a reused pid blocks nobody; the pid in the file is a label for the refusal m
 **Resume**: `resume_interrupted=true` with the same `out` and the same request continues a killed
 run. It is refused for a finished run (one with a `results_summary.json`), another request, other data, a live
 process holding the run, or a torn backup; `devices` and `analysis_args.eval_batch_size` may differ. The training data
-order replays epoch 0's, except for `pretrain`, `time_series_forecasting` and `depth_estimation`, which train a resumed run on a fresh stream (their sections above), and a half-done epoch is trained again (the key's help lists the rest).
+order replays epoch 0's, except for `pretrain`, `time_series_forecasting` and `depth_estimation`, which train a resumed run on a fresh stream, and `language_model_pretraining` and `text_classification`, which continue the stream where the killed run stopped (their sections above), and a half-done epoch is trained again (the key's help lists the rest).
 A run killed **before** a code change that alters training (step 10b of plan 98b866fb: the ConvNeXt V1 layer scale starts at 1e-6 and is
 no longer clamped or decayed; step 10c: ConvNeXt V2 blocks have no layer scale by default and a zero GRN gamma; step 10d: the CIFAR-10
 AutoAugment policy; step 10e: the ResNet decay and clip) and resumed **after** it continues under the new rules: its early epochs trained
@@ -1414,8 +1700,8 @@ spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or 
 
 **Starting from an earlier run: `init`** (plan 0fd54b91, `train/api/init_from.py`; the design and its decisions are in
 `research/roadmap/20261117_train_api_init_from.md`; pretrain and its two classifiers are plan 5c6cc105, below). `init=<run directory>`
-names an earlier `python -m train` run whose weights start this one, for every task (`pretrain` from a run of the same family
-only). A relative path starts at the repo root, as `out` does, and `train_<task>(init=...)`
+names an earlier `python -m train` run whose weights start this one, for every task (`pretrain` and `language_model_pretraining` from a run of the same family
+only, `text_classification` from a run of the same family or, for `gpt2`, of `gpt2_lm`). A relative path starts at the repo root, as `out` does, and `train_<task>(init=...)`
 takes a str or a `Path`. It replaced `checkpoint`, which is gone with no alias: `checkpoint=` on the command line, in a
 `config=` file or in a YAML mapping is refused by name, and a Python call with `checkpoint=` is a `TypeError`. The run builds its
 own model from its own config, then, before `compile`, copies the source's `best_model.keras` into it one weight at a time,
@@ -1449,6 +1735,14 @@ python -m train time_series_forecasting out=results/tirex_336 model=tirex/tiny d
 python -m train depth_estimation out=results/depth_252 model=depth_anything/vit_s data.format=builtin
 python -m train depth_estimation out=results/depth_364 model=depth_anything/vit_s data.format=builtin \
     transform_args.image_size=364 init=results/depth_252
+# a language model into another run of the same family: the window may change, the vocabulary and the tokenizer may not
+python -m train language_model_pretraining out=results/lm_synthetic_64 model=gpt2_lm/tiny data.dataset=synthetic data.tokenizer=ascii95 \
+    data.seq_len=64 data.max_samples=200 epochs=3 batch_size=16 optim_args.lr=3e-3 \
+    model_args.embed_dim=64 model_args.depth=2 model_args.num_heads=2 init=results/lm_synthetic
+# a language model into a classifier of the same decoder: the trunk copied path for path, the head fresh (the model sizes must agree)
+python -m train text_classification out=results/cls_gpt2_from_lm model=gpt2/tiny data.dataset=synthetic data.tokenizer=ascii95 \
+    data.seq_len=32 data.max_samples=200 epochs=3 batch_size=16 optim_args.lr=3e-3 \
+    model_args.embed_dim=64 model_args.depth=2 model_args.num_heads=2 init=results/lm_synthetic
 ```
 
 What each kind moves, derived on the smallest variants by the engine on the real models: `vit_pico` from 32 px and 10 classes
@@ -1462,9 +1756,12 @@ refuses it); `convnext_v1` into `convnext_seg` likewise needs equal `strides`: t
 two is refused after the claim unless the segmenter is given `model_args.strides=4`; `convunext/tiny` (segmentation) into
 `convunext_biased/tiny` (denoising) and back copies 156 and resets
 `final_output`; `tirex/tiny` from lookback 168 to 336 copies 47 of 47; `depth_anything/vit_s` at another size copies 235 of 235
-(the DINOv2 table is resampled inside the model at call time). Those four and the two pretrain pairs below are the six declared
-cross-task pairs (the ConvUNext pair counts once each way); any other pair, and a width change (`convnext_v2` atto to femto: 139
-of 140 weights differ), are refused.
+(the DINOv2 table is resampled inside the model at call time); `gpt2_lm/tiny` (64 wide, 2 blocks) from windows of 32 tokens to 64 copies
+30 of 30 and resets none (no weight depends on the window), and into `gpt2/tiny` of the same sizes, a classifier, copies the same 30 and resets
+the 8 weights of `task_head`, dropping none (an `lm_head` an untied source holds is dropped, not refused). Those four, the two pretrain pairs
+below and that language-model pair are the seven declared cross-task pairs (the ConvUNext pair counts once each way); any other pair, and a
+width change (`convnext_v2` atto to femto: 139 of 140 weights differ), are refused, `bert` has no cross-task source (an encoder cannot start
+from a causal decoder), and a language-model run into it is refused by the declared-sources sentence (the table of the `text_classification` section).
 
 **Pretrain and its two classifiers** (plan 5c6cc105). `beit_mim` (pretrain) seeds `beit` and `et_mim` seeds `energy_transformer`
 (image_classification): the trunk (`beit_backbone`, `et_backbone`) is copied, the decoder is dropped (`decoder_norm` and
@@ -1526,9 +1823,9 @@ resample a grid of 4x4 patches to 8x8; ...`), which a run meets before the claim
 caller). The archive is hashed before the claim and again after the copy, and a run whose `best_model.keras` changed in between
 stops before it trains, naming both sha256.
 
-**The head** is copied only when the two `task.json` records say it means the same thing: classification and segmentation
-`class_names` equal as ordered lists (the same names in another order reset it), denoising `channels`, forecasting `horizon`,
-`head`, `quantile_levels` and `channels`, pretrain `tokenizer`, `mean` and `std`; depth always copies (one output). Otherwise the family's declared head is fresh and
+**The head** is copied only when the two `task.json` records say it means the same thing: classification, text classification and
+segmentation `class_names` equal as ordered lists (the same names in another order reset it), denoising `channels`, forecasting `horizon`,
+`head`, `quantile_levels` and `channels`, pretrain `tokenizer`, `mean` and `std`; depth always copies (one output), and a language model has no head to reset (its fixed tokenizer makes every source's embedding mean the same ids). Otherwise the family's declared head is fresh and
 the source's is dropped; across tasks the head is always fresh. A channel change of the input is a stem change and refused,
 except for `timestral`, whose weights do not depend on it.
 
@@ -1552,7 +1849,10 @@ files for denoising (every file of the source's `data.train_dirs` among this run
 forecasting (another `seed`, `data.series_length`, `data.patterns` or `data.realizations`, or another csv file, is `unknown`: the
 deterministic patterns barely move with the seed and a shorter series is the start of a longer one; other fractions count the
 windows that start inside the source's train segment)
-and scenes for depth (the source's train scenes among this run's selection and test scenes). A CIFAR-10 source trained at
+scenes for depth (the source's train scenes among this run's selection and test scenes) and documents for the two text tasks (the source's
+train documents among this run's selection documents, rebuilt from the source's seed, split and cap; `unknown` when this run's own `data.max_samples` hides
+how many a capped source read, or, under equal keys, when the source's `data_fingerprint` is none or another corpus's (a classifier compares a language run's by its documents alone); a classifier seeded from a language run on the
+synthetic bank is `different_data` (other texts, same numbers), and on `imdb_reviews` equal keys over one corpus are `same_split` and other keys are counted exactly). A CIFAR-10 source trained at
 seed 42 seeds a run at seed 43: 4,531 of its 5,000 selection rows were trained on. `results_summary.json` then sets
 `selection_biased`, `test_biased` (a count above 0) and `overlap_unknown`, the log line `init split: <relation>: <reason>` is a
 warning, and the success line ends in `(selection-biased)`, `(selection-biased, test-biased)` or `(split overlap unknown)`. No
@@ -1560,18 +1860,19 @@ exit code changes.
 
 **The bar under `init`.** The epoch-zero evaluation is of the loaded weights (`Evaluate of the loaded weights before fit: val
 <metric> <value>, ...`), so `initial_loss_ratio` and `init_scale_warning` are null and the summary's notes say why.
-Classification, segmentation and denoising, whose bars a good source meets at epoch 0, also need the best success value
+Classification, text classification, segmentation and denoising, whose bars a good source meets at epoch 0, also need the best success value (the best of all the epochs, so the band below is a rounding band and not a noise margin)
 strictly above the loaded weights' epoch-zero value (read from the fit sidecar, so a resume judges the same number), by more
 than 16 float32 steps (`forecast_run.tie_band(1)`); a fine-tune that only holds its source's score is a miss, exit 1.
-Forecasting, depth and pretrain keep `min(..., epoch zero)`, whose epoch-zero term is now the loaded weights (pretrain's bar stays
-strictly below in float32, with no tie band).
+Forecasting, depth, pretrain and language models keep `min(..., epoch zero)`, whose epoch-zero term is now the loaded weights (pretrain's
+bar stays strictly below in float32, with no tie band; the language bar is strictly below beyond the loss tie band, and a fine-tune that
+moves no weight scores the loaded value and misses).
 
 **What the run records.** `task.json` and `results_summary.json` carry the `init` block: `source` (absolute), `file`,
-`sha256`, `task`, `family`, `variant`, `geometry` (with `patch_size` from a pretrain source), `relation` (`same_task` or `cross_task`), `pinned`, `transfer` (`copied`, a
+`sha256`, `task`, `family`, `variant`, `geometry` (with `patch_size` from a pretrain source, `seq_len` and `vocab_size` from a text source), `relation` (`same_task` or `cross_task`), `pinned`, `transfer` (`copied`, a
 count; `resampled`, with path, rule and both shapes; `reset`, `grown`, `dropped`, path lists) and `split`. The summary adds
-`epoch_zero_of: "init"`, the three flags and, for classification, segmentation and denoising, `loaded_success_value` (the
-loaded weights' epoch-zero `accuracy`, `miou` or PSNR gain, the value the bar had to beat; forecasting and depth hold it in
-their `epoch_zero` block). `predict` and `export` of a fine-tuned run are those of any run of its task at its own trained
+`epoch_zero_of: "init"`, the three flags and, for classification, text classification, segmentation and denoising, `loaded_success_value` (the
+loaded weights' epoch-zero `accuracy`, `miou` or PSNR gain, the value the bar had to beat; forecasting, depth, pretrain and the
+language task hold it in their `epoch_zero` block). `predict` and `export` of a fine-tuned run are those of any run of its task at its own trained
 size; they read only the run's own files, and `export` carries the block into `<out>.task.json`.
 
 <!-- init-gate:begin -->
@@ -1704,7 +2005,7 @@ docstring lists what is unchecked.
 | `analysis_args.epoch_analysis_every` | `0` | `N > 0` runs the data-free epoch analyzer (weights and spectral only) before training into `epoch_analysis/epoch_000/` (the untrained model), after epoch 1 into `epoch_001/`, then at epochs N, 2N, ... into `epoch_NNN/`. `0` is off. A failure on a built model stops the fit, so no snapshot is silently missing. A resumed run does not redo `epoch_000` and `epoch_001` |
 | `analysis_args.conformal_alpha` | `null` | A level strictly between 0 and 1 (0.1 aims at 90% coverage) writes `conformal.json` and `conformal_model.keras` (outputs logits, probabilities and set membership), calibrated on the test split. `null` skips it and the summary's `conformal` is null. A level with no test split is skipped with a note |
 | `analysis_args.eval_batch_size` | `"auto"` | Images per pass of the predictions made after training: the figures' predictions (every dataset, folder and csv included), the model analyzer's predictions (it caps its own 32 at this value when this is lower; its information-flow pass sizes its own batch from the analyzer's memory budget and does not read it) and the final-model load check (the same cap), and the validation and test splits of the in-memory datasets (CIFAR, MNIST). The validation and test splits of ImageNet, Imagenette, folder and csv data are batched at `batch_size` and ignore it. `auto` is the recipe's value, and 256 where the recipe says nothing, so a default run evaluates exactly as before. The cliffordnet recipes on ImageNet and Imagenette set the batch they train at (8 for `cliffordnet`, 16 for `cliffordnet_hier`), because 256 images of 224 px ask 18 GB. Those recipe values are keyed to the dataset: folder and csv data take 256 whatever the family or the image size (a run on files of 224 px or more with a family whose ImageNet recipe sets a batch logs a warning naming `batch_size` and this key). It changes no weight, and it may differ when a run is resumed |
-| `checkpoint_args.backup_every_steps` | `null` | `N >= 2` (and below the steps of an epoch) also writes the resume backup after every N-th batch inside an epoch, so a kill loses at most N batches of training; `null` backs up at each epoch end only. A resume continues the killed epoch on the weights of the last copy and runs only the batches that copy had not taken, from a fresh pass of the data (some examples of that epoch repeat and some are missed); the optimizer's step count and the learning rate of every step are the unkilled run's, and that epoch's row holds the train metrics of its remaining batches only. Each copy writes the weights and optimizer state twice (the previous copy is kept); the cost per save is in the backup table of the ImageNet section. Refused for `depth_estimation` (its section says why) |
+| `checkpoint_args.backup_every_steps` | `null` | `N >= 2` (and below the steps of an epoch) also writes the resume backup after every N-th batch inside an epoch, so a kill loses at most N batches of training; `null` backs up at each epoch end only. A resume continues the killed epoch on the weights of the last copy and runs only the batches that copy had not taken, from a fresh pass of the data (some examples of that epoch repeat and some are missed; `language_model_pretraining` and `text_classification` continue their stream instead, so none repeats and none is missed); the optimizer's step count and the learning rate of every step are the unkilled run's, and that epoch's row holds the train metrics of its remaining batches only. Each copy writes the weights and optimizer state twice (the previous copy is kept); the cost per save is in the backup table of the ImageNet section. Refused for `depth_estimation` (its section says why) |
 | `logger_args.tensorboard` | `{}` | `{}` writes TensorBoard event files into `tensorboard/` (`train/` and `validation/`); `null` turns them off; a dict with keys is refused, because no TensorBoard option is wired |
 
 Measured cost, one run each, so a difference of a few seconds is inside the noise. Setup: `vit/vit_pico` on 240 fake

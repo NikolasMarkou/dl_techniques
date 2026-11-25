@@ -38,6 +38,12 @@ and a pin that moves the patch off the recipe's is a notice in run.log (D-053); 
 is refused on resume by name (D-052); the decoder is reset when the tokenizer or the input statistics
 differ (D-048); the pretrain bar under ``init`` stays strictly below the loaded weights' ``val_loss`` and the
 higher-is-better rule never judges it.
+
+The ``language`` tests (plan-2026-11-24T092348-7806a290 Step 6, D-005, D-040, D-041): a ``gpt2_lm`` run seeds a ``gpt2_lm`` run of
+its own tokenizer (the vocabulary and the tokenizer's digest are ``fixed``: another one is refused before the claim, naming both
+values; the sequence length is not, no weight depends on it) and nothing else; its split counts DOCUMENTS against an oracle
+written here; its bar under ``init`` is strictly below ``min(unigram, loaded val_loss)``, missed by a fine-tune that moves no
+weight and met by one that learns.
 """
 
 import builtins
@@ -78,15 +84,22 @@ from train.api.tasks.image_classification import (
 )
 from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoisingTrainer, train_image_denoising
 from train.api.tasks.image_segmentation import ImageSegmentationTrainer, train_image_segmentation
+from train.api.tasks.language_model_pretraining import (
+    LanguageModelPretrainingConfig,
+    LanguageModelPretrainingTrainer,
+    train_language_model_pretraining,
+)
 from train.api.tasks.pretrain import TOKENIZER_KEY, PretrainConfig, PretrainTrainer, train_pretrain
 from train.api.tasks.time_series_forecasting import (
     TimeSeriesForecastingConfig,
     TimeSeriesForecastingTrainer,
     train_time_series_forecasting,
 )
+from train.api.text_tokenizer import tokenizer_spec
 from train.api.trainer import TaskTrainer
 
 from ._forecast_fixtures import world  # noqa: F401  (a module-scope fixture: the one registry world)
+from ._text_world import request as language_request
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WEIGHTS_ENV = "DL_TECHNIQUES_DINOV2_WEIGHTS_DIR"
@@ -136,6 +149,20 @@ def pretrain_record(model: str = "et_mim/et_tiny", side: int = 32, patch: int = 
     return predictor.build_pretrain_record(
         model=model, family=family, variant=variant, input_size=[side, side], channels=3, mean=[0.5] * 3,
         std=[0.25] * 3, patch_size=patch, tokenizer=None if family == "et_mim" else "a" * 64)
+
+
+def language_record(tokenizer: str = "ascii95", seq_len: int = 32) -> Dict[str, Any]:
+    """A language-model record of the named tokenizer (a ``gpt2`` one holds its BPE file hashes)."""
+    return predictor.build_language_model_record(
+        model="gpt2_lm/tiny", family="gpt2_lm", variant="tiny", seq_len=seq_len,
+        tokenizer=tokenizer_spec(tokenizer).record())
+
+
+def text_classification_record(tokenizer: str = "ascii95", seq_len: int = 32) -> Dict[str, Any]:
+    """A text-classification record of the named tokenizer."""
+    return predictor.build_text_classification_record(
+        model="gpt2/tiny", family="gpt2", variant="tiny", seq_len=seq_len, tokenizer=tokenizer_spec(tokenizer).record(),
+        class_names=["neg", "pos"])
 
 
 def write_source(root: Path, record: Optional[Dict[str, Any]], used: Optional[Dict[str, Any]] = None, *,
@@ -1579,7 +1606,7 @@ def test_record_a_fine_tuned_run_loads_predicts_and_exports_at_its_size_with_its
     np.testing.assert_allclose(again["scores"], answer["scores"], atol=1e-5)
 
 
-#: One record of each of the six kinds, built by the predictor's own builders.
+#: One record of each of the eight kinds, built by the predictor's own builders.
 RECORD_KINDS = {
     "image_classification": classification_record,
     "image_segmentation": segmentation_record,
@@ -1588,6 +1615,8 @@ RECORD_KINDS = {
     "time_series_forecasting": forecast_record,
     "depth_estimation": depth_record,
     "pretrain": pretrain_record,
+    "language_model_pretraining": language_record,
+    "text_classification": text_classification_record,
 }
 
 
@@ -1839,3 +1868,306 @@ def test_pretrain_beit_mim_on_another_tokenizer_resets_its_decoder_and_copies_th
     assert decoder and sorted(block["transfer"]["reset"]) == sorted(block["transfer"]["dropped"]) == decoder
     assert block["relation"] == "same_task" and block["transfer"]["copied"] == len(start) - len(decoder)
     check_copied(block, start, source)
+
+
+# ---------------------------------------------------------------------
+# language: a gpt2_lm run as a source and as a target (plan-2026-11-24T092348-7806a290 Step 6, D-005, D-040, D-041)
+# ---------------------------------------------------------------------
+
+ASCII, GPT2_TOKENIZER = tokenizer_spec("ascii95"), tokenizer_spec("gpt2")
+#: The ``data`` of a tiny language run (``_text_world.request``): what a source's ``config.json`` holds under ``data``.
+LANGUAGE_DATA = {"dataset": "synthetic", "validation_split": 0.1, "max_samples": 200}
+LANGUAGE_TARGET = {key: value for key, value in language_request("unused").items() if key != "out"}
+#: ``name: (the source record, the task function, the request, the message pattern)``: sources the language row cannot take.
+LANGUAGE_REFUSALS = {
+    "another_tokenizer": (
+        lambda: {**language_record(), "tokenizer": "f" * 64}, train_language_model_pretraining, LANGUAGE_TARGET,
+        rf"gpt2_lm sizes its weights by the tokenizer \(data\.tokenizer, as its digest\); the source trained at {'f' * 64}, "
+        rf"this run asks for {ASCII.digest}$"),
+    "another_vocabulary": (
+        lambda: {**language_record(), "vocab_size": 120}, train_language_model_pretraining, LANGUAGE_TARGET,
+        r"gpt2_lm sizes its weights by the model's vocabulary size; the source trained at 120, this run asks for 101$"),
+    "another_encoding": (
+        lambda: language_record("gpt2"), train_language_model_pretraining, LANGUAGE_TARGET,
+        rf"gpt2_lm sizes its weights by the model's vocabulary size and the tokenizer \(data\.tokenizer, as its digest\); the "
+        rf"source trained at {GPT2_TOKENIZER.vocab_size} and {GPT2_TOKENIZER.digest}, this run asks for 101 and {ASCII.digest}$"),
+    "classifier_into_language": (
+        classification_record, train_language_model_pretraining, LANGUAGE_TARGET,
+        r"vit \(image_classification\) cannot seed gpt2_lm \(language_model_pretraining\); gpt2_lm takes weights from gpt2_lm "
+        r"\(language_model_pretraining\)$"),
+    "language_into_classifier": (
+        language_record, train_image_classification, CLASSIFIER,
+        r"gpt2_lm \(language_model_pretraining\) cannot seed vit \(image_classification\); vit takes weights from vit "
+        r"\(image_classification\)$"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(LANGUAGE_REFUSALS))
+def test_language_preclaim_a_source_the_row_cannot_take_is_refused_naming_both_sides_and_nothing_is_claimed(
+        world, tmp_path, case):
+    make, function, request, pattern = LANGUAGE_REFUSALS[case]
+    source = write_source(tmp_path / "source", make(), {})
+    out = tmp_path / "run"
+    with pytest.raises(ConfigError, match="Invalid value for 'init': " + pattern):
+        function(out=out, init=source, **request)
+    assert not out.exists(), "a pre-claim refusal claimed the run directory"
+
+
+def test_language_preclaim_the_command_line_exits_2_claims_nothing_and_makes_no_device(tmp_path):
+    source = write_source(tmp_path / "source", {**language_record(), "tokenizer": "f" * 64}, {})
+    out = tmp_path / "run"
+    argv = ["language_model_pretraining", f"out={out}", "model=gpt2_lm/tiny", "data.dataset=synthetic",
+            "data.tokenizer=ascii95", f"init={source}"]
+    done = subprocess.run([sys.executable, "-c", DRIVER, *argv], capture_output=True, text=True, timeout=300)
+    seen = json.loads(done.stdout.strip().splitlines()[-1])
+    assert seen == {"code": 2, "setup_gpu_reached": False, "devices_created": False}, done.stderr[-2000:]
+    assert "gpt2_lm sizes its weights by the tokenizer (data.tokenizer, as its digest)" in done.stderr and not out.exists()
+
+
+def test_language_preclaim_a_source_of_the_same_family_and_tokenizer_is_taken_whatever_its_length(world, tmp_path):
+    source = write_source(tmp_path / "source", language_record(seq_len=64), {})  # this run's window is 32
+    config = validate(LanguageModelPretrainingConfig, language_request(tmp_path / "run", init=str(source)))
+    trainer, _, context = prepared(config, LanguageModelPretrainingTrainer)
+    taken = trainer._init_source
+    assert (taken.path, taken.relation, dict(taken.pins), context.pinned) == (source, None, {}, {})
+    assert taken.sha256 == hashlib.sha256(PLACEHOLDER).hexdigest() and taken.record == language_record(seq_len=64)
+    assert not (tmp_path / "run").exists()
+
+
+def test_language_the_identity_is_the_vocabulary_and_the_tokenizers_digest_and_every_fixed_key_is_compared(world, tmp_path):
+    fixed = registry.MODELS["gpt2_lm"].transfer.fixed
+    for name in ("ascii95", "gpt2"):  # no file is read and no tensor made: the identity is the tokenizer record's
+        spec = tokenizer_spec(name)
+        config = validate(LanguageModelPretrainingConfig, language_request(tmp_path / "run", **{"data.tokenizer": name}))
+        identity = LanguageModelPretrainingTrainer(config).init_identity(config, None)
+        assert identity == {"vocab_size": spec.vocab_size, "tokenizer": spec.digest}
+        # a fixed key that the record or the identity lacks is skipped by the comparison without a word
+        assert fixed == ("vocab_size", "tokenizer") and set(fixed) <= set(identity) and set(fixed) <= set(language_record(name))
+    assert set(fixed) <= set(init_from.GEOMETRY_NAMES)
+
+
+def test_language_the_head_key_is_the_tokenizer_and_the_block_keeps_the_sources_length_and_vocabulary_only():
+    record = language_record()
+    assert init_from.HEAD_KEYS["language_model_pretraining"] == ("tokenizer",)
+    assert init_from.head_differs("language_model_pretraining", record, dict(record)) is False
+    assert init_from.head_differs("language_model_pretraining", record, {**record, "tokenizer": "b" * 64}) is True
+    # The block copies the record's length and vocabulary. `tokenizer` is not one of its keys: the pretrain record has a key of
+    # that name too (a file's sha256) and its block must not change (D-041).
+    assert {"seq_len", "vocab_size"} <= set(init_from.GEOMETRY_KEYS) and "tokenizer" not in init_from.GEOMETRY_KEYS
+
+
+def held_out(n: int, seed: int, fraction: float) -> set:
+    """The ORACLE's split, written here from the rule of D-003: document ``i`` is held out when the first 8 bytes of
+    ``sha256(f"{seed}:select:{i}")``, read as a unit float, are below ``fraction``."""
+    return {i for i in range(n)
+            if int.from_bytes(hashlib.sha256(f"{seed}:select:{i}".encode()).digest()[:8], "big") / 2 ** 64 < fraction}
+
+
+def fake_documents(n: int, seed: int, fraction: float) -> SimpleNamespace:
+    """The ``data`` of a run that read ``n`` documents: the indices of its train and selection documents (the oracle's)."""
+    selected = held_out(n, seed, fraction)
+    return SimpleNamespace(split=SimpleNamespace(
+        train_index=np.array(sorted(set(range(n)) - selected)), select_index=np.array(sorted(selected)), n_test_docs=n // 4))
+
+
+#: ``name: (the source's seed, its data keys that differ, this run's seed, its data keys that differ)`` on the synthetic bank
+#: (200 documents; a null cap is the bank's 600).
+LANGUAGE_SPLITS = {
+    "same_keys": (42, {}, 42, {}),
+    "other_seed": (42, {}, 43, {}),
+    "capped_source": (42, {"max_samples": 100}, 43, {}),
+    "uncapped_source": (42, {"max_samples": None}, 43, {}),
+    "narrower_source_selection": (42, {"validation_split": 0.05}, 42, {}),
+    "wider_source_selection": (42, {"validation_split": 0.3}, 42, {}),
+    "other_dataset": (42, {"dataset": "imdb_reviews"}, 42, {}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(LANGUAGE_SPLITS))
+def test_language_split_counts_the_sources_train_documents_among_the_selection_documents_as_the_oracle(world, tmp_path, case):
+    seed, theirs, target_seed, ours = LANGUAGE_SPLITS[case]
+    source_data, target_data = {**LANGUAGE_DATA, **theirs}, {**LANGUAGE_DATA, **ours}
+    n = target_data["max_samples"] or 600
+    fake = fake_documents(n, target_seed, target_data["validation_split"])
+    trainer = LanguageModelPretrainingTrainer(validate(LanguageModelPretrainingConfig, language_request(
+        tmp_path / "run", seed=target_seed, **{f"data.{key}": value for key, value in ours.items()})))
+    split = trainer.init_overlap(a_source({"seed": seed, "data": source_data}, language_record()), trainer.config, fake)
+    assert predictor._split_problems(split) == []
+    flags = init_from.bias_of({"split": split})
+    if case == "other_dataset":
+        assert (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == ("different_data", 0, 0)
+        assert not any(flags.values())
+        return
+    read = source_data["max_samples"] or 600
+    expected = len((set(range(read)) - held_out(read, seed, source_data["validation_split"])) & set(fake.split.select_index.tolist()))
+    assert (split["n_select_overlap"], split["n_test_overlap"], split["unit"]) == (expected, 0, "documents")
+    assert (expected > 0) == (case not in ("same_keys", "wider_source_selection")), "the control: the oracle counts what it should"
+    assert (split["relation"] == "same_split") == (case == "same_keys")
+    assert flags == {"selection_biased": expected > 0, "test_biased": False, "overlap_unknown": False}
+    if expected:
+        assert f"of this run's {len(fake.split.select_index)} selection documents" in split["reason"] and "seed=42" in split["reason"]
+
+
+#: ``name: (the source's cap, this run's cap, the documents this run read, the documents the source read or None)`` on
+#: ``imdb_reviews``: the hook does not look the corpus up, it derives what the source read from the two caps and from what this run read.
+IMDB_CAPS = {
+    "source_cap_below_ours": (60, 100, 100, 60),
+    "source_cap_on_a_whole_corpus": (5000, None, 25000, 5000),
+    "both_read_everything": (None, None, 25000, 25000),
+    "a_cap_above_the_corpus": (None, 30000, 25000, 25000),
+    "the_source_may_have_read_more": (None, 100, 100, None),
+    "source_cap_above_ours": (500, 100, 100, None),
+}
+
+
+@pytest.mark.parametrize("case", sorted(IMDB_CAPS))
+def test_language_split_on_imdb_derives_how_many_documents_the_source_read_or_says_it_is_unknown(world, tmp_path, case):
+    cap, ours, read, n_source = IMDB_CAPS[case]
+    fake = fake_documents(read, 43, 0.1)
+    trainer = LanguageModelPretrainingTrainer(validate(LanguageModelPretrainingConfig, language_request(
+        tmp_path / "run", seed=43, **{"data.dataset": "imdb_reviews", "data.max_samples": ours})))
+    source = a_source({"seed": 42, "data": {**LANGUAGE_DATA, "dataset": "imdb_reviews", "max_samples": cap}}, language_record())
+    split = trainer.init_overlap(source, trainer.config, fake)
+    assert predictor._split_problems(split) == []
+    if n_source is None:
+        assert (split["relation"], split["n_select_overlap"]) == ("unknown", None) and "data.max_samples" in split["reason"]
+        assert init_from.bias_of({"split": split})["overlap_unknown"] is True
+        return
+    expected = len((set(range(n_source)) - held_out(n_source, 42, 0.1)) & set(fake.split.select_index.tolist()))
+    assert expected > 0 and (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == ("overlap", expected, 0)
+
+
+def test_a_capped_labelled_source_overlaps_this_run_by_the_documents_it_really_shares():
+    # review pass 1, W1: the count is by document index, so document i has to be the same text and label at every cap (it was not:
+    # a source capped at 200 and a run capped at 300 on seed 7 counted 24 of 39 selection documents, 15 of them really shared)
+    from train.api.text_args import documents_overlap
+    from train.common import text_data
+
+    source, target = (text_data.synthetic_documents(text_data.BANK_SEED, n, text_data.CLASSIFICATION) for n in (200, 300))
+    fake = fake_documents(300, 7, 0.1)
+    ours = SimpleNamespace(seed=7, data=SimpleNamespace(dataset="synthetic", validation_split=0.1, max_samples=300))
+    theirs = a_source({"seed": 42, "data": {**LANGUAGE_DATA, "max_samples": 200}}, text_classification_record())
+    split = documents_overlap(theirs, ours, fake, "text_classification")
+    trained = set(range(200)) - held_out(200, 42, 0.1)
+    shared = [i for i in fake.split.select_index.tolist() if i in trained and source[0][i] == target[0][i] and source[1][i] == target[1][i]]
+    assert split["relation"] == "overlap" and split["n_select_overlap"] == len(shared) > 0, (split["n_select_overlap"], len(shared))
+
+
+def test_a_source_that_read_other_documents_under_the_same_keys_is_unknown_and_not_counted(tmp_path):
+    # review pass 1, N6: the count is by document index, and the same keys over another corpus are other documents
+    from train.api.text_args import documents_overlap
+
+    (tmp_path / "checkpoints").mkdir()
+    fake = fake_documents(200, 42, 0.1)
+    fake.fingerprint = "b" * 64
+    ours = SimpleNamespace(seed=42, data=SimpleNamespace(dataset="synthetic", validation_split=0.1, max_samples=200))
+    for earlier, relation in (("a" * 64, "unknown"), ("b" * 64, "same_split")):
+        (tmp_path / "checkpoints" / "fit_state.json").write_text(json.dumps({"data_fingerprint": earlier}))
+        theirs = a_source({"seed": 42, "data": LANGUAGE_DATA}, text_classification_record(), tmp_path)
+        split = documents_overlap(theirs, ours, fake, "text_classification")
+        assert split["relation"] == relation and ("data_fingerprint" in split["reason"]) == (relation == "unknown"), split
+
+
+def language_run(out: Path, **changes: Any) -> Dict[str, np.ndarray]:
+    """A tiny ``gpt2_lm`` run in a fresh Keras session; return the weights its ``fit`` started from."""
+    return started(LanguageModelPretrainingTrainer, train_language_model_pretraining, **language_request(out, **changes))
+
+
+@pytest.fixture(scope="module")
+def language_source(world, tmp_path_factory):
+    """gpt2_lm on the synthetic bank (64 wide, 2 blocks, windows of 32, seed 42), 3 epochs."""
+    out = tmp_path_factory.mktemp("language_source") / "run"
+    language_run(out)
+    return out
+
+
+@pytest.fixture(scope="module")
+def language_pair(world, language_source, tmp_path_factory):
+    """gpt2_lm from a copy of ``language_source`` (the resume test renames the copy away) at a rate that moves no float32
+    weight (``STILL``): the fine-tune scores what the loaded weights scored at epoch zero."""
+    root = tmp_path_factory.mktemp("language_pair")
+    source = root / "source"
+    shutil.copytree(language_source, source)
+    request = language_request(root / "run", init=str(source), optim_args=STILL, epochs=1)
+    return SimpleNamespace(source=source, out=root / "run", request=request, start=started(
+        LanguageModelPretrainingTrainer, train_language_model_pretraining, **request))
+
+
+@pytest.fixture(scope="module")
+def language_finetune(world, language_source, tmp_path_factory):
+    """gpt2_lm from ``language_source`` at the tiny recipe's rate and ANOTHER seed: a split of other documents."""
+    out = tmp_path_factory.mktemp("language_finetune") / "run"
+    return SimpleNamespace(out=out, start=language_run(out, init=str(language_source), seed=43))
+
+
+def test_language_wire_a_gpt2_lm_run_seeds_a_gpt2_lm_run_with_every_weight_and_its_bar_is_strictly_below_the_loaded_val_loss(
+        language_pair):
+    out, source = language_pair.out, archive_weights(language_pair.source)
+    record, summary = record_of(out), summary_of(out)
+    block, theirs = record["init"], record_of(language_pair.source)
+    assert (block["task"], block["family"], block["relation"], block["pinned"]) == (
+        "language_model_pretraining", "gpt2_lm", "same_task", {})
+    assert block["geometry"] == {key: theirs[key] for key in ("seq_len", "vocab_size")}
+    # The same tokenizer on both sides, so every weight means the same: the family has no head to reset.
+    assert block["transfer"]["copied"] == len(source) == len(language_pair.start) > 0
+    assert all(not block["transfer"][key] for key in ("reset", "grown", "dropped", "resampled"))
+    check_copied(block, language_pair.start, source)
+    assert (block["split"]["relation"], block["split"]["unit"]) == ("same_split", "documents")
+    assert predictor.record_problems(record) == []
+    assert (summary["init"], summary["epoch_zero_of"]) == (block, "init") and not any(init_from.bias_of(block).values())
+    # Epoch zero is the loaded weights' val_loss on the same fixed selection windows: the source's best (D-012 of plan 5c6cc105).
+    loaded = json.loads((out / "checkpoints" / "fit_state.json").read_text())["initial"]["metrics"]["loss"]
+    assert loaded == pytest.approx(summary_of(language_pair.source)["success_value"], rel=1e-5)
+    assert summary["epoch_zero"] == {"val_loss": loaded, "binds": True}  # the loaded weights beat the unigram: they set the bar
+    assert summary["initial_loss_sanity_eval"]["loss"] == loaded and summary["success_threshold"] == loaded
+    assert loaded < summary["baseline"]["val_loss"]
+    logger.info(f"LM-INIT-STILL copied {block['transfer']['copied']} of {len(language_pair.start)} weights; epoch zero (the loaded "
+                f"weights) {loaded:.9f}, unigram {summary['baseline']['val_loss']:.9f}, bar {summary['success_threshold']:.9f}, "
+                f"best of the fine-tune {summary['success_value']:.9f}, success {summary['success']}")
+    # Strictly below, in float32: a fine-tune that only holds its loaded weights misses. `Evaluation.loaded` stays None, so the
+    # higher-is-better rule of the other tasks never judges this loss and the summary has no loaded_success_value.
+    assert summary["success_value"] == pytest.approx(loaded, rel=1e-6) and summary["success"] is False
+    assert "loaded_success_value" not in summary
+    assert (summary["initial_loss_ratio"], summary["init_scale_warning"]) == (None, None)
+    assert init_from.NOT_JUDGED_UNDER_INIT in summary["notes"]
+    assert not any(note.startswith("initial loss") for note in summary["notes"])
+    assert any("the loaded weights' (under `init`)" in note for note in summary["notes"])
+    log = (out / "run.log").read_text()
+    assert "Evaluate of the loaded weights before fit: " in log and "Untrained evaluate BEFORE fit" not in log
+
+
+def test_language_a_fine_tune_that_learns_meets_the_bar_and_the_split_of_other_documents_is_counted_as_the_oracle(
+        language_finetune):
+    out = language_finetune.out
+    record, summary = record_of(out), summary_of(out)
+    loaded = summary["epoch_zero"]["val_loss"]
+    assert summary["success_threshold"] == min(summary["baseline"]["val_loss"], loaded)
+    # Met, though the higher-is-better rule would have judged a LOWER loss a miss: the bar is strictly below, beyond the tie band.
+    assert summary["success"] is True and np.float32(summary["success_value"]) < np.float32(loaded)
+    logger.info(f"LM-INIT-LEARNS epoch zero (the loaded weights) {loaded:.6f}, unigram {summary['baseline']['val_loss']:.6f}, bar "
+                f"{summary['success_threshold']:.6f}, best of the fine-tune {summary['success_value']:.6f}")
+    n = LANGUAGE_DATA["max_samples"]
+    expected = len((set(range(n)) - held_out(n, 42, 0.1)) & held_out(n, 43, 0.1))  # the source trained at seed 42, this run selects at 43
+    split = record["init"]["split"]
+    assert expected > 0 and (split["relation"], split["unit"], split["n_select_overlap"], split["n_test_overlap"]) == (
+        "overlap", "documents", expected, 0)
+    assert (summary["selection_biased"], summary["test_biased"]) == (True, False) and predictor.record_problems(record) == []
+    assert record["init"]["transfer"]["copied"] == len(language_finetune.start)
+
+
+def test_language_resume_of_an_init_run_with_its_source_renamed_away_opens_no_source_file(
+        language_pair, tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    shutil.copytree(language_pair.out, run_dir)
+    (run_dir / "results_summary.json").unlink()  # a run whose reporting died: resumed to report
+    moved = language_pair.source.with_name("moved_away")
+    language_pair.source.rename(moved)
+    try:
+        opened = watch_opens(monkeypatch, str(language_pair.source))
+        keras.backend.clear_session()
+        train_language_model_pretraining(**{**language_pair.request, "out": str(run_dir), "resume_interrupted": True})
+    finally:
+        monkeypatch.undo()
+        moved.rename(language_pair.source)
+    assert summary_of(run_dir)["reporting_resumed"] is True and opened == []
+    assert summary_of(run_dir)["init"] == record_of(run_dir)["init"] == record_of(language_pair.out)["init"]

@@ -146,7 +146,10 @@ summary's resume note both carry), an epoch
 killed midway is trained again from its start (with ``checkpoint_args.backup_every_steps`` it
 is continued from the last copy taken inside it, ``resume_state.StepBackupAndRestore``, D-063: only
 the batches that copy had not taken run, from a fresh pass of the data, so some examples of that
-epoch repeat and some are missed, and its row holds the train metrics of those batches only),
+epoch repeat and some are missed, and its row holds the train metrics of those batches only; a task
+whose ``resume_stream`` returns the SAME stream at the settled step sets ``resume_stream_exact``,
+and the four sentences about that resume then say the batches are the ones the unkilled run reads
+next, D-050),
 a kill between the best checkpoint's save and
 the backup can leave ``best_model.keras`` one epoch LATER than the resumed state's best (the
 epoch that is then trained again; never an earlier one, D-021, D-069), and the summary's
@@ -583,11 +586,17 @@ class TaskTrainer:
         sentence (``resume_help``'s ``order`` argument takes the same text); ``None`` is the shipped
         tasks' (the loader replays epoch 0's order), and a task whose ``resume_stream`` trains on
         another stream sets it so the summary's resume note does not say otherwise.
+    :cvar resume_stream_exact: whether a resume from a copy taken inside an epoch reads the batches the unkilled run reads next,
+        because ``resume_stream`` returns the SAME stream at the settled step; ``False`` is every shipped task's before the
+        language task, and then the four sentences about that resume say "a fresh pass of the data" (the help of
+        ``resume_interrupted`` and of ``checkpoint_args.backup_every_steps``, the ``Resume:`` log line, this class's summary
+        note). A task that sets it also declares the two helps (``config.BACKUP_HELP_EXACT``, ``HELP_OVERRIDES``).
     """
 
     task: ClassVar[str] = ""
     success_metric: ClassVar[str] = ""
     resume_order: ClassVar[Optional[str]] = None
+    resume_stream_exact: ClassVar[bool] = False
 
     def __init__(self, config: StrictConfig) -> None:
         missing = [name for name in CONFIG_FIELDS if not hasattr(config, name)]
@@ -1298,11 +1307,17 @@ class TaskTrainer:
             )
             if resume.batch:
                 left = data.steps_per_epoch - resume.batch - 1
+                # DECISION plan-2026-11-24T092348-7806a290/D-050
+                # The clause follows the task's stream (`resume_stream_exact`). Do NOT reword it for every task: the others
+                # replay or derive another stream, so "a fresh pass" is true of them and their notes are byte-pinned.
+                reads = (
+                    "the stream at the step the backup holds (the batches the unkilled run reads next), so none of its "
+                    "examples was seen twice or missed" if self.resume_stream_exact else
+                    "a fresh pass of the data, so some of its examples were seen twice and some not at all")
                 notes.append(
                     f"epoch {resume.start} was killed after {resume.batch + 1} of its "
-                    f"{data.steps_per_epoch} batches; the resume ran its remaining {left} from a "
-                    "fresh pass of the data, so some of its examples were seen twice and some not "
-                    f"at all, and the epoch's row (index {resume.start}) holds the train metrics "
+                    f"{data.steps_per_epoch} batches; the resume ran its remaining {left} from "
+                    f"{reads}, and the epoch's row (index {resume.start}) holds the train metrics "
                     "(loss, accuracy, ...), `lr` and `epoch_times` entry of those "
                     f"{left} batches only and the validation metrics of the whole validation set"
                 )

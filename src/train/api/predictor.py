@@ -119,6 +119,30 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     output on a zero image (:func:`train.api.pretrain_predictor.check_output`). A resume compares the geometry, the
     scaling, the patch and the tokenizer.
 
+``seq_len``, ``encoding``, ``n_vocab``, ``vocab_size``, ``eot_id``, ``pad_id``, ``tokenizer``, ``tokenizer_files``, ``output`` (language model)
+    A language-model record has no ``class_names``, input size or statistics: the model takes ``seq_len`` token ids and returns the
+    next-token logits ``(seq_len, vocab_size)`` (``output`` is ``"next_token_logits"``, :data:`LANGUAGE_OUTPUTS`). ``encoding`` is the
+    tokenizer (:data:`train.api.text_tokenizer.TOKENIZERS`), ``n_vocab`` its own ids, ``vocab_size`` the model's, ``eot_id`` and ``pad_id``
+    ids below it; ``tokenizer`` is the digest of its :class:`~train.api.text_tokenizer.TokenizerSpec` and ``tokenizer_files`` the sha256
+    of each BPE file (``{}`` for ``ascii95``). ``check_record`` checks the formats and that the ids lie in the vocabulary, and, for a record
+    that names the digest this code pins, that ``eot_id`` and ``pad_id`` (``cls_id`` too) are the ones that digest is made of; ``predict``
+    checks the digest against the one this code pins, so a record of another tokenizer is still a record (``export`` and ``init``
+    read it). ``load_model`` refuses a ``seq_len`` or ``vocab_size`` that is not the model's, by the zero document's logits. A resume
+    compares :data:`DATA_KEYS`.
+
+``cls_id``, ``class_names``, ``layout``, ``output`` (text classification)
+    A text-classification record has the language model's keys up to ``tokenizer_files`` and then ``cls_id`` (the id every row begins with:
+    an id below ``vocab_size`` other than ``pad_id``, which the padding mask would hide), ``class_names`` (the label names in label order,
+    as an image classifier's), ``layout`` (:data:`TEXT_LAYOUTS`: ``cls_head_pad``, a row is ``[CLS]``, the first ``seq_len - 1`` ids of the
+    document and pad ids up to ``seq_len``) and ``output`` (:data:`TEXT_CLASSIFICATION_OUTPUTS`: ``logits``, one per class name).
+    ``load_model`` refuses a ``seq_len`` or a class count that is not the model's, by the zero document's logits. A resume compares
+    :data:`DATA_KEYS`: the language model's four and ``class_names``.
+
+``tokenizer_dir`` (OPTIONAL, a language-model or text-classification record)
+    The ABSOLUTE directory the run read its BPE files from, written ONLY when the run set ``data.tokenizer_dir`` (null: the pinned copy,
+    no key). ``predict`` opens the tokenizer from it, after the hashes of the files are checked (D-077); a file of another hash is refused
+    by name, and a directory that is gone is replaced by the pinned copy, hashed the same way (D-085).
+
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
     run's resolved ``model_args`` set to another value, so the model is the variant WITH these
@@ -128,10 +152,10 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)``
+``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)`` / ``build_language_model_record(...)`` / ``build_text_classification_record(...)``
     :return: the record for a finished data load (not checked; see their docstrings). The first
         writes a classification record, the second a segmentation record, the third a denoising one, the fourth a forecasting
-        one, the fifth a depth one, the sixth a pretrain one.
+        one, the fifth a depth one, the sixth a pretrain one, the seventh a language-model one, the eighth a text-classification one.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
@@ -183,7 +207,9 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
         record gives a :class:`~train.api.denoising_predictor.DenoisingPredictor`, a ``time_series_forecasting`` one a
         :class:`~train.api.forecast_predictor.ForecastPredictor`, a ``depth_estimation`` one a
         :class:`~train.api.depth_predictor.DepthPredictor`, a ``pretrain`` one a
-        :class:`~train.api.pretrain_predictor.PretrainPredictor`.
+        :class:`~train.api.pretrain_predictor.PretrainPredictor`, a ``language_model_pretraining`` one a
+        :class:`~train.api.text_predictor.LanguageModelPredictor`, a ``text_classification`` one a
+        :class:`~train.api.text_predictor.TextClassifierPredictor`.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -208,15 +234,18 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     forecasting and pretrain only, :data:`CLASSIFICATION_EXPORT_REFUSALS`,
     :data:`train.api.denoising_predictor.EXPORT_REFUSALS`,
     :data:`train.api.forecast_predictor.EXPORT_REFUSALS`, :data:`train.api.pretrain_predictor.EXPORT_REFUSALS`) and,
-    for forecasting, depth and pretrain, for a traced shape that is not the record's (a depth model exports every
-    format at its trained size only, :func:`train.api.depth_predictor.check_export`, and so does a pretrain model,
-    :func:`train.api.pretrain_predictor.check_export`), and ``note(record)`` is the sentence logged beside an export.
+    for forecasting, depth, pretrain and the two text tasks, for a traced shape that is not the record's (a depth model exports
+    every format at its trained size only, :func:`train.api.depth_predictor.check_export`, and so do a pretrain model,
+    :func:`train.api.pretrain_predictor.check_export`, and a language model or a text classifier, :func:`train.api.text_predictor.check_export`), and
+    ``note(record)`` is the sentence logged beside an export.
     ``served`` is ``None`` for the other image tasks (the file is the model), for forecasting the layer that
     standardizes a raw window, runs the model, decodes and de-standardizes
     (:class:`train.common.forecast_run.ServedForecaster`), and for pretrain a functional model over the run's backbone
-    that returns the patch-token embeddings (:func:`train.api.pretrain_predictor.served`); the rank of
-    ``shape_of(record)`` is the rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster). A row
-    in every table of :data:`TASK_TABLES`, this one included.
+    that returns the patch-token embeddings (:func:`train.api.pretrain_predictor.served`), and for a language model or a text classifier the
+    model with ``training=False`` (:func:`train.api.text_predictor.served`: a rule with no served function is written with no tflite check
+    at all); the rank of ``shape_of(record)`` is the rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster, 1 for
+    a text model). ``sample`` is the two text tasks' check batch of seeded ids (:func:`train.api.text_predictor.sample_ids`) and
+    ``None`` for every other task. A row in every table of :data:`TASK_TABLES`, this one included.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
@@ -281,6 +310,8 @@ from .errors import ConfigError
 from .pretrain_args import TASK as PRETRAIN
 from .recipes import ET_CLASSIFIER
 from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
+from .text_args import CLASSIFICATION_TASK as TEXT_CLASSIFICATION, TASK as LANGUAGE_MODEL
+from .text_tokenizer import ASCII95, TOKENIZERS, tokenizer_spec
 
 # ---------------------------------------------------------------------
 
@@ -305,6 +336,12 @@ FORECASTING = "time_series_forecasting"
 #: :class:`~train.api.segmentation_predictor.SegmentationPredictor` for a segmentation record, so
 #: a record of any other task is refused by the class that does not serve it.
 SERVED_TASK = CLASSIFICATION
+
+#: The keys the two text tasks' records share, in the order they are written: the window and the tokenizer's facts.
+_TEXT_KEYS = (
+    "schema_version", "task", "model", "family", "variant", "seq_len", "encoding", "n_vocab", "vocab_size", "eot_id", "pad_id",
+    "tokenizer", "tokenizer_files",
+)
 
 #: The keys of a record per task, in the order they are written. The classification tuple is the
 #: version 1 tuple: byte-identical output apart from ``schema_version`` is a standing requirement.
@@ -395,6 +432,10 @@ RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
         "tokenizer",
         "output",
     ),
+    LANGUAGE_MODEL: (*_TEXT_KEYS, "output"),
+    # The language model's keys, then the classifier's own: the id its rows begin with, the label names (the model's outputs, in
+    # label order), how a row is made from a document and what the model returns.
+    TEXT_CLASSIFICATION: (*_TEXT_KEYS, "cls_id", "class_names", "layout", "output"),
 }
 
 #: What ``output`` may say in a segmentation record.
@@ -420,12 +461,21 @@ PRETRAIN_NORMALIZE = "standardize"
 PRETRAIN_OUTPUTS = ("patch_embeddings",)
 PRETRAIN_CHANNELS = 3
 
+#: What ``output`` may say in a language-model record: the logits over the vocabulary at every position of the window (the row of
+#: position ``i`` is the distribution of the id after the ``i``-th).
+LANGUAGE_OUTPUTS = ("next_token_logits",)
+
+#: What ``output`` and ``layout`` may say in a text-classification record: the raw class logits, and how a row is made from a document
+#: (``[CLS]``, the first ``seq_len - 1`` ids, pad ids up to ``seq_len``: ``train.common.text_data.encode_rows``).
+TEXT_CLASSIFICATION_OUTPUTS = ("logits",)
+TEXT_LAYOUTS = ("cls_head_pad",)
+
 #: What ``head`` may say in a forecasting record, and the sources ``data_format`` may name (the ``data.format`` values of the task).
 FORECAST_HEADS = ("point", "quantile")
 FORECAST_FORMATS = ("builtin", "csv")
 
 #: Keys a record MAY carry (written only when they hold something); every other key is required.
-OPTIONAL_RECORD_KEYS = ("variant_overrides", "init")
+OPTIONAL_RECORD_KEYS = ("variant_overrides", "init", "tokenizer_dir")
 
 #: The keys of the optional ``init`` block (where a run's starting weights came from: ``train.api.init_from``), in the
 #: order they are written; ``transfer`` holds :data:`INIT_TRANSFER_KEYS`, each ``resampled`` entry
@@ -491,8 +541,10 @@ WIDE_MODES = ("I", "F")
 def _record_of(
     task: str, values: Mapping[str, Any], variant_overrides: Optional[Mapping[str, Any]]
 ) -> Dict[str, Any]:
-    """Return the record of ``task``: ``values`` in the order of ``RECORD_KEYS[task]``, plus the optional key."""
+    """Return the record of ``task``: ``values`` in the order of ``RECORD_KEYS[task]``, plus the optional keys that hold something."""
     record = {key: values[key] for key in RECORD_KEYS[task]}
+    if values.get("tokenizer_dir") is not None:      # only a text record's values hold the key; absolute, so `predict` reads it from any directory
+        record["tokenizer_dir"] = str(Path(values["tokenizer_dir"]).resolve())
     if variant_overrides:
         record["variant_overrides"] = _plain(dict(variant_overrides))
     return record
@@ -771,6 +823,74 @@ def build_pretrain_record(
         },
         variant_overrides,
     )
+
+
+def _text_values(
+    task: str, model: str, family: str, variant: str, seq_len: int, tokenizer: Mapping[str, Any], tokenizer_dir: Optional[str]
+) -> Dict[str, Any]:
+    """Return the values of :data:`_TEXT_KEYS` (and ``tokenizer_dir``) for a record of ``task``; ``tokenizer`` is a ``TokenizerSpec.record()``."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "task": task,
+        "model": model,
+        "family": family,
+        "variant": variant,
+        "seq_len": int(seq_len),
+        "encoding": tokenizer["encoding"],
+        "n_vocab": tokenizer["n_vocab"],
+        "vocab_size": tokenizer["vocab_size"],
+        "eot_id": tokenizer["eot_id"],
+        "pad_id": tokenizer["pad_id"],
+        "tokenizer": tokenizer["digest"],
+        "tokenizer_files": dict(tokenizer["files"]),
+        "tokenizer_dir": tokenizer_dir,
+    }
+
+
+def build_language_model_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    seq_len: int,
+    tokenizer: Mapping[str, Any],
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+    tokenizer_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a language-model run; see the module contract.
+
+    :param seq_len: the number of ids the model was built to take.
+    :param tokenizer: :meth:`train.api.text_tokenizer.TokenizerSpec.record` of the run's tokenizer (its fields and digest).
+    :param tokenizer_dir: the run's ``data.tokenizer_dir``; the record gets the ``tokenizer_dir`` key only when it is not ``None``.
+    :return: the record; ``output`` is the first of :data:`LANGUAGE_OUTPUTS`. It is NOT checked (:func:`check_record` does that).
+    """
+    values = _text_values(LANGUAGE_MODEL, model, family, variant, seq_len, tokenizer, tokenizer_dir)
+    return _record_of(LANGUAGE_MODEL, {**values, "output": LANGUAGE_OUTPUTS[0]}, variant_overrides)
+
+
+def build_text_classification_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    seq_len: int,
+    tokenizer: Mapping[str, Any],
+    class_names: Sequence[str],
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+    tokenizer_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a text-classification run; see the module contract.
+
+    :param seq_len: the number of ids a row holds, which the model was built to take.
+    :param tokenizer: :meth:`train.api.text_tokenizer.TokenizerSpec.record` of the run's tokenizer (its ``cls_id`` is the id rows begin with).
+    :param class_names: the label names in label order, one per output of the model.
+    :param tokenizer_dir: as for :func:`build_language_model_record`.
+    :return: the record; ``layout`` and ``output`` are the first of :data:`TEXT_LAYOUTS` and :data:`TEXT_CLASSIFICATION_OUTPUTS`. It is NOT
+        checked (:func:`check_record` does that).
+    """
+    values = _text_values(TEXT_CLASSIFICATION, model, family, variant, seq_len, tokenizer, tokenizer_dir)
+    extra = {"cls_id": tokenizer["cls_id"], "class_names": list(class_names), "layout": TEXT_LAYOUTS[0], "output": TEXT_CLASSIFICATION_OUTPUTS[0]}
+    return _record_of(TEXT_CLASSIFICATION, {**values, **extra}, variant_overrides)
 
 
 def _is_number(value: Any) -> bool:
@@ -1228,6 +1348,94 @@ def _pretrain_tail_problems(record: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _text_geometry(record: Mapping[str, Any], id_keys: Sequence[str]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, None)`` for ``seq_len``, the vocabulary and the ``id_keys`` ids in it (a text record has no channels)."""
+    lines = [
+        f"{key!r} must be a positive int, got {record[key]!r}"
+        for key in ("seq_len", "n_vocab", "vocab_size")
+        if not (_is_whole(record[key]) and record[key] > 0)
+    ]
+    if lines:
+        return lines, None
+    vocab = record["vocab_size"]
+    if record["n_vocab"] > vocab:
+        lines.append(f"'n_vocab' {record['n_vocab']} is above 'vocab_size' {vocab}: the model's vocabulary holds every id of the tokenizer")
+    lines += [
+        f"{key!r} must be a whole number below 'vocab_size' {vocab}, got {record[key]!r}"
+        for key in id_keys
+        if not (_is_whole(record[key]) and 0 <= record[key] < vocab)
+    ]
+    return lines, None
+
+
+def _language_model_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, None)`` for ``seq_len``, the vocabulary and the ids in it (a language record has no channels)."""
+    return _text_geometry(record, ("eot_id", "pad_id"))
+
+
+def _text_classification_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, None)`` for the language model's keys and ``cls_id``, which must not be the pad id (the mask would hide it)."""
+    lines, _ = _text_geometry(record, ("eot_id", "pad_id", "cls_id"))
+    if not lines and record["cls_id"] == record["pad_id"]:
+        lines.append(f"'cls_id' and 'pad_id' are both {record['pad_id']}: the padding mask would hide the [CLS] every row begins with")
+    return lines, None
+
+
+def _tokenizer_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``encoding``, ``tokenizer`` and ``tokenizer_files`` of a text record: formats, not the code's pin."""
+    # DECISION plan-2026-11-24T092348-7806a290/D-033
+    # The FORMAT of the tokenizer keys is checked here and nothing about what this code pins for the encoding: a record of another
+    # tokenizer (an ascii95 run beside a gpt2 one, a digest this code no longer pins) is a valid record that ``export`` and the
+    # ``init`` identity read, and refusing it here would hide the sentence that names both digests. ``predict`` checks the digest
+    # against the pin when it opens the tokenizer. Do NOT refuse a record because its digest is not the pinned one, and do NOT copy
+    # this check into the task's tail check: the language model and the text classifier both call it (D-062).
+    lines: List[str] = []
+    if record["encoding"] not in TOKENIZERS:
+        lines.append(f"'encoding' must be one of {', '.join(TOKENIZERS)}, got {record['encoding']!r}")
+    digest, files = record["tokenizer"], record["tokenizer_files"]
+    if not (isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)):
+        lines.append(f"'tokenizer' must be the 64 lowercase hex digits of the tokenizer's digest, got {digest!r}")
+    if not (isinstance(files, dict) and all(
+            isinstance(name, str) and name and isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)
+            for name, sha in files.items())):
+        lines.append(f"'tokenizer_files' must be an object of cache file name to the 64 lowercase hex digits of its sha256, got {_shown(files)}")
+    elif record["encoding"] in TOKENIZERS and bool(files) != (record["encoding"] != ASCII95):
+        lines.append(f"'tokenizer_files' must be {'empty' if record['encoding'] == ASCII95 else 'the BPE files'} for the {record['encoding']} "
+                     f"tokenizer, got {_shown(files)}")
+    if "tokenizer_dir" in record and not (isinstance(record["tokenizer_dir"], str) and Path(record["tokenizer_dir"]).is_absolute()):
+        lines.append(f"'tokenizer_dir' must be an absolute directory name (written only when data.tokenizer_dir was set), got {_shown(record['tokenizer_dir'])}")
+    # DECISION plan-2026-11-24T092348-7806a290/D-078
+    # A record that names the digest this code PINS for its encoding holds the ids that digest is made of: `eot_id`, `pad_id` and `cls_id`
+    # are what `predict` appends and pads with and what a consumer of an exported record builds rows from, so another id is a forged
+    # or corrupt record, not another tokenizer. It holds the digest's files too (D-085: `predict` opens a directory whose files hash to
+    # the record's `tokenizer_files`, which are therefore the pin's). A record of another digest is judged by format alone (D-033). Do NOT
+    # compare the ids or the files of a record whose digest differs (it is a valid record of a tokenizer this code does not pin).
+    spec = tokenizer_spec(record["encoding"]) if record["encoding"] in TOKENIZERS else None
+    if spec is not None and digest == spec.digest:
+        lines += [f"{key!r} is {record[key]!r}, but the tokenizer digest the record names is {spec.encoding}'s, whose {key} is {getattr(spec, key)}"
+                  for key in ("eot_id", "pad_id", "cls_id") if key in record and record[key] != getattr(spec, key)]
+        if isinstance(files, dict) and files != dict(spec.files):
+            lines.append(f"'tokenizer_files' is {_shown(files)}, but the tokenizer digest the record names is {spec.encoding}'s, whose files are {dict(spec.files)}")
+    return lines
+
+
+def _language_model_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of the tokenizer keys and ``output`` of a language-model record."""
+    lines = _tokenizer_problems(record)
+    if record["output"] not in LANGUAGE_OUTPUTS:
+        lines.append(f"'output' must be one of {', '.join(LANGUAGE_OUTPUTS)}, got {record['output']!r}")
+    return lines
+
+
+def _text_classification_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of the tokenizer keys, ``layout`` and ``output`` of a text-classification record."""
+    lines = _tokenizer_problems(record)
+    for key, allowed in (("layout", TEXT_LAYOUTS), ("output", TEXT_CLASSIFICATION_OUTPUTS)):
+        if record[key] not in allowed:
+            lines.append(f"{key!r} must be one of {', '.join(allowed)}, got {record[key]!r}")
+    return lines
+
+
 # DECISION plan-2026-11-10T095307-d483ffab/D-006: the per-task work of reading a record is a ROW of
 # a table keyed by task, not a branch. Do NOT add a third ``elif task == ...`` here or in
 # ``input_shape_of``, ``load_model`` or ``_run_on_zeros`` (a third task would be one more branch in
@@ -1305,6 +1513,9 @@ def read_record(path: Path) -> Dict[str, Any]:
     return record
 
 
+#: The data keys the two text tasks share: the length, the encoding, the vocabulary and the tokenizer digest.
+_TEXT_DATA_KEYS = ("seq_len", "encoding", "vocab_size", "tokenizer")
+
 #: The keys of a record that describe the DATA a run was trained on, per task (a resume compares
 #: them). A segmentation run adds the void and the threshold: a different ``ignore_index`` is
 #: other labels; a denoising run holds the channel count its files are decoded to and the pixel domain.
@@ -1332,6 +1543,12 @@ DATA_KEYS: Dict[str, Tuple[str, ...]] = {
     # A pretrain resume compares the geometry, the scaling, the patch and the tokenizer: the masks and the targets are
     # functions of them. ``output`` is how the predictor answers.
     PRETRAIN: ("input_size", "channels", "normalize", "mean", "std", "patch_size", "tokenizer"),
+    # A language-model resume compares the length, the encoding, the vocabulary and the tokenizer digest (which holds the ids and the
+    # file hashes): the windows are a function of them. ``output`` is how the predictor answers.
+    LANGUAGE_MODEL: _TEXT_DATA_KEYS,
+    # A text-classification resume compares those and the class names (the labels): the rows are a function of them. ``cls_id`` is held
+    # by the digest, ``layout`` and ``output`` are how the rows are made and the model answers.
+    TEXT_CLASSIFICATION: (*_TEXT_DATA_KEYS, "class_names"),
 }
 
 
@@ -1654,12 +1871,12 @@ def _zeros_of(record: Mapping[str, Any]) -> Any:
     return np.zeros((1, *input_shape_of(record)), np.float32)
 
 
-def _check_width(logits: Any, record: Mapping[str, Any]) -> None:
-    """Raise :class:`ConfigError` unless ``logits`` is ``(N, classes)`` for the record's classes."""
+def _check_width(logits: Any, record: Mapping[str, Any], unit: str = "image") -> None:
+    """Raise :class:`ConfigError` unless ``logits`` is ``(N, classes)`` for the record's classes; ``unit`` names what a row is."""
     shape = tuple(logits.shape)
     if len(shape) != 2 or shape[1] != len(record["class_names"]):
         raise ConfigError(
-            f"The model outputs {shape[1:]} per image but {TASK_FILE} names "
+            f"The model outputs {shape[1:]} per {unit} but {TASK_FILE} names "
             f"{len(record['class_names'])} classes; the file and the model are not from one run"
         )
 
@@ -1979,6 +2196,40 @@ def _pretrain_output_check(output: Any, record: Mapping[str, Any]) -> None:
     check_output(output, record)
 
 
+def _language_model_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    """Raise :class:`ConfigError` unless ``output`` is the logits ``(1, seq_len, vocab_size)`` of the zero document."""
+    wanted = (1, record["seq_len"], record["vocab_size"])
+    shape = tuple(output.shape) if not isinstance(output, (list, tuple, dict)) else None
+    if shape != wanted:
+        seen = f"{type(output).__name__} of {len(output)} outputs" if shape is None else str(shape[1:])
+        raise ConfigError(
+            f"The model outputs {seen} for one document of {record['seq_len']} ids but {TASK_FILE} names a vocabulary of "
+            f"{record['vocab_size']} ({wanted[1:]}); the file and the model are not from one run"
+        )
+
+
+def _text_classification_model_check(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> None:
+    """Raise :class:`ConfigError` unless the embedding of ``model`` has the ``vocab_size`` of the record (its logits are class scores, which show none)."""
+    # DECISION plan-2026-11-24T092348-7806a290/D-062
+    # The language model's logits are as wide as its vocabulary, so ``_language_model_output_check`` sees a record of another one; a
+    # classifier's are not, so its vocabulary is read off the backbone layer here. Do NOT add ``vocab_size`` to the family's ``observe``
+    # (its keys are compared with the variant's table, which has none) and do NOT drop this row: an id beyond the table raises
+    # TensorFlow's ``InvalidArgumentError`` on a CPU (measured) from ``predict`` and ``export`` instead of a named refusal at load.
+    from .text_models import vocabulary_of
+
+    held = vocabulary_of(model)
+    if held is not None and held != record["vocab_size"]:
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: it names a vocabulary of {record['vocab_size']} ids but {model_file} embeds {held}; the "
+            "file and the model are not from one run"
+        )
+
+
+def _text_classification_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    """Raise :class:`ConfigError` unless ``output`` is the logits ``(1, classes)`` of the zero document."""
+    _check_width(output, record, "document")
+
+
 def _classification_predictor(model: Any, record: Mapping[str, Any]) -> "Predictor":
     return Predictor(model, record)
 
@@ -2013,6 +2264,18 @@ def _pretrain_predictor(model: Any, record: Mapping[str, Any]) -> Any:
     return PretrainPredictor(model, record)
 
 
+def _language_model_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    from .text_predictor import LanguageModelPredictor
+
+    return LanguageModelPredictor(model, record)
+
+
+def _text_classification_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    from .text_predictor import TextClassifierPredictor
+
+    return TextClassifierPredictor(model, record)
+
+
 class ExportRule(NamedTuple):
     """One task's part of ``export``, a row of :data:`EXPORT_RULES`.
 
@@ -2026,13 +2289,18 @@ class ExportRule(NamedTuple):
         saved_model endpoint, the tflite and onnx graph, the tflite numeric check and the ``keras`` archive all run it.
         It returns a tensor, or a dict holding ``point`` (tflite and onnx take that one); its ``static_batch``
         attribute, when not ``None``, is the batch the file is traced at. The length of ``shape_of(record)`` is the
-        rank ``export`` accepts of ``input_shape`` (3 for the image tasks, 2 for ``(lookback, channels)``).
+        rank ``export`` accepts of ``input_shape`` (3 for the image tasks, 2 for ``(lookback, channels)``, 1 for ``(seq_len,)``).
+    :param sample: ``None`` (the default) or ``f(record, shape) -> numpy float32`` batch of ``shape`` (``(batch, *input shape)``): the
+        batch the tflite check runs the file and the served function on, in place of the random floats in [0, 1) every task was checked
+        with before this field existed. A task whose input is whole numbers (a language model's token ids, which such floats all make
+        id 0) names its own; it is bound to the record by ``export`` (D-008).
     """
 
     shape_of: Callable[[Mapping[str, Any]], Tuple[Optional[int], ...]]
     check: Callable[[Mapping[str, Any], str, Tuple[Optional[int], ...]], None]
     note: Callable[[Mapping[str, Any]], str]
     served: Optional[Callable[[Any, Mapping[str, Any]], Any]] = None
+    sample: Optional[Callable[[Mapping[str, Any], Tuple[int, ...]], Any]] = None
 
 
 def _no_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
@@ -2151,6 +2419,40 @@ def _pretrain_export_note(record: Mapping[str, Any]) -> str:
     return export_note(record)
 
 
+def _text_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    from .text_predictor import check_export
+
+    check_export(record, format, shape)
+
+
+def _text_served(model: Any, record: Mapping[str, Any]) -> Any:
+    from .text_predictor import served
+
+    return served(model, record)
+
+
+def _text_sample(record: Mapping[str, Any], shape: Tuple[int, ...]) -> Any:
+    from .text_predictor import sample_ids
+
+    return sample_ids(record, shape)
+
+
+def _language_model_export_note(record: Mapping[str, Any]) -> str:
+    from .text_predictor import export_note
+
+    return export_note(record)
+
+
+def _text_classification_export_note(record: Mapping[str, Any]) -> str:
+    from .text_predictor import classifier_export_note
+
+    return classifier_export_note(record)
+
+
+def _text_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
+    return (record["seq_len"],)
+
+
 #: Geometry keys and the channel count, per task (see the contract above).
 GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Optional[int]]]] = {
     CLASSIFICATION: _classification_geometry,
@@ -2159,6 +2461,8 @@ GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Option
     FORECASTING: _forecast_geometry,
     DEPTH: _depth_geometry,
     PRETRAIN: _pretrain_geometry,
+    LANGUAGE_MODEL: _language_model_geometry,
+    TEXT_CLASSIFICATION: _text_classification_geometry,
 }
 
 #: The keys only one task holds (classification's ``eval_transform``, segmentation's void,
@@ -2170,6 +2474,8 @@ TAIL_CHECKS: Dict[str, Callable[[Mapping[str, Any]], List[str]]] = {
     FORECASTING: _forecast_tail_problems,
     DEPTH: _depth_tail_problems,
     PRETRAIN: _pretrain_tail_problems,
+    LANGUAGE_MODEL: _language_model_tail_problems,
+    TEXT_CLASSIFICATION: _text_classification_tail_problems,
 }
 
 #: A denoiser's own input is flexible, so its row gives the zero image it is probed with.
@@ -2180,12 +2486,14 @@ INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
     FORECASTING: _forecast_input_shape,
     DEPTH: _segmentation_input_shape,
     PRETRAIN: _segmentation_input_shape,
+    LANGUAGE_MODEL: _text_input_shape,
+    TEXT_CLASSIFICATION: _text_input_shape,
 }
 
 #: The record key that holds the input geometry, per task (a denoiser's is its channel count).
 INPUT_KEY: Dict[str, str] = {
     CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels", FORECASTING: "lookback",
-    DEPTH: "input_size", PRETRAIN: "input_size",
+    DEPTH: "input_size", PRETRAIN: "input_size", LANGUAGE_MODEL: "seq_len", TEXT_CLASSIFICATION: "seq_len",
 }
 
 #: What a loaded model says of itself against its record, run BEFORE the model is called (D-042): a forecaster's built
@@ -2197,6 +2505,10 @@ MODEL_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any], Path, Path], None]] = 
     FORECASTING: _forecasting_model_check,
     DEPTH: _depth_model_check,
     PRETRAIN: _pretrain_model_check,
+    # A functional model takes one static length: the zero-document call of ``load_model`` refuses another one by name (``INPUT_KEY``).
+    LANGUAGE_MODEL: _no_model_check,
+    # A classifier's output is class scores, which show no vocabulary: the embedding's rows are read off the backbone layer instead.
+    TEXT_CLASSIFICATION: _text_classification_model_check,
 }
 
 OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
@@ -2206,6 +2518,8 @@ OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
     FORECASTING: _forecasting_output_check,
     DEPTH: _depth_output_check,
     PRETRAIN: _pretrain_output_check,
+    LANGUAGE_MODEL: _language_model_output_check,
+    TEXT_CLASSIFICATION: _text_classification_output_check,
 }
 
 PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
@@ -2215,6 +2529,8 @@ PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
     FORECASTING: _forecasting_predictor,
     DEPTH: _depth_predictor,
     PRETRAIN: _pretrain_predictor,
+    LANGUAGE_MODEL: _language_model_predictor,
+    TEXT_CLASSIFICATION: _text_classification_predictor,
 }
 
 #: What ``export`` does per task (see :class:`ExportRule`). Classification and segmentation trace at the record's
@@ -2234,6 +2550,20 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     # the run's backbone, ``check`` refuses another size and the measured cells that do not convert (plan 5c6cc105
     # D-003, D-024).
     PRETRAIN: ExportRule(_segmentation_input_shape, _pretrain_export_check, _pretrain_export_note, _pretrain_served),
+    # A language model's file takes token ids as float32 ``(seq_len,)`` at the trained length and returns the next-token logits: ``served``
+    # is the model with ``training=False`` (a rule with none is written with no tflite check), ``sample`` the seeded ids the check is
+    # fed (plan 7806a290 D-008, D-032). Every cell converts (``test_language_model_pretraining_predictor_and_export.py``), so ``check`` refuses a length only.
+    LANGUAGE_MODEL: ExportRule(
+        _text_input_shape, _text_export_check, _language_model_export_note, _text_served,
+        _text_sample),
+    # DECISION plan-2026-11-24T092348-7806a290/D-063
+    # A text classifier's file is the language model's rule with its own note: float ids at the trained length in, class logits out. The
+    # shape, the check, the served function and the sample read only ``seq_len``, ``vocab_size`` and ``pad_id``, which its record holds too.
+    # Do NOT give it ``served=None`` or no ``sample`` (the built-in tflite file would then be written with no numeric check, or checked on
+    # random floats that are all id 0), and do NOT refuse a cell: every one converts and matches on valid rows (measured, D-063).
+    TEXT_CLASSIFICATION: ExportRule(
+        _text_input_shape, _text_export_check, _text_classification_export_note, _text_served,
+        _text_sample),
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of

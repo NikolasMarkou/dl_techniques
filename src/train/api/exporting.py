@@ -49,6 +49,12 @@ cells that do not convert are refused by name before anything is written
 (built-in and select-operator files alike) compares the file with the served function. ``input_shape`` is ``(lookback, channels)`` for
 it: the rank is the one the task's ``ExportRule.shape_of`` returns.
 
+A LANGUAGE model (``language_model_pretraining``, plan 7806a290 D-008, D-032) takes float32 TOKEN IDS ``(batch, seq_len)`` at the trained length
+only, each id an exact whole number below 2^24 written as a float (``3.0``, not ``3``; the model casts in its graph), and returns the raw
+next-token logits ``(batch, seq_len, vocab_size)``. Its rule has a served function (the model with ``training=False``), so that the
+tflite file IS checked, and a ``sample``: the check batch is seeded valid ids, because the random floats in [0, 1) the check fed
+until then all cast to id 0. ``input_shape`` is ``(seq_len,)``, rank 1.
+
 Numerical agreement is RELATIVE to the scale of the scores, and for the four segmentation families it is a CONTRACT PER FAMILY
 (D-029, which replaces D-088's one relative 1e-4 for every family, itself a correction of D-081's absolute 1e-4, measured on scores of scale 1:
 an AccUNet's untrained logits are 3e-5, so its head was lifted to 1). For ``saved_model``, ``tflite`` and ``onnx``, read by their own
@@ -129,7 +135,8 @@ Interface contract
             ``tf2onnx.convert.from_function`` on ``model(x, training=False)``, with a free
             batch dimension. Only if ``tf2onnx`` imports; otherwise a :class:`ConfigError`
             that says so, before anything is written.
-    :param input_shape: ``(height, width, channels)`` without the batch. Needed by
+    :param input_shape: ``(height, width, channels)`` without the batch (``(lookback, channels)`` for a forecaster, ``(seq_len,)`` for a
+        language model: the rank is the one the task's ``ExportRule.shape_of`` returns). Needed by
         ``saved_model``, ``tflite`` and ``onnx`` when the model has no ``inputs`` of its own
         (a subclassed model such as the ViT); a functional model supplies it. ``keras``
         ignores it. A height or width may be ``None`` (a free size) only where the model's own input
@@ -217,6 +224,11 @@ def check_free(path: Path, key: str, command: str = "export") -> None:
             return
 
 
+#: What ``_input_spec`` calls the shape of a task, by the rank of the task's ``ExportRule.shape_of``: 3 for the image tasks, 2 for a forecaster,
+#: 1 for a language model (D-008, D-032: ranks 3 and 2 say what they always said).
+SHAPE_WORDS = {3: "(height, width, channels)", 2: "(lookback, channels)", 1: "(seq_len,)"}
+
+
 def _input_spec(
     model: Any, input_shape: Optional[Sequence[Optional[int]]], rank: int = 3, batch: Optional[int] = None
 ) -> Any:
@@ -225,7 +237,8 @@ def _input_spec(
     A height or width may be ``None`` (a free side, ``dynamic`` export) only where the model's own input has
     ``None`` there; the channel count is always a positive int. ``rank`` is the length of the shape the task's
     ``ExportRule.shape_of`` returns: 3 for the image tasks, 2 for ``(lookback, channels)`` of a forecaster, whose
-    sides are all positive ints. ``batch`` is ``None`` (a free batch) unless the served function packs rows by it.
+    sides are all positive ints, 1 for ``(seq_len,)`` of a language model. ``batch`` is ``None`` (a free batch) unless the served
+    function packs rows by it.
     """
     import tensorflow as tf
 
@@ -252,7 +265,7 @@ def _input_spec(
 
     # DECISION plan-2026-11-13T105600-3a8319ef/D-011
     # The rank is the TASK's, read from its ``shape_of`` by ``export``: 3 for the image tasks (unchanged), 2 for a
-    # forecaster. Do NOT test ``len(shape) == 3`` again (a forecaster's ``(lookback, channels)`` is then refused as a
+    # forecaster, 1 for a language model (D-008). Do NOT test ``len(shape) == 3`` again (a forecaster's ``(lookback, channels)`` is then refused as a
     # bad image shape) and do NOT accept either rank for every task (a classifier given ``(lookback, channels)``
     # must still be refused by the image sentence).
     if not (
@@ -260,9 +273,8 @@ def _input_spec(
         and positive(shape[-1])
         and all(positive(shape[i]) or (shape[i] is None and free(i)) for i in range(rank - 1))
     ):
-        wanted = "(height, width, channels)" if rank == 3 else "(lookback, channels)"
         raise ConfigError(
-            f"Invalid value for 'input_shape': expected {wanted} of positive "
+            f"Invalid value for 'input_shape': expected {SHAPE_WORDS[rank]} of positive "
             f"ints, got {input_shape!r} (a height or width may be None only for a model that itself takes any size)"
         )
     return tf.TensorSpec((batch, *shape), tf.float32, name="input")
@@ -348,11 +360,14 @@ def _tflite_logits(blob: bytes, batch: Any) -> Any:
 
 
 def _check_tflite_against_keras(
-    blob: bytes, model: Any, spec: Any, out: Path, served: Optional[Callable[[Any], Any]] = None
+    blob: bytes, model: Any, spec: Any, out: Path, served: Optional[Callable[[Any], Any]] = None,
+    sample: Optional[Callable[[Any], Any]] = None,
 ) -> None:
     """Raise :class:`ConfigError` when ``blob`` does not give the Keras model's logits.
 
     ``served`` is the task's served function (a single tensor): the file is compared with IT, not with the raw model.
+    ``sample`` is ``f(shape) -> float32 batch`` of the task's own check batch (``ExportRule.sample`` bound to the record), asked for
+    the shape ``(spec batch or 2, ...)``; ``None``, the default, is the random float batch every task was checked with before it existed.
 
     Both sides run on the CPU: the interpreter always does, and the Keras side is placed there
     with ``tf.device`` so a GPU machine compares CPU with CPU.
@@ -360,7 +375,13 @@ def _check_tflite_against_keras(
     import numpy as np
     import tensorflow as tf
 
-    batch = np.random.default_rng(0).random((spec.shape[0] or 2, *tuple(spec.shape[1:]))).astype(np.float32)
+    shape = (spec.shape[0] or 2, *tuple(spec.shape[1:]))
+    # DECISION plan-2026-11-24T092348-7806a290/D-008
+    # A task whose input is not a continuous signal names its own check batch (``ExportRule.sample``): a language model's ids are
+    # whole numbers, and random floats in [0, 1) cast to id 0, so the check ran the file on ONE token and could not see a gather or an
+    # attention that is wrong for any other id. Do NOT feed every task the ids (the default stays the random floats, bit for bit) and
+    # do NOT draw the ids here (the vocabulary is the record's, which this function never sees).
+    batch = np.random.default_rng(0).random(shape).astype(np.float32) if sample is None else sample(shape)
     # DECISION plan-2026-10-31T180033-2faf890a/D-042
     # The Keras side is placed on the CPU. Do NOT let it run on the default device: on a GPU
     # machine the model's own logits then come from GPU kernels (TF32 convolutions and
@@ -400,7 +421,8 @@ def _check_tflite_against_keras(
 
 
 def _convert_tflite(
-    sibling: Path, model: Any, spec: Any, out: Path, served: Optional[Callable[[Any], Any]] = None
+    sibling: Path, model: Any, spec: Any, out: Path, served: Optional[Callable[[Any], Any]] = None,
+    sample: Optional[Callable[[Any], Any]] = None,
 ) -> bytes:
     """Return the ``.tflite`` bytes of the SavedModel ``sibling``; see the module contract."""
     import tensorflow as tf
@@ -427,7 +449,7 @@ def _convert_tflite(
         if served is None:
             return blob
         # A served task's built-in file is checked too: its numbers are the forecast, not a classifier's argmax.
-        _check_tflite_against_keras(blob, model, spec, out, served)
+        _check_tflite_against_keras(blob, model, spec, out, served, sample)
         return blob
     except ConverterError as builtin_failure:
         logger.info(
@@ -443,7 +465,7 @@ def _convert_tflite(
             f"with select TF operators ({_what_failed(select_failure)}). Its SavedModel was kept at "
             f"{sibling}; move it away before trying again, or choose keras, saved_model or onnx"
         ) from None
-    _check_tflite_against_keras(blob, model, spec, out, served)
+    _check_tflite_against_keras(blob, model, spec, out, served, sample)
     logger.warning(
         f"{out} needs select TF operators, so it runs only where the Flex delegate is available "
         "(the tensorflow pip package has it; a plain TFLite runtime does not)"
@@ -451,7 +473,10 @@ def _convert_tflite(
     return blob
 
 
-def _export_tflite(model: Any, out: Path, spec: Any, served: Optional[Callable[[Any], Any]] = None) -> None:
+def _export_tflite(
+    model: Any, out: Path, spec: Any, served: Optional[Callable[[Any], Any]] = None,
+    sample: Optional[Callable[[Any], Any]] = None,
+) -> None:
     # DECISION plan-2026-10-30T132432-a865fa08/D-063: the converter reads a SavedModel DIRECTORY,
     # and the intermediate is written beside the result and KEPT. Do NOT convert inside a
     # TemporaryDirectory (its cleanup is a deletion this package forbids) and do NOT switch
@@ -459,7 +484,7 @@ def _export_tflite(model: Any, out: Path, spec: Any, served: Optional[Callable[[
     # the path measured on vit_pico).
     sibling = out.with_name(out.name + TFLITE_SIBLING)
     _export_saved_model(model, sibling, spec, served)
-    blob = _convert_tflite(sibling, model, spec, out, served)
+    blob = _convert_tflite(sibling, model, spec, out, served, sample)
     # DECISION plan-2026-10-30T132432-a865fa08/D-063: ``"xb"`` creates the file and fails if it
     # exists; do NOT write with ``"wb"`` or ``Path.write_bytes``, which truncate a file that
     # appeared after the up-front check.
@@ -640,13 +665,14 @@ def export(
     path.parent.mkdir(parents=True, exist_ok=True)
     # Only the point goes through a converter that has one output (tflite, onnx); saved_model and keras keep the dict.
     point = None if served is None else (lambda batch: _point_of(served(batch)))
+    check_batch = None if rule is None or rule.sample is None else (lambda shape: rule.sample(record, shape))
     if format == "keras":
         archive = model if served is None else _keras_wrapper(served, input_shape or rule.shape_of(record), batch)
         archive.save(str(path), overwrite=False)
     elif format == "saved_model":
         _export_saved_model(model, path, spec, served)
     elif format == "tflite":
-        _export_tflite(model, path, spec, point)
+        _export_tflite(model, path, spec, point, check_batch)
     else:
         _export_onnx(model, path, spec, point)
     logger.info(f"Exported {format} to {path}")

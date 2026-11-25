@@ -30,6 +30,15 @@ closed key set (``lr_multipliers`` only) into the builder's config. The default 
 seam (f6f15bedf); the positive arm gets an ``LRMultiplierAdamW`` holding the task's table; another key,
 or a table with an optimizer other than adamw, is refused by name.
 
+Plan 7806a290 step 5 (D-008) adds the two seams the language task's export needs, both defaulting to what every earlier task did:
+``ExportRule.sample`` (default ``None``: the tflite check feeds the random float batch it always fed) and the rank-keyed sentence of
+``exporting._input_spec`` (ranks 3 and 2 keep their words, rank 1 names ``(seq_len,)``). Each has its own test over EVERY task's row.
+
+Plan 7806a290 step 7.2 (D-050) adds ``TaskTrainer.resume_stream_exact`` (default ``False``), which says that a resume from a copy
+taken inside an epoch reads the batches the unkilled run reads next. Four shared sentences choose their wording from it (the help
+of ``resume_interrupted`` and of ``checkpoint_args.backup_every_steps``, the ``Resume:`` log line, the summary note); the last section
+compares each earlier task's four sentences with the text they had at 585af294b, character for character.
+
 Every seam is proved twice, because a default that is "almost" nothing moves a byte in a golden and a
 seam that does nothing passes every default test: the default arm is a real fit of ``vit/vit_pico`` on
 fake CIFAR-10 arrays whose compile call, callback list, ``config.json`` keys and summary keys are read
@@ -882,3 +891,345 @@ def test_a_task_naming_an_unknown_optimizer_option_stops_the_run_before_fit(worl
     with pytest.raises(ConfigError, match="layer_rates"):
         Unknown(config_for(run_dir, epochs=1)).run()
     assert not (run_dir / "training_log.csv").exists(), "refused before fit"
+
+
+# ---------------------------------------------------------------------
+# The two export seams of the language task (plan 7806a290 step 5, D-008)
+# ---------------------------------------------------------------------
+
+EXPORT_SHAPE = (4, 4, 3)
+
+
+def tflite_blob_of_a_dense_model(bias_shift: float = 0.0) -> tuple:
+    """``(model, blob, spec)`` of a dense model over ``EXPORT_SHAPE`` and its TFLite file (built-in operators)."""
+    import tensorflow as tf
+
+    keras.utils.set_random_seed(0)
+    model = keras.Sequential([keras.layers.Input(EXPORT_SHAPE), keras.layers.Flatten(), keras.layers.Dense(5)])
+    return model, tf.lite.TFLiteConverter.from_keras_model(model).convert(), tf.TensorSpec((None, *EXPORT_SHAPE), tf.float32)
+
+
+def what_the_check_runs_the_file_on(monkeypatch, *arguments, **keywords):
+    """The batches ``exporting._tflite_logits`` is given while ``_check_tflite_against_keras(*arguments, **keywords)`` runs."""
+    from train.api import exporting
+
+    real, seen = exporting._tflite_logits, []
+
+    def spy(blob, batch):
+        seen.append(batch.copy())
+        return real(blob, batch)
+
+    monkeypatch.setattr(exporting, "_tflite_logits", spy)
+    exporting._check_tflite_against_keras(*arguments, **keywords)
+    return seen
+
+
+def test_the_tflite_check_feeds_the_random_float_batch_it_always_fed_when_no_sample_is_given(monkeypatch, tmp_path):
+    import numpy as np
+
+    model, blob, spec = tflite_blob_of_a_dense_model()
+    seen = what_the_check_runs_the_file_on(monkeypatch, blob, model, spec, tmp_path / "a.tflite")
+    # written out, not read from the module: the literal of the check before the seam existed (a free batch is two rows)
+    assert len(seen) == 1 and np.array_equal(seen[0], np.random.default_rng(0).random((2, *EXPORT_SHAPE)).astype(np.float32))
+    import tensorflow as tf
+
+    fixed = tf.TensorSpec((3, *EXPORT_SHAPE), tf.float32)
+    seen = what_the_check_runs_the_file_on(monkeypatch, blob, model, fixed, tmp_path / "a.tflite", None, None)
+    assert np.array_equal(seen[0], np.random.default_rng(0).random((3, *EXPORT_SHAPE)).astype(np.float32))
+
+
+def test_a_sample_replaces_the_check_batch_and_is_asked_for_the_shape_of_the_batch(monkeypatch, tmp_path):
+    import numpy as np
+
+    model, blob, spec = tflite_blob_of_a_dense_model()
+    asked, marker = [], np.full((2, *EXPORT_SHAPE), 0.25, np.float32)
+
+    def sample(shape):
+        asked.append(shape)
+        return marker
+
+    seen = what_the_check_runs_the_file_on(monkeypatch, blob, model, spec, tmp_path / "a.tflite", None, sample)
+    assert asked == [(2, *EXPORT_SHAPE)] and len(seen) == 1 and np.array_equal(seen[0], marker)
+
+
+def test_an_export_rule_names_no_sample_unless_it_is_a_text_rule():
+    from train.api import predictor
+
+    assert predictor.ExportRule._field_defaults["sample"] is None, "the default is a no-op: today's random float batch"
+    with_sample = sorted(task for task, rule in predictor.EXPORT_RULES.items() if rule.sample is not None)
+    assert with_sample == ["language_model_pretraining", "text_classification"], "every earlier task's export check still feeds random floats"
+    assert sorted(predictor.EXPORT_RULES) == sorted(predictor.TASK_TABLES["RECORD_KEYS"])
+
+
+def test_export_hands_the_rules_sample_to_the_tflite_writer_bound_to_the_record_and_hands_nothing_for_a_rule_without_one(
+        monkeypatch, tmp_path):
+    import numpy as np
+
+    from train.api import exporting, predictor
+    from train.api.text_models import create_gpt2_lm
+    from train.api.text_tokenizer import tokenizer_spec
+
+    task = "language_model_pretraining"
+    model = create_gpt2_lm(variant="tiny", input_shape=(16,), vocab_size=101, embed_dim=32, depth=1, num_heads=2)
+    record = predictor.build_language_model_record(
+        model="gpt2_lm/tiny", family="gpt2_lm", variant="tiny", seq_len=16, tokenizer=tokenizer_spec("ascii95").record())
+    handed = []
+    monkeypatch.setattr(exporting, "_export_tflite", lambda *args: handed.append(args))
+    exporting.export(model=model, out=tmp_path / "a.tflite", format="tflite", input_shape=(16,), record=record)
+    sample = handed[0][4]
+    assert callable(sample) and np.array_equal(sample((2, 16)), predictor.EXPORT_RULES[task].sample(record, (2, 16)))
+    monkeypatch.setitem(predictor.EXPORT_RULES, task, predictor.EXPORT_RULES[task]._replace(sample=None))
+    handed.clear()
+    exporting.export(model=model, out=tmp_path / "b.tflite", format="tflite", input_shape=(16,), record=record)
+    assert handed[0][4] is None, "a rule that names no sample hands the writer none"
+
+
+#: ``input_shape`` is asked of a rule in the shape its own ``shape_of`` returns; a record that serves every row's ``shape_of``.
+SHAPE_RECORD = {"input_shape": [8, 8, 3], "input_size": [8, 8], "channels": 3, "lookback": 8, "seq_len": 8}
+#: The sentence of ``_input_spec`` before the rank seam existed: rank 3 named the image shape, any other rank the series shape.
+BEFORE_THE_SEAM = (
+    "Invalid value for 'input_shape': expected {wanted} of positive ints, got {given!r} (a height or width may be None only for a "
+    "model that itself takes any size)"
+)
+
+
+def test_every_earlier_tasks_input_spec_sentence_is_the_one_it_always_was_and_the_text_rank_names_its_own():
+    from train.api import exporting, predictor
+
+    ranks = {task: len(rule.shape_of(SHAPE_RECORD)) for task, rule in predictor.EXPORT_RULES.items()}
+    assert ranks == {
+        "image_classification": 3, "image_segmentation": 3, "image_denoising": 3, "time_series_forecasting": 2,
+        "depth_estimation": 3, "pretrain": 3, "language_model_pretraining": 1, "text_classification": 1,
+    }
+    for task, rank in ranks.items():
+        bad = (0,) * rank
+        with pytest.raises(ConfigError) as caught:
+            exporting._input_spec(None, bad, rank=rank)
+        if task not in ("language_model_pretraining", "text_classification"):
+            wanted = "(height, width, channels)" if rank == 3 else "(lookback, channels)"
+            assert str(caught.value) == BEFORE_THE_SEAM.format(wanted=wanted, given=bad), task
+        else:
+            assert str(caught.value) == BEFORE_THE_SEAM.format(wanted="(seq_len,)", given=bad)
+    spec = exporting._input_spec(None, (8,), rank=1)
+    assert tuple(spec.shape) == (None, 8) and spec.dtype.name == "float32"
+    with pytest.raises(ConfigError, match=r"expected \(seq_len,\) of positive ints"):
+        exporting._input_spec(None, (8, 8), rank=1)
+
+
+# ---------------------------------------------------------------------
+# Plan 7806a290 step 7.2 (D-050): TaskTrainer.resume_stream_exact, and the four sentences that read it
+# ---------------------------------------------------------------------
+
+EARLIER_TASKS = ("image_classification", "image_segmentation", "image_denoising", "pretrain", "time_series_forecasting",
+                 "depth_estimation")
+#: The words the four sentences of a task whose resumed stream is exact share.
+EXACT_PHRASE = "the batches the unkilled run reads next"
+#: Each sentence's clause about the batches of the killed epoch the copy had not taken, as it was at 585af294b (``OLD``) and as a
+#: task that sets the flag says it (``NEW``): the help of ``resume_interrupted`` (1), of ``backup_every_steps`` (2), the log line
+#: (3) and the summary note (4). The rest of each sentence is the shared text and is the same on both sides.
+OLD = {
+    1: "from a fresh pass of the data, so some examples of that epoch repeat and some are missed",
+    2: "from a fresh pass of the data (some examples of that epoch are seen twice and some not at all)",
+    3: "from a fresh pass of the data (some examples of it repeat and some are missed)",
+    4: "from a fresh pass of the data, so some of its examples were seen twice and some not at all",
+}
+NEW = {
+    1: "from the stream at the step that backup holds (the batches the unkilled run reads next), so no example of that epoch "
+       "repeats and none is missed",
+    2: "from the stream at the step that backup holds (the batches the unkilled run reads next: no example of that epoch is seen "
+       "twice and none is missed)",
+    3: "from the stream at the step the backup holds (the batches the unkilled run reads next: none of its examples repeats or "
+       "is missed)",
+    4: "from the stream at the step the backup holds (the batches the unkilled run reads next), so none of its examples was seen "
+       "twice or missed",
+}
+#: The rendered help line of ``checkpoint_args.backup_every_steps`` at 585af294b: one text for every task (the group is shared).
+BEFORE_BACKUP_EVERY_STEPS_LINE = (
+    "  checkpoint_args.backup_every_steps  (int or null)  also back the run up every this many batches INSIDE an epoch (an int >= 2 "
+    "and below the steps per epoch), so a killed epoch loses at most that many batches of weights; null backs up at each epoch end "
+    "only. A resume from such a backup continues the killed epoch on the weights of the last backup and runs only the batches of it "
+    "that backup had not taken, from a fresh pass of the data (some examples of that epoch are seen twice and some not at all), then "
+    "the remaining epochs in full; the optimizer's step count and the learning rate of every step are the unkilled run's. That "
+    "epoch's row holds the train metrics of its remaining batches only. Each backup writes the weights and optimizer state twice "
+    "(the previous copy is kept): src/train/README.md has the measured cost per save [default: None]"
+)
+#: sha256 of the rendered ``resume_interrupted`` line of each task at 585af294b (it differs per task: its epoch cost and its order).
+BEFORE_RESUME_LINE_SHA256 = {
+    "image_classification": "77c3adfe69c61edd4df41156d688b87594d8be79828bbcec50fd83434ecfb388",
+    "image_segmentation": "d3fc00fad9037082137a21a36885228fb36f8800bfe246490ae6b7bf7e6677df",
+    "image_denoising": "d3fc00fad9037082137a21a36885228fb36f8800bfe246490ae6b7bf7e6677df",
+    "pretrain": "ab0f9158b8e2bd2a8ed26e4d7aaee819e38bb9f6eaf1f72bbbf25f7326d6a8d1",
+    "time_series_forecasting": "65eec1749a11cbe55e2cbf1bcf85e10bda0494fdd19ec5dae526c4de5f2446e6",
+    "depth_estimation": "8b1b6e8869121b170bf2f442f433510f4e687c07b5cf8ae15e12f3a624d2fa23",
+    "language_model_pretraining": "fbb39c201c4ede0c53cdfccbfabad75f6eff279689267be1b5a05a7762e4ac9c",
+}
+#: The ``Resume:`` line of a resume from a copy taken after batch 4 of 10 of epoch 1 (``resume_line`` below), and the summary note
+#: of the killed epoch (``killed_epoch_note``), both at 585af294b.
+BEFORE_RESUME_LOG_LINE = (
+    "Resume: the backup was taken after batch 4 of 10 of epoch 1; that epoch runs its remaining 6 batches from a fresh pass of the "
+    "data (some examples of it repeat and some are missed) and ends; the optimizer's step count stays at 14"
+)
+BEFORE_KILLED_EPOCH_NOTE = (
+    "epoch 1 was killed after 4 of its 10 batches; the resume ran its remaining 6 from a fresh pass of the data, so some of its "
+    "examples were seen twice and some not at all, and the epoch's row (index 1) holds the train metrics (loss, accuracy, ...), "
+    "`lr` and `epoch_times` entry of those 6 batches only and the validation metrics of the whole validation set"
+)
+
+
+def task_row(name):
+    from train.api.tasks import BUILTIN_TASKS
+
+    return next(row for row in BUILTIN_TASKS if row.name == name)
+
+
+def trainer_class_of(row):
+    """The one ``TaskTrainer`` the module of the task defines."""
+    module = importlib.import_module(row.function.split(":")[0])
+    found = [value for value in vars(module).values()
+             if isinstance(value, type) and issubclass(value, TaskTrainer) and value.__module__ == module.__name__]
+    assert len(found) == 1, (row.name, found)
+    return found[0]
+
+
+def rendered(name, key):
+    """The line ``python -m train <task> help`` prints for ``key`` (the real renderer)."""
+    from train.api import cli
+
+    lines = [line for line in cli._field_help_lines(task_row(name).load_config_class()) if line.startswith(f"  {key}  (")]
+    assert len(lines) == 1, (name, key, lines)
+    return lines[0]
+
+
+def sha256_of(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+#: The tasks whose ``resume_stream`` continues the SAME stream at the settled step: the two text tasks.
+EXACT_TASKS = ("language_model_pretraining", "text_classification")
+
+
+def test_the_flag_is_false_by_default_and_the_two_text_tasks_are_the_tasks_that_set_it():
+    """A task whose ``resume_stream`` continues the SAME stream at the settled step is the one that sets it; the seam's second
+    user (the text classifier, plan 7806a290 step 10) is a row reviewed here, not a silent change."""
+    from train.api.tasks import BUILTIN_TASKS
+
+    assert TaskTrainer.resume_stream_exact is False
+    assert {row.name: trainer_class_of(row).resume_stream_exact for row in BUILTIN_TASKS} == {
+        **{name: False for name in EARLIER_TASKS}, **{name: True for name in EXACT_TASKS}}
+
+
+@pytest.mark.parametrize("name", EARLIER_TASKS)
+def test_the_two_helps_of_every_earlier_task_are_what_they_always_were(name):
+    assert sha256_of(rendered(name, "resume_interrupted")) == BEFORE_RESUME_LINE_SHA256[name], rendered(name, "resume_interrupted")
+    assert rendered(name, "checkpoint_args.backup_every_steps") == BEFORE_BACKUP_EVERY_STEPS_LINE
+
+
+def test_a_task_that_sets_the_flag_changes_the_clause_of_both_helps_and_nothing_else():
+    lm = "language_model_pretraining"
+    resume, backup = rendered(lm, "resume_interrupted"), rendered(lm, "checkpoint_args.backup_every_steps")
+    assert NEW[1] in resume and NEW[2] in backup, (resume, backup)
+    assert "fresh pass" not in resume + backup
+    assert sha256_of(resume.replace(NEW[1], OLD[1])) == BEFORE_RESUME_LINE_SHA256[lm]
+    assert backup.replace(NEW[2], OLD[2]) == BEFORE_BACKUP_EVERY_STEPS_LINE
+
+
+@pytest.mark.parametrize("name", [*EARLIER_TASKS, *EXACT_TASKS])
+def test_the_helps_of_every_task_follow_its_flag(name):
+    """The helps are text of the config class and the flag a class variable of the trainer, declared apart (as ``resume_order``
+    and the help's ``order`` are): this test holds them equal for every task, so a task cannot set one and forget the other."""
+    exact = trainer_class_of(task_row(name)).resume_stream_exact
+    for key in ("resume_interrupted", "checkpoint_args.backup_every_steps"):
+        if name == "depth_estimation" and key == "resume_interrupted":
+            continue  # a task that refuses the key says so instead of what a resume from a copy reads
+        text = rendered(name, key)
+        assert (EXACT_PHRASE in text, "from a fresh pass of the data" in text) == (exact, not exact), (name, key, text)
+
+
+def resume_line(monkeypatch, tmp_path, **keywords):
+    """The ``Resume:`` line the real callback logs when a fit resumes from a copy taken after batch 4 of 10 of epoch 1."""
+    from train.common import resume_state
+
+    from .test_backup_every_steps import KillAt, S, backed_up, fit, tiny
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    directory = tmp_path / "b"
+    assert fit(tiny(), [KillAt(1, 6), *backed_up(directory)[1]]) and S == 10
+    lines = []
+    monkeypatch.setattr(resume_state.logger, "info", lines.append)
+    second = resume_state.StepBackupAndRestore(directory, 4, S, **keywords)
+    assert not fit(tiny(), [second.finish, second])
+    return next(line for line in lines if line.startswith("Resume:"))
+
+
+def test_the_resume_line_is_what_it_always_was_and_the_flag_changes_its_clause_only(monkeypatch, tmp_path):
+    assert resume_line(monkeypatch, tmp_path / "default") == BEFORE_RESUME_LOG_LINE
+    line = resume_line(monkeypatch, tmp_path / "exact", exact_stream=True)
+    assert line == BEFORE_RESUME_LOG_LINE.replace(OLD[3], NEW[3]) and EXACT_PHRASE in line
+
+
+def killed_epoch_note(trainer_class, monkeypatch):
+    """The second note of the real ``TaskTrainer._notes`` (the task's own lines left out) after 4 of 10 batches of epoch 1."""
+    from types import SimpleNamespace
+
+    from train.api import resume_decisions
+
+    monkeypatch.setattr(trainer_class, "task_notes", lambda *args: [])
+    monkeypatch.setattr(resume_decisions, "training_complete_reason", lambda resume, config: None)
+    config = SimpleNamespace(debug_args=SimpleNamespace(smoke=False))
+    return object.__new__(trainer_class)._notes(
+        config, {}, 1.0, False, SimpleNamespace(steps_per_epoch=10), SimpleNamespace(start=1, batch=3))[1]
+
+
+@pytest.mark.parametrize("name", EARLIER_TASKS)
+def test_the_killed_epoch_note_of_every_earlier_task_is_what_it_always_was(name, monkeypatch):
+    assert killed_epoch_note(trainer_class_of(task_row(name)), monkeypatch) == BEFORE_KILLED_EPOCH_NOTE
+
+
+def test_the_killed_epoch_note_of_a_task_that_sets_the_flag_changes_its_clause_only(monkeypatch):
+    note = killed_epoch_note(trainer_class_of(task_row("language_model_pretraining")), monkeypatch)
+    assert note == BEFORE_KILLED_EPOCH_NOTE.replace(OLD[4], NEW[4]) and EXACT_PHRASE in note
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_the_callback_list_hands_the_trainers_flag_to_the_backup_callback(world, tmp_path, exact):
+    """``build_callbacks`` reads the flag off the trainer: a real run with ``backup_every_steps`` set holds the callback."""
+    from train.common.resume_state import StepBackupAndRestore
+
+    task_class = type("Flagged", (Scripted,), {"resume_stream_exact": exact})
+    task = task_class(config_for(tmp_path / "run", epochs=1, **{"checkpoint_args.backup_every_steps": 2}))
+    task.run()
+    backups = [callback for callback in task.seen_callbacks if isinstance(callback, StepBackupAndRestore)]
+    assert [backup.exact_stream for backup in backups] == [exact]
+
+
+def test_the_refusal_of_a_resume_over_other_files_is_what_it_always_was_and_data_that_carries_its_own_words_changes_those_only():
+    """Review pass 2, concern 4 (D-084): ``check_data_unchanged`` takes its three phrases and the scheme from the data when the data
+    carries them (the text tasks'); data that names none keeps the sentences of 3171cb109, character for character."""
+    from types import SimpleNamespace
+
+    from train.api import resume_decisions
+
+    config = SimpleNamespace(data=SimpleNamespace(fingerprint="listing"))
+    counts = {"n_train": 1, "n_select": 1, "n_test": 1}
+
+    def refusal(data, state):
+        with pytest.raises(ConfigError) as caught:
+            resume_decisions.check_data_unchanged(
+                Path("run"), config, None, data, SimpleNamespace(state={"data_counts": counts, "data_fingerprint_mode": "listing", **state}))
+        return str(caught.value)
+
+    files = SimpleNamespace(**counts, fingerprint="b" * 64)
+    closing = ". The earlier epochs trained on the earlier data, and a resume would standardize, split and label differently; restore the data as it was, or choose a new 'out'"
+    assert refusal(files, {"data_fingerprint": "a" * 64, "data_fingerprint_scheme": "listing-order"}) == (
+        "Cannot resume run: the data is not the data the run started with (data_fingerprint: aaaaaaaaaaaa -> bbbbbbbbbbbb (a file, its "
+        "class, its size, the order of the files or, with data.fingerprint=content, its bytes is not the one the run started with))" + closing)
+    assert refusal(files, {"data_fingerprint": "a" * 64}) == (
+        "Cannot resume run: the data is not the data the run started with (data_fingerprint_scheme: none -> listing-order (the run "
+        "recorded its files by a rule that could not tell a reordered CSV, so it cannot be shown that the split is the same))" + closing)
+    own = SimpleNamespace(**counts, fingerprint="b" * 64, fingerprint_scheme="s", fingerprint_words=("W1", "W2", "W3"))
+    assert resume_decisions.data_fingerprint_field(config, own)["data_fingerprint_scheme"] == "s"
+    assert refusal(own, {"data_fingerprint": "a" * 64, "data_fingerprint_scheme": "s"}) == (
+        "Cannot resume run: the data is not the data the run started with (data_fingerprint: aaaaaaaaaaaa -> bbbbbbbbbbbb (W2)). "
+        "The earlier epochs trained on the earlier data, and W3, or choose a new 'out'")
+    assert "(W1)" in refusal(own, {"data_fingerprint": "a" * 64})
+

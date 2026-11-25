@@ -1187,11 +1187,12 @@ def test_a_rank_two_shape_is_accepted_only_where_the_rule_says_rank_two(one):
         exporting._input_spec(one.predictor.model, (None, 1), rank=2)
 
 
-def test_the_image_tasks_keep_no_served_function_and_the_forecaster_and_pretrain_have_one():
-    # Depth (phase 4f) exports its raw model too; pretrain (phase 4h) serves its backbone's embeddings.
+def test_the_image_tasks_keep_no_served_function_and_the_forecaster_pretrain_and_the_two_text_tasks_have_one():
+    # Depth (phase 4f) exports its raw model too; pretrain (phase 4h) serves its backbone's embeddings; the two text tasks (phase 4i)
+    # serve their logits so that the tflite file is checked (a rule with no served function is written with no check, D-032).
     assert predictor.ExportRule._field_defaults["served"] is None, "the default is a no-op: the image tasks export the raw model"
     served = sorted(task for task, rule in predictor.EXPORT_RULES.items() if rule.served is not None)
-    assert served == sorted([TASK, "pretrain"])
+    assert served == sorted([TASK, "pretrain", "language_model_pretraining", "text_classification"])
     raw = [task for task in predictor.EXPORT_RULES if task not in served]
     assert sorted(raw) == ["depth_estimation", "image_classification", "image_denoising", "image_segmentation"]
     assert len(predictor.EXPORT_RULES[TASK].shape_of(one_record())) == 2

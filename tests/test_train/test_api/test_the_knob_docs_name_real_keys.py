@@ -14,7 +14,11 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
   describes two tasks, so a name must exist in at least one and a value after ``=`` must be valid
   in the first that has the field; ``data`` is the union of the seven data classes: step 8 of plan d483ffab added
   :class:`~train.api.tasks.image_denoising.ImageDenoisingConfig` and its ``DenoisingData``, step 10 of plan 46e5318f
-  :class:`~train.api.tasks.pretrain.PretrainConfig` and its ``PretrainData``); a backticked ``<name>_args`` alone must be a group; a ``<group>``
+  :class:`~train.api.tasks.pretrain.PretrainConfig` and its ``PretrainData``, step 7 of plan 7806a290
+  :class:`~train.api.tasks.language_model_pretraining.LanguageModelPretrainingConfig` and its ``TextData``, step 13 the
+  :class:`~train.api.tasks.text_classification.TextClassificationConfig` (``TextData`` again): the lists below name the
+  tasks, so a task the lists do not name has every ``data.<field>`` of its own refused as "not a field of a task config" and its
+  fenced commands are never parsed); a backticked ``<name>_args`` alone must be a group; a ``<group>``
   that is not a group is refused; digits count in a field name;
 * an ``=value`` suffix (``analysis_args.conformal_alpha=0.1``) must be JSON of the field's real
   type, must pass the group's own ``problems`` rule for that field (``checkpoint_args.backup_every_steps=1``
@@ -95,8 +99,11 @@ from train.api.tasks.depth_estimation import DepthEstimationConfig, DepthEstimat
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
 from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoisingTrainer
 from train.api.tasks.image_segmentation import ImageSegmentationConfig, ImageSegmentationTrainer
+from train.api.tasks.language_model_pretraining import LanguageModelPretrainingConfig, LanguageModelPretrainingTrainer
 from train.api.tasks.pretrain import PretrainConfig, PretrainTrainer
+from train.api.tasks.text_classification import TextClassificationConfig
 from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig, TimeSeriesForecastingTrainer
+from train.api.text_args import TextData
 from train.api.trainer import TaskTrainer
 from train.common.run_summary import skipped_analysis_status
 
@@ -115,6 +122,7 @@ CLASSES = {
     "PretrainTrainer": PretrainTrainer,
     "TimeSeriesForecastingTrainer": TimeSeriesForecastingTrainer,
     "DepthEstimationTrainer": DepthEstimationTrainer,
+    "LanguageModelPretrainingTrainer": LanguageModelPretrainingTrainer,
     "AnalysisArgs": AnalysisArgs,
     "LoggerArgs": LoggerArgs,
     "ImageClassificationConfig": ImageClassificationConfig,
@@ -123,6 +131,7 @@ CLASSES = {
     "PretrainConfig": PretrainConfig,
     "TimeSeriesForecastingConfig": TimeSeriesForecastingConfig,
     "DepthEstimationConfig": DepthEstimationConfig,
+    "LanguageModelPretrainingConfig": LanguageModelPretrainingConfig,
 }
 #: Module aliases the docs use for ``module.function``; a ``train.`` or ``dl_techniques.`` path is
 #: imported as written.
@@ -150,7 +159,7 @@ KEY = re.compile(
 GROUP_ONLY = re.compile(r"`((?:[a-z]+_)+args)`")
 SUMMARY = re.compile(r"`summary\.analyzer\.([A-Za-z0-9_]+)`")
 HOOK = re.compile(
-    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
+    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer|LanguageModelPretrainingTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
 )
 DOTTED = re.compile(r"`([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)(?:\([^`]*\))?`")
 PATH = re.compile(r"\b((?:src|tests)/[\w/.\-]+\.(?:py|md|json))\b")
@@ -173,13 +182,13 @@ ANALYZER_BLOCK_KEYS = set(skipped_analysis_status()) | {"failed_analyses"}
 #: writes must exist in at least one task, and a value it writes after ``=`` must be valid there.
 CONFIGS = (
     ImageClassificationConfig, ImageSegmentationConfig, ImageDenoisingConfig, PretrainConfig, TimeSeriesForecastingConfig,
-    DepthEstimationConfig,
+    DepthEstimationConfig, LanguageModelPretrainingConfig, TextClassificationConfig,
 )
 
 #: Every data class of those configs, in the order of :data:`CONFIGS`.
 DATA_CLASSES = (
     BuiltinImageData, FolderImageData, CsvImageData, BuiltinSegData, FolderSegData, CsvSegData, DenoisingData,
-    PretrainData, TimeSeriesData, DepthData,
+    PretrainData, TimeSeriesData, DepthData, TextData,
 )
 
 
@@ -462,6 +471,8 @@ TASK_CONFIGS = {
     "pretrain": PretrainConfig,
     "time_series_forecasting": TimeSeriesForecastingConfig,
     "depth_estimation": DepthEstimationConfig,
+    "language_model_pretraining": LanguageModelPretrainingConfig,
+    "text_classification": TextClassificationConfig,
 }
 
 
@@ -649,7 +660,7 @@ def _reference_problems(region: str) -> List[str]:
             continue
         if token.split(".")[0] in (
             "TaskTrainer", "ImageClassificationTrainer", "ImageSegmentationTrainer", "ImageDenoisingTrainer", "PretrainTrainer",
-            "TimeSeriesForecastingTrainer", "DepthEstimationTrainer",
+            "TimeSeriesForecastingTrainer", "DepthEstimationTrainer", "LanguageModelPretrainingTrainer",
         ):
             continue  # the hook rule below owns these, with or without parentheses
         if token.rsplit(".", 1)[1] in FILE_SUFFIXES:
@@ -663,7 +674,7 @@ def _reference_problems(region: str) -> List[str]:
             found.append(f"`{cls_name}.{name}` is not a method of {cls_name}")
     # With parentheses, the parameter names must be the real ones (without them only the name is).
     for cls_name, name, params in re.findall(
-        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
+        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer|LanguageModelPretrainingTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
     ):
         real = _hook_params(CLASSES[cls_name], name)
         shown = [p.strip() for p in params.split(",") if p.strip()]

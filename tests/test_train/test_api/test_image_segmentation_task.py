@@ -475,7 +475,7 @@ def test_the_segmentation_families_train_segmentation_only_and_the_classifiers_d
                 if m.startswith(("convunext", "accunet", "resnet_seg", "convnext_seg"))]
     assert {t.name for t in registry.list_tasks()} == {
         "image_classification", "image_segmentation", "image_denoising", "pretrain", "time_series_forecasting",
-        "depth_estimation",
+        "depth_estimation", "language_model_pretraining", "text_classification",
     }
 
 

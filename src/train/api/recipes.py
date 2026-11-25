@@ -11,11 +11,15 @@ legacy line it was read from.
 Interface contract
 ------------------
 ``register_builtin_models()``
-    Register the eight classification families, the four segmentation ones
-    (:func:`train.api.segmentation_models.builtin_segmentation_models`) and the five denoising ones
-    (:func:`train.api.denoising_models.builtin_denoising_models`) into
+    Register the eight classification families and the rows of every other task's builder
+    (:func:`train.api.segmentation_models.builtin_segmentation_models`,
+    :func:`train.api.denoising_models.builtin_denoising_models`,
+    :func:`train.api.pretrain_models.builtin_pretrain_models`,
+    :func:`train.api.forecast_models.builtin_forecast_models`,
+    :func:`train.api.depth_models.builtin_depth_models` and
+    :func:`train.api.text_models.builtin_text_models`) into
     :data:`train.api.registry.MODELS`. Idempotent: a family already registered is
-    left alone. Imports no model code.
+    left alone. Imports no model code. The count of families is ``len(MODELS)``, never written here.
 
 ``resolve_<family>_args(context, optim_args, model_args)``
     The ``ModelSpec.resolve_model_args`` of each family.
@@ -1051,10 +1055,11 @@ def register_builtin_models() -> None:
     from .forecast_models import builtin_forecast_models
     from .pretrain_models import builtin_pretrain_models
     from .segmentation_models import builtin_segmentation_models
+    from .text_models import builtin_text_models
 
     for spec in (
         *builtin_models(), *builtin_segmentation_models(), *builtin_denoising_models(), *builtin_pretrain_models(),
-        *builtin_forecast_models(), *builtin_depth_models(),
+        *builtin_forecast_models(), *builtin_depth_models(), *builtin_text_models(),
     ):
         if spec.family not in registry.MODELS:
             registry.register_model(spec)

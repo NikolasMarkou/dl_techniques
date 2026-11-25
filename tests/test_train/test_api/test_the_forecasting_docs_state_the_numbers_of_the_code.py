@@ -64,10 +64,14 @@ def test_the_family_count_and_its_split_over_the_tasks_are_the_registrys(world):
 
 
 def test_the_number_of_tasks_is_the_registrys_in_both_documents(world):
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
     sentence = f"It has {words[len(registry.TASKS)]} tasks"
     assert FORECASTING in registry.TASKS
     assert sentence in README.read_text() and sentence in AGENTS.read_text()
+    # two more sentences count the tasks: the file form of the data group is every task's, and every task writes a record
+    count = words[len(registry.TASKS)]
+    assert f"holds for all {count} tasks" in " ".join(README.read_text().split())
+    assert f"All {count} tasks write a record" in " ".join(AGENTS.read_text().split())
 
 
 def test_every_other_n_tasks_phrase_counts_the_tasks_of_the_registry_but_one(world):
@@ -75,8 +79,8 @@ def test_every_other_n_tasks_phrase_counts_the_tasks_of_the_registry_but_one(wor
 
     The denoising section kept "the other three tasks" after the pretrain and forecasting tasks were added; no test read it.
     """
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
-    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven) tasks?\b")
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight) tasks?\b")
     found = pattern.findall(README.read_text()) + pattern.findall(AGENTS.read_text())
     assert len(found) >= 3, "the control: the README names the other tasks in the denoising, pretrain and forecasting sections"
     assert set(found) == {words[len(registry.TASKS) - 1]}, found
@@ -242,6 +246,152 @@ def test_the_readme_gate_section_names_the_code_head_it_ran_on_and_says_the_firs
     assert "the first gate, run on HEAD `1904f07a8`" in gate and "is superseded and every number below replaces its numbers" in gate
     assert "PENDING" not in text and "NOT YET MEASURED" not in text
     assert gate.count("| G1 |") == 1 and gate.count("| G2 |") == 1 and gate.count("| G3 |") == 1 and gate.count("| G4 |") == 1
+
+
+def test_the_language_section_states_the_numbers_of_the_code():
+    """Plan 7806a290 step 7: the variants, the recipe, the vocabularies, the id limit and the pinned files of the language section are the code's."""
+    import inspect
+
+    from dl_techniques.models.language.gpt2.gpt2 import GPT2
+    from train.api import text_args, text_models, text_predictor, text_tokenizer as tt
+    from train.api.exporting import TFLITE_CHECK_RTOL
+    from train.api.trainer import SMOKE_MAX_SAMPLES
+
+    text = " ".join(README.read_text().split())
+    table = GPT2.MODEL_VARIANTS
+    tiny, bigger = table["tiny"], sorted((name for name in table if name != "tiny"), key=lambda name: table[name]["embed_dim"])
+    rows = [f"`{name}` ({table[name]['embed_dim']:,}, {table[name]['depth']}, {table[name]['num_heads']})" for name in bigger]
+    assert len({table[name]["max_seq_len"] for name in bigger}) == 1, "the README says the last four share one position table"
+    assert (f"`tiny` ({tiny['embed_dim']} wide, {tiny['depth']} blocks, {tiny['num_heads']} heads, a position table of {tiny['max_seq_len']} rows), "
+            f"{', '.join(rows[:-1])} and {rows[-1]}, the last four with {table[bigger[0]]['max_seq_len']:,} rows") in text
+    recipe, optim = text_models.LM_RECIPE, text_models.LM_RECIPE["optim_args"]
+    assert (optim["optimizer"], optim["decay_over"]) == ("adamw", "total")
+    assert (f"AdamW at {optim['lr']:.0e}".replace("e-0", "e-") + f", weight decay {optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epoch, "
+            f"cosine decay over the whole run, a global gradient clip of {optim['global_clipnorm']:.1f}, batch {recipe['batch_size']}, "
+            f"{recipe['epochs']} epochs, patience {recipe['checkpoint_args']['early_stopping_patience']}.") in text
+    ascii95, gpt2 = tt.tokenizer_spec(tt.ASCII95), tt.tokenizer_spec(tt.GPT2)
+    assert (gpt2.cls_id, gpt2.sep_id, gpt2.pad_id, gpt2.mask_id) == tuple(range(gpt2.n_vocab, gpt2.n_vocab + 4))
+    assert f"a character tokenizer: {ascii95.vocab_size} ids, no file" in text
+    assert (f"{gpt2.n_vocab:,} ids, the end-of-text id {gpt2.eot_id:,} among them, then `cls`, `sep`, `pad` and `mask` at {gpt2.cls_id:,} to "
+            f"{gpt2.mask_id:,}, so `vocab_size` is {gpt2.vocab_size:,}") in text
+    assert f"the library's default of {inspect.signature(GPT2.__init__).parameters['vocab_size'].default:,}" in text
+    assert f"exact below 2^24 = {text_predictor.FLOAT_ID_LIMIT:,}" in text and text_predictor.FLOAT_ID_LIMIT == 2 ** 24
+    assert text_predictor.TOP_K == 5 and "the five most likely ids" in text
+    assert f"export check and its tests allow {TFLITE_CHECK_RTOL:.0e}".replace("e-0", "e-") in text
+    assert "64 float32 steps at those 183 batches" in text and forecast_run.tie_band(183) == 64
+    assert f"synthetic: {text_args.SYNTHETIC_TRAIN_DOCUMENTS} train and {text_args.SYNTHETIC_TEST_DOCUMENTS} test when null" in text
+    assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in text and f"`data.max_samples` {SMOKE_MAX_SAMPLES} when it is null" in text
+    assert all(name in text for name, _ in tt.GPT2_FILES) and tt.DEFAULT_TOKENIZER_DIR in text
+    # review pass 1, N4: tiktoken's loader deletes a cache file of another hash and the pinned directory is writable (D-015)
+    assert "Do not point `TIKTOKEN_CACHE_DIR` at the pinned directory" in text and "or set `TIKTOKEN_CACHE_DIR` to the pinned directory" not in text
+    # the stream bullet says what the four shared sentences say for this task (D-050; D-049 named the defect they were): the clause it
+    # quotes is the code's, so a change of the wording moves the document with it, and the other tasks' sentences still say a fresh pass
+    from train.api.args import CheckpointArgs
+    from train.api.config import BACKUP_HELP, BACKUP_HELP_EXACT
+    from train.api.tasks.language_model_pretraining import LanguageModelPretrainingTrainer
+
+    clause = "from the stream at the step that backup holds (the batches the unkilled run reads next)"
+    assert LanguageModelPretrainingTrainer.resume_stream_exact is True and "`TaskTrainer.resume_stream_exact`" in text
+    assert clause in text and clause in BACKUP_HELP_EXACT and "open defect" not in text and "wrong for this task" not in text
+    assert "so no example repeats and none is missed" in text and '"from a fresh pass of the data"' in text
+    assert all("from a fresh pass of the data" in sentence for sentence in (
+        BACKUP_HELP, {f.name: f for f in dataclasses.fields(CheckpointArgs)}["backup_every_steps"].metadata["help"]))
+
+
+def test_the_agents_counts_about_the_tasks_their_hooks_and_the_language_record_are_the_codes(world):
+    """Plan 7806a290 step 7: five sentences that counted something no test read (a plant of each was green before this test)."""
+    import importlib
+    import inspect
+
+    from train.api.trainer import TaskTrainer
+
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    agents, readme = " ".join(AGENTS.read_text().split()), " ".join(README.read_text().split())
+    trainers = []
+    for spec in BUILTIN_TASKS:
+        module = importlib.import_module(spec.config_class.partition(":")[0])
+        trainers.append(next(v for v in vars(module).values() if inspect.isclass(v) and issubclass(v, TaskTrainer) and v.__module__ == module.__name__))
+    users = [trainer for trainer in trainers if {"fit_kwargs", "resume_stream"} <= set(vars(trainer))]
+    assert f"Both hooks have {words[len(users)]} users today" in agents
+    staged = [path for path in (ROOT / "tests/test_train/test_api").glob("test_*_task.py") if "def test_the_task_does_not_name_a_stage" in path.read_text()]
+    assert f"pinned for {words[len(staged)]} tasks only" in agents
+    assert f"`ExportRule({', '.join(predictor.ExportRule._fields)})`" in agents
+    ordinal = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")[list(predictor.RECORD_KEYS).index("language_model_pretraining")]
+    start = agents.index(f"a language-model record (the {ordinal} kind")
+    keys = [key for key in predictor.RECORD_KEYS["language_model_pretraining"] if key not in ("schema_version", "task", "model", "family", "variant")]
+    assert all(f"`{key}`" in agents[start:start + 700] for key in keys) and f"the {ordinal} record kind" in readme
+    exact = [trainer for trainer in trainers if trainer.resume_stream_exact]
+    sets = f"{words[len(exact)]} task sets it today" if len(exact) == 1 else f"{words[len(exact)]} tasks set it today"
+    assert "`TaskTrainer.resume_stream_exact`" in agents and sets in agents
+    compared = predictor.DATA_KEYS["language_model_pretraining"]
+    resume = "a resume compares " + ", ".join(f"`{key}`" for key in compared[:-1]) + f" and `{compared[-1]}`"
+    assert resume in agents[start:start + 900] and resume in readme, "the keys a resume compares"
+
+
+def test_the_eighth_record_kind_is_described_as_the_code_defines_it():
+    """Plan 7806a290 step 12: the text-classification record's ordinal, own keys and values, and resume keys (a wrong word stayed green)."""
+    task, language = "text_classification", "language_model_pretraining"
+    kind = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")[list(predictor.RECORD_KEYS).index(task)]
+    agents = " ".join(AGENTS.read_text().split())
+    sentence = agents[agents.index(f"a text-classification record (the {kind} kind"):][:520]
+    own = [key for key in predictor.RECORD_KEYS[task] if key not in predictor.RECORD_KEYS[language] or key == "output"]
+    assert own and all(f"`{key}`" in sentence for key in own), own
+    assert f"`{predictor.TEXT_LAYOUTS[0]}`" in sentence and f"`{predictor.TEXT_CLASSIFICATION_OUTPUTS[0]}`" in sentence
+    assert predictor.DATA_KEYS[task] == (*predictor.DATA_KEYS[language], "class_names")
+    shared = ("zero", "one", "two", "three", "four", "five")[len(predictor.DATA_KEYS[language])]
+    assert f"a resume compares the same {shared} and `class_names`" in sentence
+    assert f"`{task}` the {kind} (the same" in agents, "the tables bullet names the kind"
+    readme = " ".join(README.read_text().split())  # step 13: the README says it too
+    sentence = readme[readme.index(f"the {kind} record kind"):][:700]
+    assert all(f"`{key}`" in sentence for key in own) and f"`{predictor.TEXT_LAYOUTS[0]}`" in sentence
+    compared = predictor.DATA_KEYS[task]
+    assert "a resume compares " + ", ".join(f"`{key}`" for key in compared[:-1]) + f" and `{compared[-1]}`" in sentence
+
+
+def test_the_classification_section_and_the_init_pairs_state_the_numbers_of_the_code(world):
+    """Plan 7806a290 step 13: the BERT variants, the classifier recipe, the constants the two text sections share and the count of declared pairs."""
+    import inspect
+
+    from dl_techniques.models.language.bert.model import BERT
+    from train.api import text_args, text_models
+    from train.api.trainer import SMOKE_MAX_SAMPLES
+    from train.common import text_data, text_run
+
+    text = " ".join(README.read_text().split())
+    assert f"plus {({3: 'three'})[int(text_run.BAR_STANDARD_ERRORS)]} binomial standard errors of that share on those rows" in text, "the bar's margin"
+    assert "max(1, max_samples // 4)" in inspect.getsource(text_data.corpus_documents) and "else N and max(1, N // 4)" in text, "the test split's size"
+    table, positions = BERT.MODEL_VARIANTS, inspect.signature(BERT.__init__).parameters["max_position_embeddings"].default
+    order = sorted(table, key=lambda name: table[name]["hidden_size"])
+    rows = [f"`{name}` ({table[name]['hidden_size']:,}, {table[name]['num_layers']}, {table[name]['num_heads']})" for name in order[1:]]
+    assert order[0] == "tiny" and all("max_position_embeddings" not in variant for variant in table.values()), "every variant has the library's table"
+    tiny = table["tiny"]
+    assert (f"`tiny` ({tiny['hidden_size']} wide, {tiny['num_layers']} blocks, {tiny['num_heads']} heads), {', '.join(rows[:-1])} and {rows[-1]}, "
+            f"each with a position table of {positions} rows") in text
+    recipe, optim = text_models.CLASSIFIER_RECIPE, text_models.CLASSIFIER_RECIPE["optim_args"]
+    assert (f"AdamW at {optim['lr']:.0e}".replace("e-0", "e-") + f", weight decay {optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epoch, "
+            f"cosine decay over the whole run, a global gradient clip of {optim['global_clipnorm']:.1f}, batch {recipe['batch_size']}, "
+            f"{recipe['epochs']} epochs, patience {recipe['checkpoint_args']['early_stopping_patience']}.") in text
+    keys = text[text.index("<!-- keys-of: text_classification -->"):][:2500]  # the section's own table and its next paragraphs
+    assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in keys and text_args.CLASS_NAMES == ("neg", "pos")
+    pairs = sum(len(spec.transfer.sources) for spec in registry.MODELS.values() if spec.transfer)
+    words = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    assert f"are the {words[pairs]} declared cross-task pairs" in text, "the init section counts the pairs the families declare"
+    # review pass 2, concern 6: the recipe sentence says what the notice says the bar is, the guesser percentages are the exact binomial's
+    # (IMDB: 1,256 of 2,498 selection rows, the bar and the bare share) in the README and in text_run, and both keys rows name the fallback
+    from scipy.stats import binom
+
+    rows, share = 2498, 1256 / 2498
+
+    def guesser(bar):   # the share of 8-epoch runs of a label-independent guesser whose best epoch clears the float32 compare
+        needed = next(count for count in range(rows + 1) if text_run.strictly_above(count / rows, bar))
+        return 100 * (1 - binom.cdf(needed - 1, rows, 0.5) ** 8)
+
+    said = f"clears in {guesser(share + text_run.accuracy_margin(share, rows)):.2f} percent of 8-epoch runs (the bare share let {guesser(share):.1f} percent through)"
+    assert text_models._CLASSIFIER_BAR in text and "the bar is a floor" not in text and said in text
+    assert all(f"{guesser(share):.1f} percent" in source and "98.3" not in source for source in (inspect.getdoc(text_run), inspect.getsource(text_run.accuracy_margin)))
+    keys_rows = [line for line in README.read_text().splitlines() if line.startswith("| `data.tokenizer_dir` |")]
+    assert len(keys_rows) == 2 and all("or the pinned copy when that directory is gone" in line for line in keys_rows)
+    assert "a rounding band and not a noise margin" in text, "under init the loaded weights' term is the shared one, named for what it is"
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

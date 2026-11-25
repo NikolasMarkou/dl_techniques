@@ -152,7 +152,7 @@ trainer's own `train(config)`; the shipped design is a `TaskTrainer` sequence wi
 | `src/train/api/init_from.py` | `init`: start a run from an earlier run's weights (Phase 4g). |
 | `src/train/api/convert.py` | `python -m train convert`: ADE20K and COCO as index masks and listings. |
 
-Config fields every task has (from `python -m train <task> help` of all six; a task adds its own, such as `loss_args`
+Config fields every task has (from `python -m train <task> help` of all eight; a task adds its own, such as `loss_args`
 or `jit_compile`):
 
 | Field | Type | Default |
@@ -220,7 +220,8 @@ whose body takes an argparse `Namespace` (e.g. `cliffordnet.train_model(args)`),
 
 **Phase 4: other tasks, one pattern at a time** in the order approved in Phase 0. Exemplars per `src/train/AGENTS.md`.
 (As shipped, with no Phase 0 inventory, Section 9: `image_segmentation`, `image_denoising`, `pretrain`,
-`time_series_forecasting`, `depth_estimation`, in that order; no detection or language task.)
+`time_series_forecasting`, `depth_estimation`, `language_model_pretraining` and `text_classification` (Phase 4i), in that order; no
+detection task.)
 
 **Phase 4g: start from trained weights. Code done, GPU gate run** (branch `train-api/phase-4g`; the gate's numbers are
 in `src/train/README.md`, "Measured: the `init` gate": every claim held except the overlap arm's planned exit 0; it
@@ -251,6 +252,18 @@ library classifiers, which a pretrain run of the matching family seeds through `
 BEiT relative position bias is resampled by unilm's rule, checked against unilm's own code run verbatim, and the Energy
 Transformer table, which no reference resizes, is refused at another grid. Pretrain is an `init` target too, from its own family
 only. What changed against the 4g design: `research/roadmap/20261117_train_api_init_from.md`, Section 0.
+
+**Phase 4i: the language tasks. Both tasks' code done, GPU gate run** (branch `train-api/phase-4i`, plan 7806a290; two tasks in one plan, the first
+finished, and kept as the local branch `train-api/phase-4i-lm`, before the second started). `language_model_pretraining` is built and tested on a CPU:
+the seventh task, one family `gpt2_lm` (a functional model over the library GPT-2, trained by the stock `fit`), a text stream that is a
+function of `(seed, step)` so that a resume continues it, a bar strictly below `min(unigram, epoch zero)`, the seventh record kind with
+`predict` (per-document `mean_nll` and the next tokens) and `export` (float32 token ids), and `init` from its own family. Its tokenizer is
+pinned outside the repository because tiktoken's own cache is in `/tmp`. `text_classification` is built and tested on a CPU too: the eighth task,
+two families, `bert` and `gpt2` (functional classifiers over the library encoder and decoder with the sentiment head, the padding mask read from the
+pad id), the language task's stream, split and tokenizer, a bar strictly above the majority share of the selection split plus three binomial standard errors of it (so
+the gate reports the accuracies beside it), the eighth record kind with `predict` (`labels` and `scores`) and `export`, and `init` from its own family and,
+for `gpt2`, from a `gpt2_lm` run (`bert` has no cross-task source). The GPU gate has run on the final code, after a first night whose findings (holes in
+tests, a wrongly defined claim) were fixed; its numbers are in `src/train/README.md`, "Measured: the language gate". User-facing rules: `src/train/README.md`, the two task sections.
 
 **Phase 5: `load_model`, `export`, `list_models`, `list_tasks`. Done** (plan 98c9aac5, branch `train-api/phase-5-6`):
 built inside Phases 1 to 4h (`api/predictor.py`, `api/exporting.py`, `api/registry.py`, `api/cli.py`), on `train.api`

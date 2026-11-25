@@ -32,7 +32,8 @@ Interface contract
     match is refused while planning; ``grow``: a regex matched at the start of a path, naming a
     depth-indexed block a deeper variant may add; ``pinned``: factory arguments the target takes
     from the source (a cross-task source pins those its record holds); ``fixed``: geometry keys the
-    family cannot change (``channels``, ``lookback``, ``horizon``, ``input_size``, ``patch_size``);
+    family cannot change (``channels``, ``lookback``, ``horizon``, ``input_size``, ``patch_size``, and for the language
+    model ``vocab_size`` and ``tokenizer``, a tokenizer's digest; each needs a name in :data:`GEOMETRY_NAMES`);
     ``sources``: ``(task, family)`` of another task to the
     :class:`~train.api.registry.CrossTask` that maps its paths; ``positional``: regexes, each
     matching whole top-level path components, inside which weights whose paths differ pair by
@@ -449,7 +450,8 @@ SOURCE_FILES = ("task.json", "config.json", "best_model.keras")
 
 #: How a refusal names a geometry key of the records.
 GEOMETRY_NAMES = {"channels": "the input channels", "lookback": "data.lookback", "horizon": "data.horizon",
-                  "input_size": "transform_args.image_size", "patch_size": "data.patch_size"}
+                  "input_size": "transform_args.image_size", "patch_size": "data.patch_size",
+                  "vocab_size": "the model's vocabulary size", "tokenizer": "the tokenizer (data.tokenizer, as its digest)"}
 
 #: How a refusal describes an input scaling, by the value :func:`_scaling` gives it.
 SCALING_WORDS = {"standardize": "standardizes its input", "unit": "takes its input in [0, 1]",
@@ -655,10 +657,21 @@ HEAD_KEYS: Dict[str, Tuple[str, ...]] = {
     # the same path would keep a head whose outputs mean other codes; do NOT drop the statistics: ET's decoder emits
     # pixels in them, and a run at another dataset's statistics passes the geometry check.
     "pretrain": ("tokenizer", "mean", "std"),
+    # DECISION plan-2026-11-24T092348-7806a290/D-041
+    # `head_differs` indexes this table by task, so the language task needs its row, but the key never fires: the tokenizer is a
+    # `fixed` key of the family (a source of another tokenizer is refused before the claim), so a same-task head always agrees.
+    "language_model_pretraining": ("tokenizer",),
+    # DECISION plan-2026-11-24T092348-7806a290/D-062
+    # A text classifier's head means its CLASS NAMES (the same two outputs under other names, or in another order, are another head), so a
+    # same-task source whose record names others has its head reset. The tokenizer is no key here: it is `fixed` by both families, so a
+    # source of another one is refused before the claim. Do NOT add "tokenizer" "for symmetry" (it never fires) and do NOT drop the row:
+    # `head_differs` indexes this table for every same-task transfer, which a classifier run now is (a source of its own family).
+    "text_classification": ("class_names",),
 }
 
-#: The source record's keys the ``init`` block keeps as its geometry (those its task's record has).
-GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon", "patch_size")
+#: The source record's keys the ``init`` block keeps as its geometry (those its task's record has). The language record's
+#: ``tokenizer`` is not one: the pretrain record has a key of that name too (a file's sha256), and its block must not change (D-041).
+GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon", "patch_size", "seq_len", "vocab_size")
 
 
 def head_differs(task: str, source_record: Mapping[str, Any], target_record: Mapping[str, Any]) -> bool:

@@ -208,6 +208,7 @@ def build_callbacks(
             str(run_dir / BACKUP_DIR),
             save_every_steps=checkpoint_cfg.backup_every_steps,
             steps_per_epoch=data.steps_per_epoch,
+            exact_stream=trainer.resume_stream_exact,
         )
         callbacks.append(backup)
         # DECISION plan-2026-10-31T180033-2faf890a/D-063
