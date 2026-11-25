@@ -26,7 +26,9 @@ Tests write only under ``tmp_path``.
 """
 
 import json
+import os
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
 import keras
@@ -40,12 +42,12 @@ from train.api.errors import ConfigError
 from train.api.registry import CrossTask
 from train.api.tasks.language_model_pretraining import train_language_model_pretraining
 from train.api.tasks.text_classification import train_text_classification
-from train.api.text_tokenizer import tokenizer_spec
+from train.api.text_tokenizer import DEFAULT_TOKENIZER_DIR, tokenizer_spec
 from train.common import text_data as td
 from train.common import text_run
 
 from ._text_world import (
-    ASCII_VOCAB, CLASSIFIER_SPLIT, SEQ_LEN, TINY_MODEL_ARGS, classifier_prepared, classifier_request, request,
+    ASCII_VOCAB, CLASSIFIER_SPLIT, SEQ_LEN, TINY_MODEL_ARGS, classifier_prepared, classifier_request, prepared, request,
     world)  # noqa: F401  (``world``: fixture)
 
 TASK, LM_TASK, LM_FAMILY, FAMILY = "text_classification", "language_model_pretraining", "gpt2_lm", "gpt2"
@@ -421,3 +423,102 @@ def test_the_overlap_of_a_language_source_with_the_imdb_selection_is_counted_as_
     assert predictor._split_problems(other) == []
     same = trainer.init_overlap(source, resolved, data_of(42))
     assert (same["relation"], same["n_select_overlap"], same["n_test_overlap"]) == ("same_split", 0, 0)
+
+
+# ---------------------------------------------------------------------
+# The split of a language source on the same reviews (review pass 2, concern 1)
+# ---------------------------------------------------------------------
+
+#: What both runs ask of ``imdb_reviews``: equal keys (dataset, seed, split, cap), so the split is the same when the documents are.
+IMDB = {"data.dataset": "imdb_reviews", "data.max_samples": 300, "data.validation_split": CLASSIFIER_SPLIT}
+REAL_IMDB = pytest.mark.skipif(
+    not ((Path(os.environ.get("TFDS_DATA_DIR", "")) / "imdb_reviews").is_dir()
+         and all((Path(DEFAULT_TOKENIZER_DIR) / name).is_file() for name, _ in tokenizer_spec("gpt2").files)),
+    reason="imdb_reviews or the pinned tokenizer directory is not on this machine")
+
+
+def stand_in_reviews(split, data_dir, limit):
+    """What TFDS reads, in read order: the labelled bank's texts as the reviews both tasks share."""
+    texts, labels = td.synthetic_documents(td.BANK_SEED, 400, td.CLASSIFICATION, split)
+    return ((text.encode(), int(label)) for text, label in list(zip(texts, labels))[:limit])
+
+
+def another_review(split, data_dir, limit):
+    """The same reviews with one character of the first train review changed: every count stays."""
+    rows = list(stand_in_reviews(split, data_dir, limit))
+    return iter([(rows[0][0][:-2] + b"x.", rows[0][1]), *rows[1:]] if split == "train" else rows)
+
+
+def use_reviews(patch, root, reader=stand_in_reviews):
+    """Put ``reader`` where TFDS's reader is and a TFDS directory that passes the check made before the claim."""
+    where = root / "tfds" / "imdb_reviews" / "plain_text" / "1.0.0"
+    where.mkdir(parents=True, exist_ok=True)
+    (where / "dataset_info.json").write_text("{}")
+    patch.setenv("TFDS_DATA_DIR", str(root / "tfds"))
+    patch.setattr(td, "_tfds_imdb", reader)
+
+
+@pytest.fixture(scope="module")
+def imdb_pair(world, tmp_path_factory):  # noqa: F811
+    """A tiny gpt2_lm run, and a tiny gpt2 run seeded from it, both reading imdb_reviews through the stand-in reader with equal keys."""
+    root = tmp_path_factory.mktemp("imdb_pair")
+    with pytest.MonkeyPatch.context() as patch:
+        use_reviews(patch, root)
+        keras.backend.clear_session()
+        train_language_model_pretraining(**request(root / "lm", epochs=1, **IMDB))
+        out, summary = classifier_run(root, root / "lm", epochs=1, optim_args=STILL, **IMDB)
+    return SimpleNamespace(root=root, lm=root / "lm", out=out, summary=summary)
+
+
+def test_a_gpt2_run_seeded_from_a_language_run_on_the_same_reviews_and_keys_has_the_same_split(imdb_pair):
+    # the language run digests documents, the classifier documents and labels, so their sidecars never agree: the split must not read that
+    block = imdb_pair.summary["init"]
+    lm, cls = (json.loads((run / "checkpoints" / "fit_state.json").read_text())["data_fingerprint"] for run in (imdb_pair.lm, imdb_pair.out))
+    assert len(lm) == len(cls) == 64 and lm != cls, "the control: the two sidecars hold different digests of the same corpus"
+    assert (block["relation"], block["split"]["relation"], block["split"]["unit"]) == ("cross_task", "same_split", "documents"), block["split"]
+    assert imdb_pair.summary["overlap_unknown"] is False and imdb_pair.summary["selection_biased"] is False
+
+
+#: ``case: (the reader, this run's keys that differ, whether the source's sidecar loses its digest, the relation, a phrase of the reason)``.
+REVIEWS = {
+    "the same reviews": (stand_in_reviews, {}, False, "same_split", "equal the source's"),
+    "one character of a review changed": (another_review, {}, False, "unknown", "another data_fingerprint"),
+    "a sidecar with no digest": (stand_in_reviews, {}, True, "unknown", "no data_fingerprint"),
+    "a lower cap than the source's": (stand_in_reviews, {"data.max_samples": 200}, False, "unknown", "data.max_samples"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REVIEWS))
+def test_the_split_of_a_language_source_is_read_from_its_own_sidecar_and_a_missing_or_other_digest_is_unknown(case, imdb_pair, tmp_path, monkeypatch):
+    reader, changes, strip, relation, reason = REVIEWS[case]
+    use_reviews(monkeypatch, tmp_path, reader)
+    trainer, resolved, context = classifier_prepared(tmp_path / "run", **{**IMDB, **changes})
+    data = trainer.build_data(resolved, context)
+    path = imdb_pair.lm
+    if strip:       # a source made before the digest existed, or whose sidecar lost it: a copy of the sidecar without the key
+        path = tmp_path / "stripped"
+        (path / "checkpoints").mkdir(parents=True)
+        state = json.loads((imdb_pair.lm / "checkpoints" / "fit_state.json").read_text())
+        state.pop("data_fingerprint")
+        (path / "checkpoints" / "fit_state.json").write_text(json.dumps(state))
+    source = SimpleNamespace(config=json.loads((imdb_pair.lm / "config.json").read_text()),
+                             record=json.loads((imdb_pair.lm / "task.json").read_text()), path=path)
+    split = trainer.init_overlap(source, resolved, data)
+    assert predictor._split_problems(split) == [] and split["relation"] == relation and reason in split["reason"], split
+    assert init_from.bias_of({"split": split})["overlap_unknown"] == (relation == "unknown")
+
+
+@REAL_IMDB
+def test_on_the_real_reviews_the_two_tasks_digest_the_same_documents_and_their_split_is_the_same(world, tmp_path):  # noqa: F811
+    # the real corpus through each task's own data code (a prefix of it: the same code as the whole, whose digests are the gate's claims):
+    # the two digests of the corpus differ with labels and agree without them
+    options = {"data.dataset": "imdb_reviews", "data.tokenizer": "gpt2", "data.max_samples": 2000, "data.validation_split": CLASSIFIER_SPLIT}
+    lm_trainer, lm_config, lm_context = prepared(tmp_path / "lm", **options)
+    trainer, resolved, context = classifier_prepared(tmp_path / "cls", **options)
+    lm_data, data = lm_trainer.build_data(lm_config, lm_context), trainer.build_data(resolved, context)
+    assert len(lm_data.fingerprint) == 64 and lm_data.fingerprint == data.split.documents_fingerprint != data.fingerprint
+    (tmp_path / "checkpoints").mkdir()
+    (tmp_path / "checkpoints" / "fit_state.json").write_text(json.dumps({"data_fingerprint": lm_data.fingerprint}))
+    theirs = {"dataset": "imdb_reviews", "validation_split": CLASSIFIER_SPLIT, "max_samples": 2000}
+    source = SimpleNamespace(config={"seed": resolved.seed, "data": theirs}, record={"task": LM_TASK}, path=tmp_path)
+    assert trainer.init_overlap(source, resolved, data)["relation"] == "same_split"

@@ -1200,3 +1200,36 @@ def test_the_callback_list_hands_the_trainers_flag_to_the_backup_callback(world,
     task.run()
     backups = [callback for callback in task.seen_callbacks if isinstance(callback, StepBackupAndRestore)]
     assert [backup.exact_stream for backup in backups] == [exact]
+
+
+def test_the_refusal_of_a_resume_over_other_files_is_what_it_always_was_and_data_that_carries_its_own_words_changes_those_only():
+    """Review pass 2, concern 4 (D-084): ``check_data_unchanged`` takes its three phrases and the scheme from the data when the data
+    carries them (the text tasks'); data that names none keeps the sentences of 3171cb109, character for character."""
+    from types import SimpleNamespace
+
+    from train.api import resume_decisions
+
+    config = SimpleNamespace(data=SimpleNamespace(fingerprint="listing"))
+    counts = {"n_train": 1, "n_select": 1, "n_test": 1}
+
+    def refusal(data, state):
+        with pytest.raises(ConfigError) as caught:
+            resume_decisions.check_data_unchanged(
+                Path("run"), config, None, data, SimpleNamespace(state={"data_counts": counts, "data_fingerprint_mode": "listing", **state}))
+        return str(caught.value)
+
+    files = SimpleNamespace(**counts, fingerprint="b" * 64)
+    closing = ". The earlier epochs trained on the earlier data, and a resume would standardize, split and label differently; restore the data as it was, or choose a new 'out'"
+    assert refusal(files, {"data_fingerprint": "a" * 64, "data_fingerprint_scheme": "listing-order"}) == (
+        "Cannot resume run: the data is not the data the run started with (data_fingerprint: aaaaaaaaaaaa -> bbbbbbbbbbbb (a file, its "
+        "class, its size, the order of the files or, with data.fingerprint=content, its bytes is not the one the run started with))" + closing)
+    assert refusal(files, {"data_fingerprint": "a" * 64}) == (
+        "Cannot resume run: the data is not the data the run started with (data_fingerprint_scheme: none -> listing-order (the run "
+        "recorded its files by a rule that could not tell a reordered CSV, so it cannot be shown that the split is the same))" + closing)
+    own = SimpleNamespace(**counts, fingerprint="b" * 64, fingerprint_scheme="s", fingerprint_words=("W1", "W2", "W3"))
+    assert resume_decisions.data_fingerprint_field(config, own)["data_fingerprint_scheme"] == "s"
+    assert refusal(own, {"data_fingerprint": "a" * 64, "data_fingerprint_scheme": "s"}) == (
+        "Cannot resume run: the data is not the data the run started with (data_fingerprint: aaaaaaaaaaaa -> bbbbbbbbbbbb (W2)). "
+        "The earlier epochs trained on the earlier data, and W3, or choose a new 'out'")
+    assert "(W1)" in refusal(own, {"data_fingerprint": "a" * 64})
+

@@ -495,6 +495,7 @@ def test_the_corpus_digest_sees_a_token_a_label_the_order_and_a_boundary_and_the
         assert td.corpus_digest(part, (test, None)) != base, name
     assert td.corpus_digest((docs, labels), ([test[0] + 1], None)) != base, "a test document"
     assert split_of().fingerprint == td.corpus_digest((corpus(60, seed=1), None), (corpus(30, seed=2), None)) != split_of(train=corpus(60, seed=3)).fingerprint
+    assert split_of().documents_fingerprint == split_of().fingerprint, "a language split has no labels: its two digests are one"
 
 
 def test_the_split_follows_the_seed_and_never_the_stream_seed():

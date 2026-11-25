@@ -107,10 +107,11 @@ def majority_share(labels: np.ndarray) -> float:
 def accuracy_margin(share: float, n_rows: int) -> float:
     """The margin of a classifier's bar over the majority ``share`` of ``n_rows`` rows; see the module contract."""
     # DECISION plan-2026-11-24T092348-7806a290/D-076
-    # The bar is the share PLUS this margin, not the bare share: on IMDB's 2,498 selection rows a coin flip clears 0.5028 in 98.3
-    # percent of 8-epoch runs (and a constant model with five answers flipped in about half of its epochs), so "above the share"
-    # said nothing about learning. Do NOT drop the margin, do NOT make it a key (a knob that lowers it re-opens the hole) and do NOT
-    # lift the cap (a bar of 1.0 or more can never be strictly beaten, and a tiny selection split would then fail every run).
+    # The bar is the share PLUS this margin, not the bare share: on IMDB's 2,498 selection rows a coin flip clears 0.5028 in
+    # 97.9 percent of 8-epoch runs (the exact binomial), and a constant model with five answers flipped in about half of its
+    # epochs, so "above the share" said nothing about learning. Do NOT drop the margin, do NOT make it a key (a knob that lowers
+    # it re-opens the hole) and do NOT lift the cap (a bar of 1.0 or more can never be strictly beaten, and a tiny selection
+    # split would then fail every run).
     return min(BAR_STANDARD_ERRORS * math.sqrt(share * (1.0 - share) / n_rows), (1.0 - share) / 2.0)
 
 

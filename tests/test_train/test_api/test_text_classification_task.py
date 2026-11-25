@@ -302,6 +302,13 @@ def test_a_part_that_lacks_a_class_is_refused_by_name_with_its_count_and_a_strea
         tagged_split(batch_size=64)
 
 
+def test_a_classifier_split_holds_the_digest_of_its_documents_alone_beside_the_one_with_the_labels():
+    # review pass 2, concern 1: a language split digests no labels, so the classifier's split must offer the same digest of the same documents
+    split, docs, labels = tagged_split()
+    assert split.fingerprint == td.corpus_digest((docs, labels), (docs[:6], labels[:6]))
+    assert split.documents_fingerprint == td.corpus_digest((docs, None), (docs[:6], None)) != split.fingerprint
+
+
 @pytest.mark.parametrize("change", ["a character", "a label"])
 def test_a_resume_on_other_documents_is_refused_naming_both_digests_and_the_same_corpus_is_not(change, world, tmp_path, monkeypatch):  # noqa: F811
     # review pass 1, N6: nothing identified the documents a run read, so a resume over another corpus (a TFDS build, a bank change) went on
@@ -321,6 +328,31 @@ def test_a_resume_on_other_documents_is_refused_naming_both_digests_and_the_same
     resume_decisions.check_data_unchanged(tmp_path, resolved, None, first, SimpleNamespace(state=state))
     with pytest.raises(ConfigError, match=rf"data_fingerprint: {first.fingerprint[:12]} -> {second.fingerprint[:12]}"):
         resume_decisions.check_data_unchanged(tmp_path, resolved, None, second, SimpleNamespace(state=state))
+
+
+@pytest.mark.parametrize("language", [False, True], ids=["text_classification", "language_model_pretraining"])
+def test_the_refusal_of_a_text_resume_speaks_of_documents_and_a_run_with_no_digest_is_refused_by_that_fact(language, world, tmp_path, monkeypatch):  # noqa: F811
+    # review pass 2, concern 4: the shared refusal spoke of files, a CSV and standardizing, and said a language run made before the digest
+    # existed had "recorded its files by a rule that could not tell a reordered CSV"
+    trainer, resolved, context = prepared(tmp_path / "lm") if language else classifier_prepared(tmp_path / "cls")
+    first, real = trainer.build_data(resolved, context), td.corpus_documents
+
+    def another(dataset, kind, *, max_samples):
+        (texts, labels), test = real(dataset, kind, max_samples=max_samples)
+        return ([texts[0][:-2] + "x.", *texts[1:]], labels), test
+
+    monkeypatch.setattr(td, "corpus_documents", another)
+    second = trainer.build_data(resolved, context)
+    state = {"data_counts": resume_decisions.data_counts(first), **resume_decisions.data_fingerprint_field(resolved, first)}
+    assert state["data_fingerprint_scheme"] == td.CORPUS_SCHEME != "listing-order", "the digest names its own rule"
+    for earlier, now, said in ((state, second, "a document, its tokenization, its label or the order"),
+                               ({"data_counts": state["data_counts"]}, first, "recorded no digest of its documents")):
+        with pytest.raises(ConfigError) as caught:
+            resume_decisions.check_data_unchanged(tmp_path, resolved, None, now, SimpleNamespace(state=earlier))
+        text = str(caught.value)
+        assert said in text and "restore the documents and the tokenizer as they were, or choose a new 'out'" in text, text
+        assert not any(word in text for word in ("CSV", "standardize", "files", "listing")), text
+    assert "made before the corpus digest existed" in text, "the run with no digest is refused by that fact"
 
 
 @pytest.mark.parametrize("language", [False, True], ids=["text_classification", "language_model_pretraining"])

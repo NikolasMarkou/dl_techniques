@@ -389,6 +389,65 @@ def test_predict_opens_the_tokenizer_from_the_directory_the_record_names_and_che
         make(lambda batch, training=False: None, record).predict(["hello"])
 
 
+def predictor_naming(task, directory):
+    """A text predictor of ``task`` whose record names the tokenizer directory ``directory``; its model is never called."""
+    from train.api import predictor
+    from train.api.text_predictor import LanguageModelPredictor, TextClassifierPredictor
+
+    options = {"model": "m/tiny", "family": "m", "variant": "tiny", "seq_len": 8, "tokenizer": tt.tokenizer_spec("gpt2").record(),
+               "tokenizer_dir": directory}
+    if task == TASK:
+        return LanguageModelPredictor(lambda batch, training=False: None, predictor.build_language_model_record(**options))
+    return TextClassifierPredictor(lambda batch, training=False: None,
+                                   predictor.build_text_classification_record(**options, class_names=["neg", "pos"]))
+
+
+@pytest.mark.parametrize("task", [TASK, "text_classification"])
+def test_a_recorded_tokenizer_directory_that_is_gone_falls_back_to_the_pinned_copy_which_is_hashed_before_get_encoding(task, tmp_path, monkeypatch):
+    # review pass 2, concern 2: the record holds the training machine's absolute path (a wiped /tmp, an exported file moved elsewhere)
+    import tiktoken
+
+    from ._text_world import wrong_tokenizer_dir
+
+    wrong = str(wrong_tokenizer_dir(tmp_path))
+    monkeypatch.setattr(tt, "DEFAULT_TOKENIZER_DIR", wrong)          # the copy there holds other bytes
+    monkeypatch.setattr(tiktoken, "get_encoding", lambda name: pytest.fail("get_encoding ran on files that were not hashed first"))
+    with pytest.raises(ConfigError, match=rf"cannot be opened.*is gone.*{re.escape(wrong)}.*has sha256") as caught:
+        predictor_naming(task, str(tmp_path / "wiped" / "tok")).predict(["hello"])
+    assert str(tmp_path / "wiped" / "tok") in str(caught.value), "the refusal names the directory the record gave"
+    locked = tmp_path / "locked"
+    (locked / "tok").mkdir(parents=True)
+    locked.chmod(0)            # not a directory that is gone but one that cannot be looked into: a refusal that names it, never a raw OSError
+    try:
+        with pytest.raises(ConfigError, match=rf"cannot be opened.*{re.escape(str(locked / 'tok'))}"):
+            predictor_naming(task, str(locked / "tok")).predict(["hello"])
+    finally:
+        locked.chmod(0o755)
+
+
+@NO_PIN
+@pytest.mark.parametrize("task", [TASK, "text_classification"])
+def test_the_pinned_copy_serves_a_record_whose_directory_is_gone_and_a_directory_of_other_hashes_is_refused_though_it_is_there(task, tmp_path, monkeypatch):
+    import os
+
+    import tiktoken
+
+    from train.api import predictor
+
+    from ._text_world import wrong_tokenizer_dir
+
+    seen, real = [], tiktoken.get_encoding
+    monkeypatch.setattr(tiktoken, "get_encoding", lambda name: seen.append(os.environ["TIKTOKEN_CACHE_DIR"]) or real(name))
+    assert predictor_naming(task, str(tmp_path / "wiped")).tokenizer().encode("hello world") == [31373, 995]
+    assert seen == [tt.DEFAULT_TOKENIZER_DIR], "the pinned copy, hashed first, is what tiktoken read"
+    wrong = str(wrong_tokenizer_dir(tmp_path))
+    with pytest.raises(ConfigError, match=rf"cannot be opened.*{re.escape(wrong)}.*has sha256"):
+        predictor_naming(task, wrong).tokenizer()
+    assert seen == [tt.DEFAULT_TOKENIZER_DIR], "no fallback and no call: the directory that is there but wrong is refused by name"
+    record = predictor_naming(task, wrong).record
+    assert any("absolute" in line for line in predictor.record_problems({**record, "tokenizer_dir": "relative/tok"}))
+
+
 # ---------------------------------------------------------------------
 # predict: the command
 # ---------------------------------------------------------------------

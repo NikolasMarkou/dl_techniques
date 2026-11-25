@@ -396,7 +396,7 @@ def test_the_recipe_notice_names_every_number_it_asks_for_and_says_it_is_unmeasu
                   f"{recipe['epochs']} epochs", f"{optim['warmup_epochs']} warmup epoch",
                   f"gradient clip of {optim['global_clipnorm']:g}", f"patience {patience}"):
         assert words in text, words
-    assert "majority" in text, "the bar is a floor, and the notice says what it is"
+    assert "majority" in text, "the notice says what the bar is"
 
 
 def test_the_language_notice_keeps_its_words():

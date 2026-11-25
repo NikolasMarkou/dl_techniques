@@ -376,6 +376,22 @@ def test_the_classification_section_and_the_init_pairs_state_the_numbers_of_the_
     pairs = sum(len(spec.transfer.sources) for spec in registry.MODELS.values() if spec.transfer)
     words = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
     assert f"are the {words[pairs]} declared cross-task pairs" in text, "the init section counts the pairs the families declare"
+    # review pass 2, concern 6: the recipe sentence says what the notice says the bar is, the guesser percentages are the exact binomial's
+    # (IMDB: 1,256 of 2,498 selection rows, the bar and the bare share) in the README and in text_run, and both keys rows name the fallback
+    from scipy.stats import binom
+
+    rows, share = 2498, 1256 / 2498
+
+    def guesser(bar):   # the share of 8-epoch runs of a label-independent guesser whose best epoch clears the float32 compare
+        needed = next(count for count in range(rows + 1) if text_run.strictly_above(count / rows, bar))
+        return 100 * (1 - binom.cdf(needed - 1, rows, 0.5) ** 8)
+
+    said = f"clears in {guesser(share + text_run.accuracy_margin(share, rows)):.2f} percent of 8-epoch runs (the bare share let {guesser(share):.1f} percent through)"
+    assert text_models._CLASSIFIER_BAR in text and "the bar is a floor" not in text and said in text
+    assert all(f"{guesser(share):.1f} percent" in source and "98.3" not in source for source in (inspect.getdoc(text_run), inspect.getsource(text_run.accuracy_margin)))
+    keys_rows = [line for line in README.read_text().splitlines() if line.startswith("| `data.tokenizer_dir` |")]
+    assert len(keys_rows) == 2 and all("or the pinned copy when that directory is gone" in line for line in keys_rows)
+    assert "a rounding band and not a noise margin" in text, "under init the loaded weights' term is the shared one, named for what it is"
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

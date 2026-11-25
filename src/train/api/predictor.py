@@ -139,8 +139,9 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     :data:`DATA_KEYS`: the language model's four and ``class_names``.
 
 ``tokenizer_dir`` (OPTIONAL, a language-model or text-classification record)
-    The directory the run read its BPE files from, written ONLY when the run set ``data.tokenizer_dir`` (null: the pinned copy, no key).
-    ``predict`` opens the tokenizer from it, after the hashes of the files are checked (D-077); a file of another hash is refused by name.
+    The ABSOLUTE directory the run read its BPE files from, written ONLY when the run set ``data.tokenizer_dir`` (null: the pinned copy,
+    no key). ``predict`` opens the tokenizer from it, after the hashes of the files are checked (D-077); a file of another hash is refused
+    by name, and a directory that is gone is replaced by the pinned copy, hashed the same way (D-085).
 
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
@@ -1401,8 +1402,8 @@ def _tokenizer_problems(record: Mapping[str, Any]) -> List[str]:
     elif record["encoding"] in TOKENIZERS and bool(files) != (record["encoding"] != ASCII95):
         lines.append(f"'tokenizer_files' must be {'empty' if record['encoding'] == ASCII95 else 'the BPE files'} for the {record['encoding']} "
                      f"tokenizer, got {_shown(files)}")
-    if "tokenizer_dir" in record and not (isinstance(record["tokenizer_dir"], str) and record["tokenizer_dir"]):
-        lines.append(f"'tokenizer_dir' must be a non-empty directory name (written only when data.tokenizer_dir was set), got {_shown(record['tokenizer_dir'])}")
+    if "tokenizer_dir" in record and not (isinstance(record["tokenizer_dir"], str) and Path(record["tokenizer_dir"]).is_absolute()):
+        lines.append(f"'tokenizer_dir' must be an absolute directory name (written only when data.tokenizer_dir was set), got {_shown(record['tokenizer_dir'])}")
     # DECISION plan-2026-11-24T092348-7806a290/D-078
     # A record that names the digest this code PINS for its encoding holds the ids that digest is made of: `eot_id`, `pad_id` and `cls_id`
     # are what `predict` appends and pads with and what a consumer of an exported record builds rows from, so another id is a forged

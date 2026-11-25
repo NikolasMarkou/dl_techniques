@@ -60,7 +60,11 @@ Interface contract
     :return: the sha256 (64 hex digits) of every part's document count, each document's length and ids, and the labels: the identity of
         the documents a run read, which the run sequence records in the fit sidecar and a resume compares (D-079). A token, a label, the
         order, a document boundary or the number of documents each change it. ``lm_split`` and ``class_split`` hold it as
-        ``TextSplit.fingerprint`` (train part, then test part), ``TextBatches.fingerprint`` is the same string.
+        ``TextSplit.fingerprint`` (train part, then test part; a classifier's with its labels), ``TextBatches.fingerprint`` is the
+        same string. ``TextSplit.documents_fingerprint`` is the digest of the documents ALONE: a language split's equals its
+        ``fingerprint``, a classifier's differs from its own, and the two tasks' are equal for one corpus, which is what an ``init``
+        split compares across tasks (D-083). ``CORPUS_SCHEME`` names the rule in the sidecar and ``RESUME_WORDS`` are the phrases of the
+        refusal of a resume over other documents (D-084); ``TextBatches`` carries both for the shared resume check.
 
 ``split_documents(n, seed, validation_split)``
     :return: ``(train_index, select_index)``, int64, ascending: document ``i`` is selected when ``sha256(f"{seed}:select:{i}")``,
@@ -126,7 +130,7 @@ import os
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, ClassVar, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -381,6 +385,20 @@ def tokenized_corpus(data: Any, kind: str) -> Tuple[TokenizerSpec, Tuple[List[np
 # ---------------------------------------------------------------------
 
 
+#: What the fit sidecar calls the rule of :func:`corpus_digest` (``data_fingerprint_scheme``): a sidecar without it, or with another, was
+#: written by a run that digested no documents, and a resume refuses it.
+CORPUS_SCHEME = "corpus-sha256"
+
+#: The three phrases of the refusal of a resume over other documents, in the order of ``train.api.resume_decisions.FILE_WORDS`` (D-084):
+#: a sidecar of another scheme (or none: a run made before the digest existed), a different digest, and what a resume would get wrong.
+RESUME_WORDS = (
+    "the run recorded no digest of its documents, or one made by another rule (a run made before the corpus digest existed has none), "
+    "so it cannot be shown that they are the documents read now",
+    "a document, its tokenization, its label or the order of the documents is not the one the run started with",
+    "a resume would continue the stream over other documents; restore the documents and the tokenizer as they were",
+)
+
+
 def corpus_digest(*parts: Tuple[Sequence[np.ndarray], Optional[np.ndarray]]) -> str:
     """The sha256 of the documents (and labels) of ``parts``; see the module contract."""
     digest = hashlib.sha256()
@@ -546,6 +564,7 @@ class TextSplit:
         :param truncated, train_labels: a classifier's only: the documents (of every part) cut at ``seq_len - 1`` tokens and the
         labels of the train rows in document order (a language split holds ``0`` and ``None``). :param fingerprint: the
         :func:`corpus_digest` of the train and test documents the split was cut from (labels included for a classifier).
+        :param documents_fingerprint: the same digest of the documents alone (equal to ``fingerprint`` for a language split).
     """
 
     stream: TextStream
@@ -557,6 +576,7 @@ class TextSplit:
     truncated: int = 0
     train_labels: Optional[np.ndarray] = field(default=None, repr=False)
     fingerprint: str = ""
+    documents_fingerprint: str = ""
 
 
 def lm_split(
@@ -582,8 +602,8 @@ def lm_split(
     logger.info(
         f"language-model split: {len(train_index)} train, {len(select_index)} selection, {len(test_docs)} test documents; "
         f"{stream.n_rows} train, {len(select[0])} selection, {len(test[0])} test windows of {seq_len + 1} tokens")
-    return TextSplit(stream, select, test, train_index, select_index, len(test_docs),
-                     fingerprint=corpus_digest((train_docs, None), (test_docs, None)))
+    digest = corpus_digest((train_docs, None), (test_docs, None))
+    return TextSplit(stream, select, test, train_index, select_index, len(test_docs), fingerprint=digest, documents_fingerprint=digest)
 
 
 # ---------------------------------------------------------------------
@@ -647,9 +667,14 @@ def class_split(
     logger.info(
         f"classification split: {len(train_index)} train, {len(select_index)} selection, {len(test_docs)} test documents; "
         f"{cut + test_cut} documents cut at {seq_len - 1} tokens")
+    # DECISION plan-2026-11-24T092348-7806a290/D-083
+    # TWO digests: the labelled one is what a resume of THIS task compares (a changed label is a changed corpus), the one of the documents
+    # alone is what an `init` split compares with a language source, whose sidecar holds no labels (`documents_overlap`). Do NOT hand
+    # the labelled digest to that comparison: the two tasks' digests of one corpus never agree and the split reads `unknown`.
     return TextSplit(stream, (ids[select_index], train_labels[select_index]), (test_ids, test_labels), train_index, select_index,
                      len(test_docs), cut + test_cut, train_labels[train_index],
-                     corpus_digest((train_docs, train_labels), (test_docs, test_labels)))
+                     corpus_digest((train_docs, train_labels), (test_docs, test_labels)),
+                     corpus_digest((train_docs, None), (test_docs, None)))
 
 
 # ---------------------------------------------------------------------
@@ -727,11 +752,19 @@ class TextBatches:
     spec: TokenizerSpec
     seed: int
     batch_size: int
+    #: What the shared resume check reads off the data (D-084): the scheme the sidecar records and the phrases of its refusal.
+    fingerprint_scheme: ClassVar[str] = CORPUS_SCHEME
+    fingerprint_words: ClassVar[Tuple[str, str, str]] = RESUME_WORDS
 
     @property
     def fingerprint(self) -> str:
         """The :func:`corpus_digest` of the documents the run read: the run sequence records it and a resume compares it (D-079)."""
         return self.split.fingerprint
+
+    @property
+    def documents_fingerprint(self) -> str:
+        """The digest of the documents alone, which an ``init`` split compares with a source of the other task (D-083)."""
+        return self.split.documents_fingerprint
 
     def with_start(self, step: int) -> "TextBatches":
         """The same data whose train stream begins at ``step``: the fixed datasets are the same objects."""

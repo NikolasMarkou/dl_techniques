@@ -1390,7 +1390,7 @@ result = train_language_model_pretraining(out="auto", model="gpt2_lm/tiny", data
 |---|---|---|
 | `data.format` | `"builtin"` | `TextData`; the only value |
 | `data.tokenizer` | `"gpt2"` | `tokenizer_spec`, `check_tokenizer_dir` (before the claim), `text_data.open_tokenizer`; `ascii95` or `gpt2` |
-| `data.tokenizer_dir` | `null` | `check_tokenizer_dir` (before the claim), `open_tokenizer`: where the two BPE files are, which `predict` reads there too (the record's `tokenizer_dir`); null is the pinned copy; refused for `ascii95` |
+| `data.tokenizer_dir` | `null` | `check_tokenizer_dir` (before the claim), `open_tokenizer`: where the two BPE files are, which `predict` reads there too (the record's `tokenizer_dir`, or the pinned copy when that directory is gone and the pinned files hash to the record's); null is the pinned copy; refused for `ascii95` |
 | `data.seq_len` | `256` | `LanguageModelPretrainingTrainer.check_model_args` (at most the variant's `max_seq_len`, before the claim), `build_data` (a window is `seq_len + 1` ids) |
 | `data.validation_split` | `0.1` | `text_data.lm_split`: the share of the train DOCUMENTS held out to select the best epoch |
 | `data.max_samples` | `null` | `text_data.corpus_documents`: the first N documents of each split in read order (synthetic: 600 train and 150 test when null, else N and max(1, N // 4)); `debug_args.smoke` sets 512 when null |
@@ -1439,8 +1439,8 @@ result = train_language_model_pretraining(out="auto", model="gpt2_lm/tiny", data
   To give the legacy trainers tiktoken's own cache back after a reboot, copy the two files into `/tmp/data-gym-cache`. Do not point
   `TIKTOKEN_CACHE_DIR` at the pinned directory: it is writable, so that loader could delete a file there; the tasks set it themselves, for one call.
 * **The record.** A run writes `task.json` (schema version 2, the seventh record kind) before its first epoch: `seq_len`, `encoding`,
-  `n_vocab`, `vocab_size`, `eot_id`, `pad_id`, `tokenizer` (the digest), `tokenizer_files`, `tokenizer_dir` (if set: `predict` reads the BPE files there)
-  and `output` (`next_token_logits`); a resume compares `seq_len`, `encoding`, `vocab_size` and `tokenizer`, and the corpus digest (`corpus_sha256`).
+  `n_vocab`, `vocab_size`, `eot_id`, `pad_id`, `tokenizer` (the digest), `tokenizer_files`, `tokenizer_dir` (if set: `predict` reads the BPE files there, or from
+  the pinned copy when it is gone) and `output` (`next_token_logits`); a resume compares `seq_len`, `encoding`, `vocab_size` and `tokenizer`, and the corpus digest (`corpus_sha256`).
 * **`predict`**: `python -m train predict model=results/lm_synthetic data=documents.jsonl out=predictions.json` reads one `.txt` file (a
   document per line) or one `.jsonl` file (a `{"text": ...}` object per line) and writes one JSON file, last, with per document `n_tokens`,
   `mean_nll` (nats per predicted id), `perplexity` and `next_tokens` (the five most likely ids after the last, each with `token`, `text` and
@@ -1506,7 +1506,7 @@ result = train_text_classification(out="auto", model="gpt2/tiny", data={"dataset
   language-model head (`tie_word_embeddings`, `head_type`, ...): each is refused by name.
 * **Recipe** (`CLASSIFIER_RECIPE`, both families): AdamW at 3e-4, weight decay 0.01, 1 warmup epoch, cosine decay over the whole run, a global
   gradient clip of 1.0, batch 32, 8 epochs, patience 4. No text-classification run existed before this task, so none of it is measured: `run.log`
-  carries a recipe notice that says so and that the bar is a floor, and the gate below reports what the numbers give, with no tuning.
+  carries a recipe notice that says so and what the bar is (the majority-class share of the selection split plus three binomial standard errors of it), and the gate below reports what the numbers give, with no tuning.
 * **Keys of the task** (`python -m train text_classification` lists all, with their help; the shared groups and top-level keys mean what they mean
   for the other tasks, and `data` is the language task's `TextData`). `data.dataset` is required: `synthetic` (an offline labelled bank: 60 percent
   class `neg`, each text with cue words of its class) or `imdb_reviews` (the local TFDS reviews, `neg` 0 and `pos` 1, never downloaded).
@@ -1517,7 +1517,7 @@ result = train_text_classification(out="auto", model="gpt2/tiny", data={"dataset
 |---|---|---|
 | `data.format` | `"builtin"` | `TextData`; the only value |
 | `data.tokenizer` | `"gpt2"` | `tokenizer_spec`, `check_tokenizer_dir` (before the claim), `text_data.open_tokenizer`; `ascii95` or `gpt2`; the pinned BPE files and their restore are the language section's, and the record holds the digest that `init` and a resume compare |
-| `data.tokenizer_dir` | `null` | `check_tokenizer_dir` (before the claim), `open_tokenizer`; null is the pinned copy; refused for `ascii95` |
+| `data.tokenizer_dir` | `null` | `check_tokenizer_dir` (before the claim), `open_tokenizer`: where the two BPE files are, which `predict` reads there too (the record's `tokenizer_dir`, or the pinned copy when that directory is gone and the pinned files hash to the record's); null is the pinned copy; refused for `ascii95` |
 | `data.seq_len` | `256` | `check_text_window` (at most the position table, before the claim), `text_data.encode_rows` (a row is `seq_len` ids) |
 | `data.validation_split` | `0.1` | `text_data.class_split`: the share of the train DOCUMENTS held out to select the best epoch |
 | `data.max_samples` | `null` | `text_data.corpus_documents` (the language row's rule); `debug_args.smoke` sets 512 when null |
@@ -1800,8 +1800,8 @@ deterministic patterns barely move with the seed and a shorter series is the sta
 windows that start inside the source's train segment)
 scenes for depth (the source's train scenes among this run's selection and test scenes) and documents for the two text tasks (the source's
 train documents among this run's selection documents, rebuilt from the source's seed, split and cap; `unknown` when this run's own `data.max_samples` hides
-how many a capped source read or the source's `data_fingerprint` is another corpus under equal keys; a classifier seeded from a language run on the
-synthetic bank is `different_data` (other texts, same numbers), and on `imdb_reviews` the count is exact for one corpus). A CIFAR-10 source trained at
+how many a capped source read, or, under equal keys, when the source's `data_fingerprint` is none or another corpus's (a classifier compares a language run's by its documents alone); a classifier seeded from a language run on the
+synthetic bank is `different_data` (other texts, same numbers), and on `imdb_reviews` equal keys over one corpus are `same_split` and other keys are counted exactly). A CIFAR-10 source trained at
 seed 42 seeds a run at seed 43: 4,531 of its 5,000 selection rows were trained on. `results_summary.json` then sets
 `selection_biased`, `test_biased` (a count above 0) and `overlap_unknown`, the log line `init split: <relation>: <reason>` is a
 warning, and the success line ends in `(selection-biased)`, `(selection-biased, test-biased)` or `(split overlap unknown)`. No
@@ -1809,7 +1809,7 @@ exit code changes.
 
 **The bar under `init`.** The epoch-zero evaluation is of the loaded weights (`Evaluate of the loaded weights before fit: val
 <metric> <value>, ...`), so `initial_loss_ratio` and `init_scale_warning` are null and the summary's notes say why.
-Classification, text classification, segmentation and denoising, whose bars a good source meets at epoch 0, also need the best success value
+Classification, text classification, segmentation and denoising, whose bars a good source meets at epoch 0, also need the best success value (the best of all the epochs, so the band below is a rounding band and not a noise margin)
 strictly above the loaded weights' epoch-zero value (read from the fit sidecar, so a resume judges the same number), by more
 than 16 float32 steps (`forecast_run.tie_band(1)`); a fine-tune that only holds its source's score is a miss, exit 1.
 Forecasting, depth, pretrain and language models keep `min(..., epoch zero)`, whose epoch-zero term is now the loaded weights (pretrain's

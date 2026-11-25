@@ -359,7 +359,9 @@ def documents_overlap(source: Any, config: Any, data: Any, task: str) -> Dict[st
     corpus's own, which no run trains on. :return: ``different_data`` for another dataset and for the two synthetic banks of the two
     tasks (the language bank and the labelled one are other texts under the same document numbers), ``same_split`` when dataset,
     seed, validation split and cap equal the source's, ``unknown`` (with the reason) when this run's cap hides how many documents a
-    capped source read, else ``overlap`` with the count.
+    capped source read, else ``overlap`` with the count. Under equal keys the source's ``data_fingerprint`` (its sidecar's) decides:
+    ``same_split`` when it is this run's digest of the documents the source's task digests (a language run's has no labels: the other
+    task's source is compared by the documents alone), ``unknown`` when it is another or none.
     """
     import numpy as np
 
@@ -368,10 +370,11 @@ def documents_overlap(source: Any, config: Any, data: Any, task: str) -> Dict[st
     from . import init_from
 
     theirs, ours = source.config.get("data") or {}, config.data
+    other_task = (getattr(source, "record", None) or {}).get("task", task) != task
     if theirs.get("dataset") != ours.dataset:
         return init_from.split_block("different_data", f"the source trained on {theirs.get('dataset')}, this run reads "
                                                        f"{ours.dataset}", {"data.dataset": theirs.get("dataset")}, None, (0, 0))
-    if ours.dataset == SYNTHETIC and (getattr(source, "record", None) or {}).get("task", task) != task:
+    if ours.dataset == SYNTHETIC and other_task:
         return init_from.split_block("different_data", "the source read the synthetic language bank and this run reads the synthetic "
                                                        "labelled bank (or the other way round): other texts under the same document "
                                                        "numbers", {"data.dataset": SYNTHETIC}, None, (0, 0))
@@ -381,11 +384,17 @@ def documents_overlap(source: Any, config: Any, data: Any, task: str) -> Dict[st
                 "data.max_samples": ours.max_samples}:
         # DECISION plan-2026-11-24T092348-7806a290/D-079
         # The same keys over another corpus (a TFDS build, a change to the bank) are other documents under the same numbers, so the
-        # split is not "the same": a source whose sidecar holds another corpus digest is `unknown`. Do NOT count by index then.
+        # split is not "the same": a source whose sidecar holds another corpus digest, or none, is `unknown`. Do NOT count by index then.
+        # DECISION plan-2026-11-24T092348-7806a290/D-083
+        # The digest this run compares is the one the SOURCE's task wrote: a language run's has no labels, a classifier's has them, so
+        # the other task's source is compared by this run's digest of the documents alone. Do NOT compare a classifier's labelled digest
+        # with a language run's (they never agree: every `cls_gpt2_init` split would read `unknown`) and do NOT trust a source with none.
         earlier = init_from._fingerprint(source.path)
-        if earlier is not None and earlier != getattr(data, "fingerprint", None):
-            return init_from.split_block("unknown", "the source's fit sidecar records another data_fingerprint than this run's corpus, so "
-                                                    "the same keys read other documents and which of them are shared is not known")
+        if earlier != getattr(data, "documents_fingerprint" if other_task else "fingerprint", None):
+            what = "no" if earlier is None else "another"
+            return init_from.split_block(
+                "unknown", f"the source's sidecar records {what} data_fingerprint for this run's documents, so it cannot be shown that the same "
+                "keys read the same ones and which of them are shared is not known")
         return init_from.same_split("documents", keys)
     # DECISION plan-2026-11-24T092348-7806a290/D-042
     # The source's train documents are rebuilt with the SOURCE's seed, split and cap (its config.json), and this run's selection

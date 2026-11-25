@@ -195,11 +195,26 @@ class _TextPredictor:
             # DECISION plan-2026-11-24T092348-7806a290/D-077
             # The files are read from the directory the run was trained with (`tokenizer_dir`, absent: the pinned copy) and hashed before
             # tiktoken's loader runs, as in training. Do NOT open the pinned default only (a run trained with data.tokenizer_dir=/elsewhere
-            # could not be used) and do NOT fall back to the default when that directory fails: a refusal names it.
+            # could not be used).
+            # DECISION plan-2026-11-24T092348-7806a290/D-085
+            # A directory that is GONE (a wiped /tmp, an exported file on another machine) is replaced by the pinned copy: the tokenizer's
+            # identity is the digest and the files' sha256, which `open_tokenizer` checks for whichever directory it opens, not where the
+            # files are. Do NOT fall back for a directory that is there: one holding other bytes is refused by name, and do NOT call
+            # `get_encoding` on either before that check (its loader deletes a cache file of another hash, D-015).
+            recorded = record.get("tokenizer_dir")
             try:
-                self._tokenizer = text_data.open_tokenizer(spec, record.get("tokenizer_dir"))
+                gone = recorded is not None and not Path(recorded).is_dir()
+            except OSError:         # a parent that cannot be looked into: `open_tokenizer` refuses it by name below
+                gone = False
+            if gone:
+                from dl_techniques.utils.logger import logger
+
+                logger.warning(f"predict: the tokenizer directory {recorded!r} of this run's record is gone; reading the pinned copy")
+            try:
+                self._tokenizer = text_data.open_tokenizer(spec, None if gone else recorded)
             except ConfigError as exc:
-                raise ConfigError(f"Invalid value for 'model': the tokenizer of this run ({spec.encoding}) cannot be opened: {exc}") from exc
+                note = f" (the directory its record names, {recorded!r}, is gone, so the pinned copy was tried)" if gone else ""
+                raise ConfigError(f"Invalid value for 'model': the tokenizer of this run ({spec.encoding}) cannot be opened{note}: {exc}") from exc
         return self._tokenizer
 
     @staticmethod
