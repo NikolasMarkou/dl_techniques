@@ -28,7 +28,20 @@ for the auto-built pair, scaled by `hidden_channels`, `downsample_factor` (a pow
   the normalization chosen by `norm_type`, a ReLU), then the residual blocks, then a 1x1 `Conv2D` to
   `embedding_dim`;
 - decoder: a 1x1 `Conv2D`, the residual blocks, `Conv2DTranspose(hidden, 4, strides=2)` +
-  normalization + ReLU once per factor of 2, then `Conv2D(C, 3)` with a sigmoid.
+  normalization + ReLU once per factor of 2, then `Conv2D(C, 3)` named `dec_to_output`, linear.
+
+**The output is linear.** `dec_to_output` has no activation: the image streams of `train.common.image_streams`
+are standardized with a per-channel mean and std, so their values are not confined to `[0, 1]`, which is all
+a sigmoid can give. On the standardized CIFAR-10 selection split of `python -m train` (5,000 rows, split
+seed 42) 52.0 percent of the pixels lie below 0 and 18.5 percent above 1, and the best output confined to
+`[0, 1]` scores a mean squared error of 0.5339. Measured at 750 steps on the same batches and the same
+starting weights (seeds 42 and 43; 32 px input, downsample 4, 512 codes of 32 dimensions, 128 hidden
+channels, 2 residual blocks, 2,004,003 parameters): the sigmoid decoder's `val_reconstruction_loss` was
+0.5778 and 0.5766, the linear one's 0.1440 and 0.1410, and the codebook perplexity over all selection
+positions 28.85 and 33.83 (sigmoid) against 39.04 and 51.73 (linear), plan-2026-11-25T124419-fa94f59c,
+D-022 and D-023. A caller who needs a bounded output brings a decoder (`decoder=`). A file written with
+the earlier sigmoid decoder carries it in its own config and loads unchanged;
+`tests/test_models/test_the_vq_readmes_state_what_their_decoders_do.py` writes one and loads it.
 
 `num_embeddings`, `embedding_dim` and (on the auto-built path) `hidden_channels` and `downsample_factor`
 are positive integers and `reconstruction_loss_weight` is a positive finite number; anything else raises
