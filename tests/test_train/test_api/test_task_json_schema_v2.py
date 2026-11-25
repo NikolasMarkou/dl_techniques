@@ -245,6 +245,10 @@ def test_a_text_record_that_names_the_pinned_digest_holds_the_ids_that_digest_is
         lines = record_problems(make(**{key: 50260}))        # the mask id: inside the vocabulary and none of this record's ids
         assert any(f"'{key}'" in line and "tokenizer digest" in line for line in lines), (key, lines)
     assert record_problems(make(tokenizer="f" * 64, eot_id=7)) == [], "another digest is another tokenizer: its ids are not this code's to judge"
+    # review pass 2 (D-085): the files `predict` opens a directory by are the record's own, so the pinned digest holds the pinned files
+    forged = make(tokenizer_files={name: "0" * 64 for name in make()["tokenizer_files"]})
+    assert any("'tokenizer_files'" in line and "tokenizer digest" in line for line in record_problems(forged))
+    assert record_problems({**forged, "tokenizer": "f" * 64}) == [], "another digest, another files: judged by format alone"
 
 
 @pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth, pretrain, language, text_classification],

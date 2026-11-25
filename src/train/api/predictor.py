@@ -1407,12 +1407,15 @@ def _tokenizer_problems(record: Mapping[str, Any]) -> List[str]:
     # DECISION plan-2026-11-24T092348-7806a290/D-078
     # A record that names the digest this code PINS for its encoding holds the ids that digest is made of: `eot_id`, `pad_id` and `cls_id`
     # are what `predict` appends and pads with and what a consumer of an exported record builds rows from, so another id is a forged
-    # or corrupt record, not another tokenizer. A record of another digest is judged by format alone (D-033). Do NOT compare the ids
-    # of a record whose digest differs (it is a valid record of a tokenizer this code does not pin).
+    # or corrupt record, not another tokenizer. It holds the digest's files too (D-085: `predict` opens a directory whose files hash to
+    # the record's `tokenizer_files`, which are therefore the pin's). A record of another digest is judged by format alone (D-033). Do NOT
+    # compare the ids or the files of a record whose digest differs (it is a valid record of a tokenizer this code does not pin).
     spec = tokenizer_spec(record["encoding"]) if record["encoding"] in TOKENIZERS else None
     if spec is not None and digest == spec.digest:
         lines += [f"{key!r} is {record[key]!r}, but the tokenizer digest the record names is {spec.encoding}'s, whose {key} is {getattr(spec, key)}"
                   for key in ("eot_id", "pad_id", "cls_id") if key in record and record[key] != getattr(spec, key)]
+        if isinstance(files, dict) and files != dict(spec.files):
+            lines.append(f"'tokenizer_files' is {_shown(files)}, but the tokenizer digest the record names is {spec.encoding}'s, whose files are {dict(spec.files)}")
     return lines
 
 
