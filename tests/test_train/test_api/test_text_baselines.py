@@ -233,7 +233,7 @@ def test_a_constant_classifier_clears_chance_and_misses_the_majority_bar():
 
 
 def test_the_bar_of_a_classifier_sits_three_standard_errors_above_the_majority_share_and_a_guesser_misses_it():
-    # review pass 1, W2: a bare `> share` was cleared by a coin flip in 98.3 percent of 8-epoch runs on IMDB's selection split
+    # review pass 1, W2: a bare `> share` was cleared by a coin flip in about 98 percent of 8-epoch runs on IMDB's selection split (97.9 exact, D-087)
     rows, positives = 2498, 1256
     share = positives / rows
     margin = tr.accuracy_margin(share, rows)
