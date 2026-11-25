@@ -241,7 +241,7 @@ def test_the_python_listings_answer_in_a_fresh_process_and_list_tasks_loads_noth
     code, out, err, found = heavy_after(_LISTING_BODY, tmp_path)
     assert code == 0, err[-2000:]
     expected = sorted(spec.name for spec in BUILTIN_TASKS)
-    assert len(expected) == 8 and f"TASKS {expected!r}" in out, out[-800:]
+    assert len(expected) == 9 and f"TASKS {expected!r}" in out, out[-800:]
     # Registering and listing the tasks stays off TensorFlow and Keras; ``list_models`` then imports
     # the families' variants tables (the exemption above), so the census is taken before it.
     assert found == [], found

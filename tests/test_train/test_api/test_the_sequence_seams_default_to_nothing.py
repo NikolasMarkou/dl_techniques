@@ -1106,6 +1106,9 @@ def sha256_of(text):
 
 #: The tasks whose ``resume_stream`` continues the SAME stream at the settled step: the two text tasks.
 EXACT_TASKS = ("language_model_pretraining", "text_classification")
+#: The tasks written after the flag whose resumed stream is NOT exact (a stream derived from the settled steps): they leave it false and
+#: their helps and note keep the shared "fresh pass" text (plan-2026-11-25T124419-fa94f59c step 6).
+LATER_TASKS = ("beit_tokenizer",)
 
 
 def test_the_flag_is_false_by_default_and_the_two_text_tasks_are_the_tasks_that_set_it():
@@ -1115,7 +1118,14 @@ def test_the_flag_is_false_by_default_and_the_two_text_tasks_are_the_tasks_that_
 
     assert TaskTrainer.resume_stream_exact is False
     assert {row.name: trainer_class_of(row).resume_stream_exact for row in BUILTIN_TASKS} == {
-        **{name: False for name in EARLIER_TASKS}, **{name: True for name in EXACT_TASKS}}
+        **{name: False for name in (*EARLIER_TASKS, *LATER_TASKS)}, **{name: True for name in EXACT_TASKS}}
+
+
+@pytest.mark.parametrize("name", LATER_TASKS)
+def test_the_two_helps_of_a_later_task_that_leaves_the_flag_false_say_a_fresh_pass(name):
+    resume, backup = rendered(name, "resume_interrupted"), rendered(name, "checkpoint_args.backup_every_steps")
+    assert OLD[1] in resume and OLD[2] in backup, (resume, backup)
+    assert EXACT_PHRASE not in resume + backup
 
 
 @pytest.mark.parametrize("name", EARLIER_TASKS)

@@ -46,11 +46,7 @@ from train.common.pretrain_data import TokenizerUsage, derive_stream_seed, token
 from train.common.pretrain_run import MIN_TOKENIZER_PERPLEXITY, checked_tokenizer_usage, epoch_zero_val_loss, usage_meets_floor
 from train.common.resume_state import FIT_STATE_NAME, update_fit_state
 
-CIFAR_CACHE = Path.home() / ".keras" / "datasets" / "cifar-10-batches-py-target"
-NO_CIFAR = (
-    f"CIFAR-10 is not in {CIFAR_CACHE}. This file reads the REAL rows and never downloads anything. "
-    "A SKIP here is NOT a pass: the data-layer guard did not run."
-)
+from ._tokenizer_world import CIFAR_CACHE, NO_CIFAR, constant_model
 
 IMAGE = 32
 BATCH = 32
@@ -257,32 +253,6 @@ def test_the_length_check_is_one_public_function_of_pretrain_data_that_this_modu
 # ---------------------------------------------------------------------
 # 2. the baseline
 # ---------------------------------------------------------------------
-
-
-class ConstantImage(keras.layers.Layer):
-    """A layer whose output is one constant image for every input, the batch read off the input (a bring-your-own decoder's output)."""
-
-    def __init__(self, value: np.ndarray, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.value = np.asarray(value, np.float32)
-
-    def call(self, inputs: Any) -> Any:
-        batch = keras.ops.shape(inputs)[0]
-        return keras.ops.broadcast_to(keras.ops.convert_to_tensor(self.value), (batch,) + self.value.shape)
-
-
-def constant_model(image: np.ndarray) -> VQVAERotationTrick:
-    """A ``VQVAERotationTrick`` with a bring-your-own constant decoder, compiled as the run sequence compiles it (no loss, no metric)."""
-    dim = 8
-    encoder_input = keras.Input((IMAGE, IMAGE, 3))
-    encoder = keras.Model(encoder_input, keras.layers.Conv2D(dim, 4, strides=4, padding="same")(encoder_input))
-    decoder_input = keras.Input((GRID, GRID, dim))
-    value = np.broadcast_to(np.asarray(image, np.float32), (IMAGE, IMAGE, 3)).copy()
-    decoder = keras.Model(decoder_input, ConstantImage(value)(decoder_input))
-    model = VQVAERotationTrick(num_embeddings=16, embedding_dim=dim, encoder=encoder, decoder=decoder)
-    model.build((None, IMAGE, IMAGE, 3))
-    model.compile(optimizer="sgd", loss=None, metrics=[])
-    return model
 
 
 def one_pass_arrays(ds: tf.data.Dataset) -> List[np.ndarray]:

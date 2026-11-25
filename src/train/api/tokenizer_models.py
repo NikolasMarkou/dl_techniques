@@ -316,10 +316,10 @@ def recipe_notices_of(dataset: str) -> List[Tuple[str, str]]:
 def builtin_tokenizer_models() -> Tuple[ModelSpec, ...]:
     """Return the one tokenizer family spec, freshly built; see the module contract."""
     # DECISION plan-2026-11-25T124419-fa94f59c/D-031
-    # The row is built and tested HERE and registered with its task: `recipes.register_builtin_models` calls this function in the commit
-    # that adds the `beit_tokenizer` TaskSpec (step 6). A family whose task is not in `registry.TASKS` is a family `python -m train
+    # The row is built and tested HERE and registered with its task: `recipes.register_builtin_models` calls this function, in the commit
+    # that added the `beit_tokenizer` TaskSpec (step 6). A family whose task is not in `registry.TASKS` is a family `python -m train
     # list_models` lists and no command can run, and the count guard (`sum(counts) == len(MODELS)` over the registered tasks) goes red
-    # or the documents false. Do NOT add the call earlier, and do NOT remove one without the other.
+    # or the documents false. Do NOT remove the call without the TaskSpec, nor the TaskSpec without the call.
     # `fixed` is the geometry a weight depends on: the stem's kernel (channels), the grid the quantizer sees (size and patch). The
     # codebook size is the init engine's geometry key (step 8). The model has no head: the whole network is the thing `init` moves.
     return (

@@ -64,7 +64,7 @@ def test_the_family_count_and_its_split_over_the_tasks_are_the_registrys(world):
 
 
 def test_the_number_of_tasks_is_the_registrys_in_both_documents(world):
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
     sentence = f"It has {words[len(registry.TASKS)]} tasks"
     assert FORECASTING in registry.TASKS
     assert sentence in README.read_text() and sentence in AGENTS.read_text()
@@ -79,8 +79,8 @@ def test_every_other_n_tasks_phrase_counts_the_tasks_of_the_registry_but_one(wor
 
     The denoising section kept "the other three tasks" after the pretrain and forecasting tasks were added; no test read it.
     """
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
-    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight) tasks?\b")
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight|nine) tasks?\b")
     found = pattern.findall(README.read_text()) + pattern.findall(AGENTS.read_text())
     assert len(found) >= 3, "the control: the README names the other tasks in the denoising, pretrain and forecasting sections"
     assert set(found) == {words[len(registry.TASKS) - 1]}, found
@@ -305,7 +305,7 @@ def test_the_agents_counts_about_the_tasks_their_hooks_and_the_language_record_a
 
     from train.api.trainer import TaskTrainer
 
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
     agents, readme = " ".join(AGENTS.read_text().split()), " ".join(README.read_text().split())
     trainers = []
     for spec in BUILTIN_TASKS:

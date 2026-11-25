@@ -16,8 +16,9 @@ Interface contract
     :func:`train.api.denoising_models.builtin_denoising_models`,
     :func:`train.api.pretrain_models.builtin_pretrain_models`,
     :func:`train.api.forecast_models.builtin_forecast_models`,
-    :func:`train.api.depth_models.builtin_depth_models` and
-    :func:`train.api.text_models.builtin_text_models`) into
+    :func:`train.api.depth_models.builtin_depth_models`,
+    :func:`train.api.text_models.builtin_text_models` and
+    :func:`train.api.tokenizer_models.builtin_tokenizer_models`) into
     :data:`train.api.registry.MODELS`. Idempotent: a family already registered is
     left alone. Imports no model code. The count of families is ``len(MODELS)``, never written here.
 
@@ -1057,10 +1058,11 @@ def register_builtin_models() -> None:
     from .pretrain_models import builtin_pretrain_models
     from .segmentation_models import builtin_segmentation_models
     from .text_models import builtin_text_models
+    from .tokenizer_models import builtin_tokenizer_models
 
     for spec in (
         *builtin_models(), *builtin_segmentation_models(), *builtin_denoising_models(), *builtin_pretrain_models(),
-        *builtin_forecast_models(), *builtin_depth_models(), *builtin_text_models(),
+        *builtin_forecast_models(), *builtin_depth_models(), *builtin_text_models(), *builtin_tokenizer_models(),
     ):
         if spec.family not in registry.MODELS:
             registry.register_model(spec)

@@ -15,8 +15,8 @@
 * the family row: its task, its variant table, a transfer declaration, refused under every other task and every other family refused
   under this one, and a fresh process that imports both modules and builds the row imports no TensorFlow.
 
-The ``TaskSpec`` row and the call in ``recipes.register_builtin_models`` arrive with the task (step 6): until then the ``registered``
-fixture below registers the row itself, as ``register_builtin_models`` will (D-031).
+The row is registered with its task by ``recipes.register_builtin_models`` (step 6, D-031); the ``registered`` fixture below is the registry after
+that call.
 
 Everything writes under ``tmp_path``.
 """
@@ -553,12 +553,10 @@ def test_the_metric_group_refuses_what_the_bar_cannot_describe(given, key):
 
 @pytest.fixture
 def registered(monkeypatch):
-    """An empty registry holding every built-in family and this one (``register_builtin_models`` registers it once the task exists)."""
+    """An empty registry holding every built-in family, this one included (``register_builtin_models`` registers it with its task, D-031)."""
     monkeypatch.setattr(registry, "MODELS", {})
     monkeypatch.setattr(registry, "TASKS", {})
     recipes.register_builtin_models()
-    for spec in tm.builtin_tokenizer_models():
-        registry.register_model(spec)
     return registry
 
 

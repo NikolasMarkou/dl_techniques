@@ -539,13 +539,13 @@ an exemption to green a newly dead field.
 
 `src/train/api/` is a key=value command line and a Python function over strict configs, beside the
 per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
-[`README.md`](README.md)). It has eight tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain`,
-`time_series_forecasting`, `depth_estimation`, `language_model_pretraining` and `text_classification` (`python -m train list_tasks` prints them), each
+[`README.md`](README.md)). It has nine tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain`,
+`time_series_forecasting`, `depth_estimation`, `language_model_pretraining`, `text_classification` and `beit_tokenizer` (`python -m train list_tasks` prints them), each
 a `TaskTrainer` subclass in `api/tasks/` (`api/trainer.py:TaskTrainer` holds the hooks and the shared sequence). The
 classification task calls the same `train.common.classification_run` helpers as `train.convnext.common` in the same order.
 
 **Adapter rules, as shipped.** Each names its code home and a test that fails when the rule is broken (`file`::`test`); a rule no test holds is not listed.
-- **Hooks, never stages.** A task is a `TaskTrainer` subclass (`api/trainer.py`) that overrides every name in `REQUIRED_HOOKS`: `tests/test_train/test_api/test_task_trainer.py`::`test_a_task_that_forgets_a_required_hook_is_refused_when_built_and_the_hook_is_named`. It overrides none of `run`, `_resolve`, `_callbacks`, `_summary_head`, `_notes`, `_refuse_before_the_claim`, pinned for five tasks only: `test_the_task_does_not_name_a_stage` in `test_pretrain_task.py`, `test_forecast_task.py`, `test_depth_task.py`, `test_language_model_pretraining_task.py`, `test_text_classification_task.py`.
+- **Hooks, never stages.** A task is a `TaskTrainer` subclass (`api/trainer.py`) that overrides every name in `REQUIRED_HOOKS`: `tests/test_train/test_api/test_task_trainer.py`::`test_a_task_that_forgets_a_required_hook_is_refused_when_built_and_the_hook_is_named`. It overrides none of `run`, `_resolve`, `_callbacks`, `_summary_head`, `_notes`, `_refuse_before_the_claim`, pinned for six tasks only: `test_the_task_does_not_name_a_stage` in `test_pretrain_task.py`, `test_forecast_task.py`, `test_depth_task.py`, `test_language_model_pretraining_task.py`, `test_text_classification_task.py`, `test_beit_tokenizer_task.py`.
 - **A family trains only its `ModelSpec.tasks`** (`registry.parse_model_name`, D-072 below): `tests/test_train/test_api/test_denoising_families.py`::`test_a_denoising_family_is_refused_under_another_task`.
 - **Every key is a field, every field is read.** A key is a field of a `StrictConfig` group (`api/config.py`), an unknown one refused by its dotted path: `tests/test_train/test_api/test_strict_config.py`::`test_an_unknown_key_names_its_dotted_path_and_suggests_a_sibling`; a field production never reads fails `tests/test_train/test_config_fields_are_live.py`::`test_config_declares_no_field_it_never_consumes` (its `REGISTERED` rows).
 - **A refusal is a `ConfigError` before the claim.** A request refused without loading data raises `ConfigError` (a `DLTrainError`: exit 2, no traceback) before the run directory is claimed: `tests/test_train/test_api/test_a_bad_request_is_refused_before_the_run_is_claimed.py`::`test_a_wrong_request_is_a_config_error_and_leaves_out_unclaimed`, `tests/test_train/test_api/test_the_cli_exit_codes.py`::`test_a_config_error_exits_two_with_the_message_and_no_traceback`.
@@ -586,8 +586,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   (`api/pretrain_models.py:builtin_pretrain_models`) and the seven forecasting families
   (`api/forecast_models.py:builtin_forecast_models`) and the one depth family
   (`api/depth_models.py:builtin_depth_models`) and the one language-model family
-  (`api/text_models.py:builtin_text_models`, which also builds the two text-classification families, `bert` and `gpt2`), so a guard that walks
-  `registry.MODELS` meets 30 families (8 + 4 + 5 + 2 + 7 + 1 + 1 + 2, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  (`api/text_models.py:builtin_text_models`, which also builds the two text-classification families, `bert` and `gpt2`) and the one tokenizer
+  family (`api/tokenizer_models.py:builtin_tokenizer_models`), so a guard that walks
+  `registry.MODELS` meets 31 families (8 + 4 + 5 + 2 + 7 + 1 + 1 + 2 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
   classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
   layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
   changed once with another session's commits; a test fails when the head gains a knob).
@@ -702,10 +703,10 @@ classification task calls the same `train.common.classification_run` helpers as 
   `check_data_unchanged` were made against the original. `TaskTrainer.resume_order` (a class variable, default `None`) is the clause
   that says what a resume does to the data order, for the summary's resume note and, through `config.resume_help(order=)`, the help of
   `resume_interrupted`: the default text is the older tasks' ("replays epoch 0's"), a task whose `resume_stream` trains on another
-  stream sets it (`pretrain`, `time_series_forecasting`, `depth_estimation`, `language_model_pretraining` and `text_classification` do). `resume_help(backup=)` is the
+  stream sets it (`pretrain`, `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `language_model_pretraining` and `text_classification` do). `resume_help(backup=)` is the
   help's clause on `checkpoint_args.backup_every_steps`: the default (`config.BACKUP_HELP`) says the key bounds the lost
-  work, and `depth_estimation`, which refuses the key, passes a clause saying so. Both hooks have five users today, `pretrain`,
-  `time_series_forecasting`, `depth_estimation`, `language_model_pretraining` and `text_classification`, the last two of which continue
+  work, and `depth_estimation`, which refuses the key, passes a clause saying so. Both hooks have six users today, `pretrain`,
+  `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `language_model_pretraining` and `text_classification`, the last two of which continue
   the stream at the settled step instead of deriving a seed. `TaskTrainer.resume_stream_exact` (a class variable, default `False`) says that a
   resume from a copy taken inside an epoch reads the batches the unkilled run reads next, because `resume_stream` returns the SAME stream
   at the settled step; two tasks set it today, `language_model_pretraining` and `text_classification`, and a task that derives another stream or replays epoch 0

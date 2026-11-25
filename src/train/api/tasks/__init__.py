@@ -65,6 +65,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.text_classification:train_text_classification",
         summary="train a BERT or GPT-2 text classifier on a labelled corpus, scored against the majority class of its selection split",
     ),
+    registry.TaskSpec(
+        name="beit_tokenizer",
+        config_class="train.api.tasks.beit_tokenizer:BeitTokenizerConfig",
+        function="train.api.tasks.beit_tokenizer:train_beit_tokenizer",
+        summary="train the BEiT stage-0 tokenizer, a discrete VQ autoencoder, scored against the constant image and a codebook-usage floor",
+    ),
 )
 
 
