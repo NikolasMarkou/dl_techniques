@@ -125,10 +125,11 @@ SMALL_IMAGE_SIZE = 32
 #: rule, ``loader`` the arguments of ``load_classification_data`` the recipe
 #: decides (read by the data step), and the five group keys are those of the
 #: task config (``analysis_args`` only in a ``per_dataset`` overlay: no family's base recipe
-#: has one, D-040). ``data`` is the ``data`` group, held by the pretrain families only: the
-#: mask keys depend on the family (ET masks a ratio, BEiT blocks of patches) and the patch
-#: size on the dataset, so the family's recipe decides them
-#: (``train.api.pretrain_args.PretrainData``).
+#: has one, D-040). ``data`` is the ``data`` group, held by the families whose recipe decides a
+#: data key: the pretrain families (the mask keys depend on the family, ET masks a ratio, BEiT
+#: blocks of patches, and the patch size on the dataset: ``train.api.pretrain_args.PretrainData``),
+#: the tokenizer family (the patch size: ``train.api.tokenizer_args.TokenizerData``) and the
+#: forecasting families (the lookback and the horizon).
 RECIPE_KEYS = (
     "epochs",
     "batch_size",
