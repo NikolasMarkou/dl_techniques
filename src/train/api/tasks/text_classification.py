@@ -27,11 +27,13 @@ Interface contract
     ``val_accuracy`` is a function of the weights alone. A resume CONTINUES the stream at the settled step (``resume_stream``) and says
     so (``resume_stream_exact``).
 
-    The bar (D-006, D-057). ``success_value`` is the highest ``val_accuracy`` of the selection split; ``success_threshold`` is the share
-    of its majority class, counted from its labels in ``build_data`` (a floor: 0.5 on balanced reviews); the bar is STRICTLY above it,
-    in float32 with no band (:func:`train.common.text_run.strictly_above`: a model that answers the majority class scores the share to
-    the last bit), and under ``init`` also strictly above the loaded weights' epoch-zero accuracy (``Evaluation.loaded``). A constant
-    predictor therefore misses it though it clears chance. Under ``debug_args.smoke`` no bar is applied.
+    The bar (D-006, D-057, D-076). ``success_value`` is the highest ``val_accuracy`` of the selection split; ``success_threshold`` is
+    the share of its majority class, counted from its labels in ``build_data``, plus a margin of three binomial standard errors of that
+    share on the selection rows (:func:`train.common.text_run.accuracy_margin`; IMDB: 0.5028 + 0.0300), which a guesser clears in 0.44
+    percent of runs; the bar is STRICTLY above it, in float32 with no band (:func:`train.common.text_run.strictly_above`: a model that
+    answers the majority class scores the share to the last bit), and under ``init`` also strictly above the loaded weights' epoch-zero
+    accuracy (``Evaluation.loaded``). A constant predictor therefore misses it though it clears chance. Under ``debug_args.smoke`` no
+    bar is applied.
 
     ``init``. A ``gpt2`` run starts from an earlier ``gpt2_lm`` run (the decoder copied path for path, the head fresh), a ``bert`` run
     from none (an encoder cannot start from a causal decoder); identity and split count are the language task's
@@ -212,9 +214,10 @@ class TextClassificationTrainer(TaskTrainer):
 
     def __init__(self, config: StrictConfig) -> None:
         super().__init__(config)
-        #: The share of the majority class of the selection split (the bar), set by ``build_data`` (a resume builds the data
-        #: again, so it is there before the summary or the verdict).
+        #: The share of the majority class of the selection split and the margin of the bar above it, set by ``build_data`` (a
+        #: resume builds the data again, so they are there before the summary or the verdict).
         self._majority: Optional[float] = None
+        self._margin: Optional[float] = None
 
     # -- data and model -------------------------------------------------
 
@@ -236,11 +239,13 @@ class TextClassificationTrainer(TaskTrainer):
         # DECISION plan-2026-11-24T092348-7806a290/D-057
         # The bar is cut from the SELECTION split's labels, the rows the best epoch is chosen on. Do NOT count the train rows' share
         # (another number: the split is by document) and do NOT use 1 / num_classes or twice chance (a constant predictor clears
-        # both: it scores the majority share).
+        # both: it scores the majority share). D-076: the bar is that share plus `accuracy_margin`; do NOT compare with the bare share.
         self._majority = text_run.majority_share(split.select[1])
+        self._margin = text_run.accuracy_margin(self._majority, data.n_select)
         logger.info(
             f"Baseline (the majority class of the {data.n_select} fixed selection rows, counted): val_accuracy {self._majority:.6g}; "
-            f"a model that answers one class to every row scores it, and the bar is strictly above it")
+            f"a model that answers one class to every row scores it, and the bar is strictly above it plus {self._margin:.4g} "
+            f"({text_run.BAR_STANDARD_ERRORS:g} binomial standard errors), {self._majority + self._margin:.6g}")
         return data
 
     def task_record(self, config: TextClassificationConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
@@ -252,7 +257,7 @@ class TextClassificationTrainer(TaskTrainer):
         table = registry.MODELS[context.family].load_variants()
         return build_text_classification_record(
             model=config.model, family=context.family, variant=context.variant, seq_len=data.input_shape[0],
-            tokenizer=data.spec.record(), class_names=CLASS_NAMES,
+            tokenizer=data.spec.record(), class_names=CLASS_NAMES, tokenizer_dir=config.data.tokenizer_dir,
             variant_overrides=overrides_of_variant(table[context.variant], self._model_kwargs(config, context)),
         )
 
@@ -329,13 +334,13 @@ class TextClassificationTrainer(TaskTrainer):
         return float(max(hist[self.success_metric][self.selection_start_epoch(self.config):]))
 
     def success_threshold(self, config: TextClassificationConfig) -> float:
-        """Return the majority-class share of the selection split, which ``build_data`` counted."""
-        if self._majority is None:
+        """Return the majority-class share of the selection split plus its margin, which ``build_data`` worked out."""
+        if self._majority is None or self._margin is None:
             raise RuntimeError(
-                "success_threshold is the majority-class share of the selection split, which build_data works out; it was asked "
-                "for before the data was built"
+                "success_threshold is the majority-class share of the selection split plus its margin, which build_data works out; "
+                "it was asked for before the data was built"
             )
-        return self._majority
+        return self._majority + self._margin
 
     def bar_is_met(self, config: TextClassificationConfig, reached: float, threshold: float, loaded: Optional[float] = None) -> bool:
         from train.common import text_run
@@ -360,7 +365,7 @@ class TextClassificationTrainer(TaskTrainer):
                   for part, labels in (("train", split.train_labels), ("select", split.select[1]), ("test", split.test[1]))}
         return {
             "seq_len": config.data.seq_len,
-            "tokenizer": data.spec.record(),
+            "tokenizer": data.spec.record(), "corpus_sha256": data.fingerprint,
             "class_names": list(CLASS_NAMES),
             "class_counts": counts,
             "documents": {part: sum(row) for part, row in counts.items()},
@@ -385,11 +390,12 @@ class TextClassificationTrainer(TaskTrainer):
             *classification_run.RUN_NOTES,
             "`val_accuracy` is the accuracy over the fixed selection rows (one row per selection document: [CLS], the head of the "
             "document, pad), a function of the weights alone; `success_value` is its highest value over the epochs and "
-            "`success_threshold` is the share of the majority class of those rows (`baseline.val_accuracy`): what a model that "
-            "answers one class to every row scores. The bar is STRICTLY above it, compared in float32 with no band, so a constant "
-            "predictor misses it, and under `init` also strictly above the loaded weights' epoch-zero accuracy "
+            "`success_threshold` is the share of the majority class of those rows (`baseline.val_accuracy`: what a model that "
+            "answers one class to every row scores) plus a margin of three binomial standard errors of that share on those rows "
+            "(`baseline.margin`, at most half the way to 1.0). The bar is STRICTLY above it, compared in float32 with no band, so a "
+            "constant predictor and a guesser miss it, and under `init` also strictly above the loaded weights' epoch-zero accuracy "
             "(`loaded_success_value`)",
-            "the bar is a floor, not a target: on balanced reviews it is 0.5, and the accuracies it lets through are the result to read "
+            "the bar says the model learned something, not how much: the accuracies it lets through are the result to read "
             "(`class_counts`, `test_metrics_best`)",
         ]
         notes.append(
@@ -436,7 +442,8 @@ class TextClassificationTrainer(TaskTrainer):
         fields, _, best = text_run.report_run(config, data, fit, functools.partial(self.run_analysis, config), start)
         extras: Dict[str, Any] = {
             "baseline": {"kind": "majority", "class": CLASS_NAMES[int(np.bincount(data.split.select[1]).argmax())],
-                         "val_accuracy": self._majority},
+                         "val_accuracy": self._majority, "margin": self._margin, "standard_errors": text_run.BAR_STANDARD_ERRORS,
+                         "rows": data.n_select},
             "selection": selection_block(start, fit.epochs_run, best),
         }
         # Under `init` the bar must also beat the loaded weights' epoch-zero accuracy, read from the sidecar (None without init).

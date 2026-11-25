@@ -383,7 +383,7 @@ def test_under_init_epoch_zero_is_the_loaded_weights_accuracy_and_a_fine_tune_th
     assert summary["success"] is False and not text_run.strictly_above(summary["success_value"], loaded)
     assert init_from.NOT_JUDGED_UNDER_INIT in summary["notes"]
     assert "Evaluate of the loaded weights before fit: " in (still.out / "run.log").read_text()
-    logger.info(f"CLS-INIT-STILL epoch zero (the loaded weights) {loaded:.4f}, bar (majority share) "
+    logger.info(f"CLS-INIT-STILL epoch zero (the loaded weights) {loaded:.4f}, bar (share plus margin) "
                 f"{summary['success_threshold']:.4f}, best of the still run {summary['success_value']:.4f}, success {summary['success']}")
 
 
@@ -407,7 +407,7 @@ def test_the_overlap_of_a_language_source_with_the_imdb_selection_is_counted_as_
     n, split = 120, CLASSIFIER_SPLIT
     trainer, resolved, _ = classifier_prepared(tmp_path / "imdb", **{"data.dataset": "imdb_reviews", "data.max_samples": n})
     theirs = {"seed": 42, "data": {"dataset": "imdb_reviews", "validation_split": split, "max_samples": n}}
-    source = SimpleNamespace(config=theirs, record={"task": LM_TASK})
+    source = SimpleNamespace(config=theirs, record={"task": LM_TASK}, path=tmp_path)    # a source is a directory: no sidecar in it, no digest
 
     def data_of(seed):
         chosen = held_out(seed, n, split)

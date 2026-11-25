@@ -20,6 +20,7 @@ stock sparse cross entropy, on rows ``[CLS]`` + the head of a document + pad. Th
 Tests write only under ``tmp_path``.
 """
 
+import dataclasses
 import json
 import os
 import re
@@ -35,7 +36,7 @@ import tensorflow as tf
 
 import train
 from dl_techniques.utils.logger import logger
-from train.api import cli, registry
+from train.api import cli, registry, resume_decisions
 from train.api import text_tokenizer as tt
 from train.api.errors import ConfigError
 from train.api.tasks.text_classification import TextClassificationTrainer, train_text_classification
@@ -127,10 +128,12 @@ def test_a_tiny_run_exits_zero_and_meets_the_majority_bar(tiny, tmp_path):
     trainer, resolved, context = classifier_prepared(tmp_path / "again", tiny.family)
     data, labels = selection_labels(trainer, resolved, context)
     share = float(np.bincount(labels).max() / len(labels))
-    reached, threshold = summary["success_value"], summary["success_threshold"]
-    assert threshold == share == summary["baseline"]["val_accuracy"] and 0.5 < share < 0.8
-    assert np.float32(reached) > np.float32(threshold), "strictly above the majority share of the selection split"
-    logger.info(f"CLS-TINY {tiny.family}: best val_accuracy {reached:.4f} bar (majority share) {threshold:.4f}, "
+    reached, threshold, baseline = summary["success_value"], summary["success_threshold"], summary["baseline"]
+    margin = text_run.accuracy_margin(share, len(labels))
+    assert (baseline["val_accuracy"], baseline["margin"], baseline["standard_errors"], baseline["rows"]) == (share, margin, 3.0, len(labels))
+    assert threshold == share + margin and 0.5 < share < threshold < 1.0
+    assert np.float32(reached) > np.float32(threshold), "strictly above the majority share of the selection split plus its margin"
+    logger.info(f"CLS-TINY {tiny.family}: best val_accuracy {reached:.4f} bar (share plus margin) {threshold:.4f}, "
                 f"epochs {summary['epochs_run']} steps/epoch {summary['steps_per_epoch']} selection rows {data.n_select}")
     assert summary["n_val"] == data.n_select == len(labels) and summary["num_classes"] == 2
     assert reached >= 0.9, "the bank's cue words separate the classes: a classifier that learns scores far above 0.6"
@@ -140,12 +143,14 @@ def test_the_summary_names_the_tokenizer_the_classes_their_counts_and_the_trunca
     summary = tiny.summary
     assert summary["tokenizer"] == ASCII.record() and (summary["seq_len"], summary["input_shape"]) == (SEQ_LEN, [SEQ_LEN])
     assert summary["class_names"] == ["neg", "pos"]
+    assert summary["corpus_sha256"] == json.loads((tiny.out / "checkpoints" / "fit_state.json").read_text())["data_fingerprint"]    # N6
     counts = summary["class_counts"]
     assert set(counts) == {"train", "select", "test"} and all(len(row) == 2 for row in counts.values())
     assert sum(counts["train"]) + sum(counts["select"]) == tiny.asked["data"]["max_samples"]
     assert summary["documents"] == {"train": sum(counts["train"]), "select": sum(counts["select"]), "test": sum(counts["test"])}
-    # a character is an id, so every document of the bank is longer than a row of 32 ids: the count is every document read
-    assert summary["truncated_documents"] == sum(summary["documents"].values()) == CLASSIFIER_DOCUMENTS + CLASSIFIER_DOCUMENTS // 4
+    # a character is an id and a row keeps 31 of them: the documents cut are those of more than 31 characters (all but one here)
+    texts = [text for part in td.corpus_documents("synthetic", td.CLASSIFICATION, max_samples=CLASSIFIER_DOCUMENTS) for text in part[0]]
+    assert summary["truncated_documents"] == sum(len(text) > SEQ_LEN - 1 for text in texts) < len(texts) == sum(summary["documents"].values())
     assert summary["baseline"]["class"] == "neg" and "(seed, step)" in summary["stream"]["rule"]
     assert 0.5 < summary["initial_loss_ratio"] < 2 and isinstance(summary["init_scale_warning"], bool)
 
@@ -189,9 +194,10 @@ def test_a_constant_predictor_clears_chance_and_does_not_meet_the_bar_and_a_trai
     logits = [10.0 if index == majority else 0.0 for index in range(2)]
     scored = float(constant_classifier(logits).evaluate(data.select_ds, verbose=0, return_dict=True)["accuracy"])
     threshold = trainer.success_threshold(resolved)
-    assert np.float32(scored) == np.float32(threshold), "the constant predictor scores the majority share to the last bit"
+    assert np.float32(scored) == np.float32(text_run.majority_share(labels)), "the constant predictor scores the majority share to the last bit"
     assert scored > 1 / 2, "the control: it clears CHANCE (a bar at 1 / classes calls it a success), the bank is imbalanced"
     assert trainer.bar_is_met(resolved, scored, threshold) is False, "a constant predictor never meets the bar"
+    assert trainer.bar_is_met(resolved, scored + 0.01, threshold) is False, "nor does a model a point above the share (W2)"
     assert trainer.bar_is_met(resolved, threshold, threshold) is False, "equal to the threshold is a miss"
     assert trainer.bar_is_met(resolved, float("nan"), threshold) is False
     assert trainer.bar_is_met(resolved, tiny.summary["success_value"], threshold) is True
@@ -206,7 +212,7 @@ def test_the_threshold_is_the_selection_splits_majority_share_never_the_train_ro
     data, labels = selection_labels(trainer, resolved, context)
     train_share = float(np.bincount(data.split.train_labels).max() / len(data.split.train_labels))
     share = text_run.majority_share(labels)
-    assert trainer.success_threshold(resolved) == share
+    assert trainer.success_threshold(resolved) == share + text_run.accuracy_margin(share, len(labels))
     assert share != train_share and share != 1 / 2, "the control: the selection split's share is neither of the wrong bars"
     assert trainer.success_value({"val_accuracy": [0.4, 0.7, 0.6]}) == 0.7
 
@@ -294,6 +300,38 @@ def test_a_part_that_lacks_a_class_is_refused_by_name_with_its_count_and_a_strea
                        validation_split=0.3, num_classes=2)
     with pytest.raises(ValueError, match="fewer than one batch of 64"):
         tagged_split(batch_size=64)
+
+
+@pytest.mark.parametrize("change", ["a character", "a label"])
+def test_a_resume_on_other_documents_is_refused_naming_both_digests_and_the_same_corpus_is_not(change, world, tmp_path, monkeypatch):  # noqa: F811
+    # review pass 1, N6: nothing identified the documents a run read, so a resume over another corpus (a TFDS build, a bank change) went on
+    trainer, resolved, context = classifier_prepared(tmp_path / "run")
+    first, real = trainer.build_data(resolved, context), td.corpus_documents
+
+    def another(dataset, kind, *, max_samples):         # one review with one character or one label changed: every count stays
+        (texts, labels), test = real(dataset, kind, max_samples=max_samples)
+        if change == "a label":
+            return (texts, np.where(np.arange(len(labels)) == 0, 1 - labels, labels)), test
+        return ([texts[0][:-2] + "x.", *texts[1:]], labels), test
+
+    monkeypatch.setattr(td, "corpus_documents", another)
+    second = trainer.build_data(resolved, context)
+    state = {"data_counts": resume_decisions.data_counts(first), **resume_decisions.data_fingerprint_field(resolved, first)}
+    assert resume_decisions.data_counts(second) == state["data_counts"] and len(first.fingerprint) == 64 and first.fingerprint != second.fingerprint
+    resume_decisions.check_data_unchanged(tmp_path, resolved, None, first, SimpleNamespace(state=state))
+    with pytest.raises(ConfigError, match=rf"data_fingerprint: {first.fingerprint[:12]} -> {second.fingerprint[:12]}"):
+        resume_decisions.check_data_unchanged(tmp_path, resolved, None, second, SimpleNamespace(state=state))
+
+
+@pytest.mark.parametrize("language", [False, True], ids=["text_classification", "language_model_pretraining"])
+def test_the_record_a_task_writes_names_the_tokenizer_directory_only_when_the_run_set_one(language, world, tmp_path):  # noqa: F811
+    # review pass 1, N2: the key is what lets `predict` open the BPE files where the run read them
+    trainer, resolved, context = prepared(tmp_path / "lm") if language else classifier_prepared(tmp_path / "cls")
+    for directory in (None, "/somewhere/bpe", "bpe"):       # set past the request's own check, which would read the files there
+        config = dataclasses.replace(resolved, data=dataclasses.replace(resolved.data, tokenizer_dir=directory))
+        record = trainer.task_record(config, context, SimpleNamespace(input_shape=(SEQ_LEN,), spec=ASCII))
+        assert record.get("tokenizer_dir") == (None if directory is None else str(Path(directory).resolve())), record   # absolute: any cwd
+        assert ("tokenizer_dir" in record) == (directory is not None)
 
 
 def test_a_document_longer_than_the_row_is_cut_to_its_head_and_counted(world, tmp_path):  # noqa: F811

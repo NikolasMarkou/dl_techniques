@@ -150,7 +150,7 @@ def test_the_version_is_two_and_the_tables_are_the_eight_tasks():
     assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH, PRETRAIN, LANGUAGE,
                                           TEXT_CLASSIFICATION])
     assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
-    assert OPTIONAL_RECORD_KEYS == ("variant_overrides", "init")
+    assert OPTIONAL_RECORD_KEYS == ("variant_overrides", "init", "tokenizer_dir")
 
 
 def test_a_classification_record_is_the_version_1_record_with_the_number_changed():
@@ -232,6 +232,19 @@ def test_a_text_classification_record_is_the_language_models_with_the_classifier
     assert (record["task"], record["seq_len"], record["cls_id"], record["class_names"]) == (TEXT_CLASSIFICATION, 256, 50257, ["neg", "pos"])
     assert (record["layout"], record["output"], len(record["tokenizer_files"])) == ("cls_head_pad", "logits", 2)
     assert not {"mean", "std", "normalize", "input_shape", "input_size", "lookback"} & set(record)
+
+
+@pytest.mark.parametrize("make, ids", [(language, ("eot_id", "pad_id")), (text_classification, ("eot_id", "pad_id", "cls_id"))],
+                         ids=[LANGUAGE, TEXT_CLASSIFICATION])
+def test_a_text_record_that_names_the_pinned_digest_holds_the_ids_that_digest_is_made_of(make, ids):
+    # review pass 1, N3: a classifier record with cls_id set to the end-of-text id was accepted, and export copies the record
+    from train.api.predictor import record_problems
+
+    assert record_problems(make()) == []
+    for key in ids:
+        lines = record_problems(make(**{key: 50260}))        # the mask id: inside the vocabulary and none of this record's ids
+        assert any(f"'{key}'" in line and "tokenizer digest" in line for line in lines), (key, lines)
+    assert record_problems(make(tokenizer="f" * 64, eot_id=7)) == [], "another digest is another tokenizer: its ids are not this code's to judge"
 
 
 @pytest.mark.parametrize("make", [classification, segmentation, forecasting, depth, pretrain, language, text_classification],

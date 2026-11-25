@@ -507,7 +507,7 @@ LM_RECIPE: Dict[str, Any] = {
 #: ``bert`` and ``gpt2``: the same starting values for both, trained from scratch (the ``init`` arm of ``gpt2`` runs the same recipe),
 #: none measured (no text-classification run existed before this task): AdamW at 3e-4 with decoupled decay 0.01, one warmup epoch
 #: and a cosine decay over all epochs, a global gradient clip of 1.0, batch 32, 8 epochs, patience 4. The metric is the accuracy of
-#: the selection split: the bar is a statement about it (the majority-class share is the floor).
+#: the selection split: the bar is a statement about it (the majority-class share plus a margin, D-076).
 CLASSIFIER_RECIPE: Dict[str, Any] = {
     "epochs": 8,
     "batch_size": 32,
@@ -526,11 +526,11 @@ RECIPES: Dict[str, Dict[str, Any]] = {GPT2_LM: LM_RECIPE, BERT: CLASSIFIER_RECIP
 
 #: What each family's notice says: the kind of run that did not exist before, the model the numbers are common starting values for,
 #: and what the bar is (the notice must say that the run's result, not the bar, is what the numbers give).
-_FLOOR = "the majority-class share of the selection split, a floor"
+_CLASSIFIER_BAR = "the majority-class share of the selection split plus three binomial standard errors of it"
 _NOTICE_WORDS: Dict[str, Tuple[str, str, str]] = {
     GPT2_LM: ("language-model", "a small GPT-2", "the unigram's loss"),
-    BERT: ("text-classification", "a small BERT trained from scratch", _FLOOR),
-    GPT2_CLASSIFIER: ("text-classification", "a small GPT-2 trained from scratch", _FLOOR),
+    BERT: ("text-classification", "a small BERT trained from scratch", _CLASSIFIER_BAR),
+    GPT2_CLASSIFIER: ("text-classification", "a small GPT-2 trained from scratch", _CLASSIFIER_BAR),
 }
 
 

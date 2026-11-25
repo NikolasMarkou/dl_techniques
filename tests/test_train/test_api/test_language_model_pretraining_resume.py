@@ -15,7 +15,7 @@ So ``resume_stream`` returns the SAME stream starting at ``completed_steps``, an
 * **the settled count reaches the stream**, at an epoch boundary (``start * steps``) and from a copy taken inside an epoch
   (``start * steps + batch + 1``, ``checkpoint_args.backup_every_steps=2``): the batch term is part of the count;
 * ``resume_stream`` returns a stream, not ``data``, and the replacement keeps what the sequence checks (``steps_per_epoch``, the
-  three counts, no fingerprint).
+  three counts and the corpus fingerprint).
 
 One chain of three child processes (``_language_child.py``; the marker protocol of ``test_backup_every_steps.run_child``, which
 SIGKILLs the RECORDED PID at a ``@@AT`` marker) on 3 epochs: process 1 is killed after 2 batches of epoch 1, process 2 resumes,
@@ -205,7 +205,7 @@ def test_resume_stream_returns_a_stream_that_starts_at_the_count_and_keeps_what_
     assert replacement is not data and replacement.train_ds is not data.train_ds, "None or `data` would be the replay"
     assert (replacement.steps_per_epoch, replacement.n_train, replacement.n_select, replacement.n_test) == (
         data.steps_per_epoch, data.n_train, data.n_select, data.n_test)
-    assert getattr(replacement, "fingerprint", None) is None and getattr(data, "fingerprint", None) is None
+    assert replacement.fingerprint == data.fingerprint and len(data.fingerprint) == 64, "the corpus digest, kept by the replacement"
     assert replacement.select_ds is data.select_ds and replacement.test_ds is data.test_ds, "the fixed sets are not rebuilt"
     first = next(iter(replacement.train_ds))
     assert digest((first[0].numpy(), first[1].numpy())) == digest(data.split.stream.batch_at(count))

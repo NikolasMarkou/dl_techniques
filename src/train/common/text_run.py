@@ -2,9 +2,10 @@
 
 The bar of ``language_model_pretraining`` is cut from the ``val_loss`` of a CONSTANT model that predicts the unigram
 distribution of the selection targets, and the bar of ``text_classification`` from the share of the majority class of the
-selection split. Neither needs a model. A constant Keras model over a 50,261-wide vocabulary at batch 8 and 255 positions is
-0.4 GB of logits a forward (3 GB at 100,277), where the unigram is a count of the targets: O(vocabulary) memory. The module
-scope imports numpy only (the check against a compiled constant model is a test); the reporting imports ``train.common`` inside.
+selection split plus a margin of three binomial standard errors of it. Neither needs a model. A constant Keras model over a
+50,261-wide vocabulary at batch 8 and 255 positions is 0.4 GB of logits a forward (3 GB at 100,277), where the unigram is a count
+of the targets: O(vocabulary) memory. The module scope imports numpy only (the check against a compiled constant model is a test);
+the reporting imports ``train.common`` inside.
 
 Interface contract
 ------------------
@@ -19,6 +20,12 @@ Interface contract
     :return: the share of the most frequent class among ``labels`` (non-negative integer class ids), a float64 ratio whose
         float32 is what Keras' accuracy divides for a model that answers the majority class. :raises ValueError: no label, a
         negative or non-integer one.
+
+``accuracy_margin(share, n_rows)``
+    :return: how far above the majority ``share`` of ``n_rows`` selection rows a classifier's bar sits: :data:`BAR_STANDARD_ERRORS`
+        binomial standard errors of the share, ``3 * sqrt(share * (1 - share) / n_rows)``, capped at half the way from ``share`` to 1.0
+        so that ``share + margin`` stays attainable. On IMDB's 2,498 selection rows it is 0.0300, a bar of 0.5328, which a guesser
+        clears in 0.44 percent of 8-epoch runs where the bare share (0.5028) let 97.9 percent through (exact binomial).
 
 ``strictly_below(reached, threshold, n_batches)``
     :param reached: a ``val_loss`` (Keras' float32); ``threshold``: the unigram (float64) or the epoch-zero loss; ``n_batches``:
@@ -42,6 +49,7 @@ Interface contract
     ``extras`` and ``failed_checks``), the history as plain floats and the 1-based best epoch of ``metric_args.watch_metric``.
 """
 
+import math
 from typing import Any, Callable, Dict, Tuple
 
 import numpy as np
@@ -52,6 +60,9 @@ LOAD_CHECK_ROWS = 4
 
 #: Targets counted per pass: a count never holds more than this many ids as one ``intp`` array (8 MB).
 CHUNK_ELEMENTS = 1 << 20
+
+#: Binomial standard errors of the majority share that a classifier's bar sits above it (:func:`accuracy_margin`, D-076).
+BAR_STANDARD_ERRORS = 3.0
 
 
 def unigram_val_loss(label_array: np.ndarray, vocab_size: int) -> float:
@@ -91,6 +102,16 @@ def majority_share(labels: np.ndarray) -> float:
     if ids.dtype.kind not in "iu" or ids.min() < 0:
         raise ValueError(f"labels must be non-negative integer class ids, got dtype {ids.dtype}")
     return float(np.bincount(ids.reshape(-1)).max() / ids.size)
+
+
+def accuracy_margin(share: float, n_rows: int) -> float:
+    """The margin of a classifier's bar over the majority ``share`` of ``n_rows`` rows; see the module contract."""
+    # DECISION plan-2026-11-24T092348-7806a290/D-076
+    # The bar is the share PLUS this margin, not the bare share: on IMDB's 2,498 selection rows a coin flip clears 0.5028 in 98.3
+    # percent of 8-epoch runs (and a constant model with five answers flipped in about half of its epochs), so "above the share"
+    # said nothing about learning. Do NOT drop the margin, do NOT make it a key (a knob that lowers it re-opens the hole) and do NOT
+    # lift the cap (a bar of 1.0 or more can never be strictly beaten, and a tiny selection split would then fail every run).
+    return min(BAR_STANDARD_ERRORS * math.sqrt(share * (1.0 - share) / n_rows), (1.0 - share) / 2.0)
 
 
 def strictly_below(reached: float, threshold: float, n_batches: int) -> bool:

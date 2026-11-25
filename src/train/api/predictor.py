@@ -124,7 +124,8 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     next-token logits ``(seq_len, vocab_size)`` (``output`` is ``"next_token_logits"``, :data:`LANGUAGE_OUTPUTS`). ``encoding`` is the
     tokenizer (:data:`train.api.text_tokenizer.TOKENIZERS`), ``n_vocab`` its own ids, ``vocab_size`` the model's, ``eot_id`` and ``pad_id``
     ids below it; ``tokenizer`` is the digest of its :class:`~train.api.text_tokenizer.TokenizerSpec` and ``tokenizer_files`` the sha256
-    of each BPE file (``{}`` for ``ascii95``). ``check_record`` checks the formats and that the ids lie in the vocabulary; ``predict``
+    of each BPE file (``{}`` for ``ascii95``). ``check_record`` checks the formats and that the ids lie in the vocabulary, and, for a record
+    that names the digest this code pins, that ``eot_id`` and ``pad_id`` (``cls_id`` too) are the ones that digest is made of; ``predict``
     checks the digest against the one this code pins, so a record of another tokenizer is still a record (``export`` and ``init``
     read it). ``load_model`` refuses a ``seq_len`` or ``vocab_size`` that is not the model's, by the zero document's logits. A resume
     compares :data:`DATA_KEYS`.
@@ -136,6 +137,10 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     document and pad ids up to ``seq_len``) and ``output`` (:data:`TEXT_CLASSIFICATION_OUTPUTS`: ``logits``, one per class name).
     ``load_model`` refuses a ``seq_len`` or a class count that is not the model's, by the zero document's logits. A resume compares
     :data:`DATA_KEYS`: the language model's four and ``class_names``.
+
+``tokenizer_dir`` (OPTIONAL, a language-model or text-classification record)
+    The directory the run read its BPE files from, written ONLY when the run set ``data.tokenizer_dir`` (null: the pinned copy, no key).
+    ``predict`` opens the tokenizer from it, after the hashes of the files are checked (D-077); a file of another hash is refused by name.
 
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
@@ -305,7 +310,7 @@ from .pretrain_args import TASK as PRETRAIN
 from .recipes import ET_CLASSIFIER
 from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 from .text_args import CLASSIFICATION_TASK as TEXT_CLASSIFICATION, TASK as LANGUAGE_MODEL
-from .text_tokenizer import ASCII95, TOKENIZERS
+from .text_tokenizer import ASCII95, TOKENIZERS, tokenizer_spec
 
 # ---------------------------------------------------------------------
 
@@ -469,7 +474,7 @@ FORECAST_HEADS = ("point", "quantile")
 FORECAST_FORMATS = ("builtin", "csv")
 
 #: Keys a record MAY carry (written only when they hold something); every other key is required.
-OPTIONAL_RECORD_KEYS = ("variant_overrides", "init")
+OPTIONAL_RECORD_KEYS = ("variant_overrides", "init", "tokenizer_dir")
 
 #: The keys of the optional ``init`` block (where a run's starting weights came from: ``train.api.init_from``), in the
 #: order they are written; ``transfer`` holds :data:`INIT_TRANSFER_KEYS`, each ``resampled`` entry
@@ -535,8 +540,10 @@ WIDE_MODES = ("I", "F")
 def _record_of(
     task: str, values: Mapping[str, Any], variant_overrides: Optional[Mapping[str, Any]]
 ) -> Dict[str, Any]:
-    """Return the record of ``task``: ``values`` in the order of ``RECORD_KEYS[task]``, plus the optional key."""
+    """Return the record of ``task``: ``values`` in the order of ``RECORD_KEYS[task]``, plus the optional keys that hold something."""
     record = {key: values[key] for key in RECORD_KEYS[task]}
+    if values.get("tokenizer_dir") is not None:      # only a text record's values hold the key; absolute, so `predict` reads it from any directory
+        record["tokenizer_dir"] = str(Path(values["tokenizer_dir"]).resolve())
     if variant_overrides:
         record["variant_overrides"] = _plain(dict(variant_overrides))
     return record
@@ -817,8 +824,10 @@ def build_pretrain_record(
     )
 
 
-def _text_values(task: str, model: str, family: str, variant: str, seq_len: int, tokenizer: Mapping[str, Any]) -> Dict[str, Any]:
-    """Return the values of :data:`_TEXT_KEYS` for a record of ``task``; ``tokenizer`` is a ``TokenizerSpec.record()``."""
+def _text_values(
+    task: str, model: str, family: str, variant: str, seq_len: int, tokenizer: Mapping[str, Any], tokenizer_dir: Optional[str]
+) -> Dict[str, Any]:
+    """Return the values of :data:`_TEXT_KEYS` (and ``tokenizer_dir``) for a record of ``task``; ``tokenizer`` is a ``TokenizerSpec.record()``."""
     return {
         "schema_version": SCHEMA_VERSION,
         "task": task,
@@ -833,6 +842,7 @@ def _text_values(task: str, model: str, family: str, variant: str, seq_len: int,
         "pad_id": tokenizer["pad_id"],
         "tokenizer": tokenizer["digest"],
         "tokenizer_files": dict(tokenizer["files"]),
+        "tokenizer_dir": tokenizer_dir,
     }
 
 
@@ -844,14 +854,16 @@ def build_language_model_record(
     seq_len: int,
     tokenizer: Mapping[str, Any],
     variant_overrides: Optional[Mapping[str, Any]] = None,
+    tokenizer_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return the ``task.json`` record of a language-model run; see the module contract.
 
     :param seq_len: the number of ids the model was built to take.
     :param tokenizer: :meth:`train.api.text_tokenizer.TokenizerSpec.record` of the run's tokenizer (its fields and digest).
+    :param tokenizer_dir: the run's ``data.tokenizer_dir``; the record gets the ``tokenizer_dir`` key only when it is not ``None``.
     :return: the record; ``output`` is the first of :data:`LANGUAGE_OUTPUTS`. It is NOT checked (:func:`check_record` does that).
     """
-    values = _text_values(LANGUAGE_MODEL, model, family, variant, seq_len, tokenizer)
+    values = _text_values(LANGUAGE_MODEL, model, family, variant, seq_len, tokenizer, tokenizer_dir)
     return _record_of(LANGUAGE_MODEL, {**values, "output": LANGUAGE_OUTPUTS[0]}, variant_overrides)
 
 
@@ -864,16 +876,18 @@ def build_text_classification_record(
     tokenizer: Mapping[str, Any],
     class_names: Sequence[str],
     variant_overrides: Optional[Mapping[str, Any]] = None,
+    tokenizer_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return the ``task.json`` record of a text-classification run; see the module contract.
 
     :param seq_len: the number of ids a row holds, which the model was built to take.
     :param tokenizer: :meth:`train.api.text_tokenizer.TokenizerSpec.record` of the run's tokenizer (its ``cls_id`` is the id rows begin with).
     :param class_names: the label names in label order, one per output of the model.
+    :param tokenizer_dir: as for :func:`build_language_model_record`.
     :return: the record; ``layout`` and ``output`` are the first of :data:`TEXT_LAYOUTS` and :data:`TEXT_CLASSIFICATION_OUTPUTS`. It is NOT
         checked (:func:`check_record` does that).
     """
-    values = _text_values(TEXT_CLASSIFICATION, model, family, variant, seq_len, tokenizer)
+    values = _text_values(TEXT_CLASSIFICATION, model, family, variant, seq_len, tokenizer, tokenizer_dir)
     extra = {"cls_id": tokenizer["cls_id"], "class_names": list(class_names), "layout": TEXT_LAYOUTS[0], "output": TEXT_CLASSIFICATION_OUTPUTS[0]}
     return _record_of(TEXT_CLASSIFICATION, {**values, **extra}, variant_overrides)
 
@@ -1372,8 +1386,8 @@ def _tokenizer_problems(record: Mapping[str, Any]) -> List[str]:
     # The FORMAT of the tokenizer keys is checked here and nothing about what this code pins for the encoding: a record of another
     # tokenizer (an ascii95 run beside a gpt2 one, a digest this code no longer pins) is a valid record that ``export`` and the
     # ``init`` identity read, and refusing it here would hide the sentence that names both digests. ``predict`` checks the digest
-    # against the pin when it opens the tokenizer. Do NOT recompute the digest in this check, and do NOT copy it into the task's tail
-    # check: the language model and the text classifier both call it (D-062).
+    # against the pin when it opens the tokenizer. Do NOT refuse a record because its digest is not the pinned one, and do NOT copy
+    # this check into the task's tail check: the language model and the text classifier both call it (D-062).
     lines: List[str] = []
     if record["encoding"] not in TOKENIZERS:
         lines.append(f"'encoding' must be one of {', '.join(TOKENIZERS)}, got {record['encoding']!r}")
@@ -1387,6 +1401,17 @@ def _tokenizer_problems(record: Mapping[str, Any]) -> List[str]:
     elif record["encoding"] in TOKENIZERS and bool(files) != (record["encoding"] != ASCII95):
         lines.append(f"'tokenizer_files' must be {'empty' if record['encoding'] == ASCII95 else 'the BPE files'} for the {record['encoding']} "
                      f"tokenizer, got {_shown(files)}")
+    if "tokenizer_dir" in record and not (isinstance(record["tokenizer_dir"], str) and record["tokenizer_dir"]):
+        lines.append(f"'tokenizer_dir' must be a non-empty directory name (written only when data.tokenizer_dir was set), got {_shown(record['tokenizer_dir'])}")
+    # DECISION plan-2026-11-24T092348-7806a290/D-078
+    # A record that names the digest this code PINS for its encoding holds the ids that digest is made of: `eot_id`, `pad_id` and `cls_id`
+    # are what `predict` appends and pads with and what a consumer of an exported record builds rows from, so another id is a forged
+    # or corrupt record, not another tokenizer. A record of another digest is judged by format alone (D-033). Do NOT compare the ids
+    # of a record whose digest differs (it is a valid record of a tokenizer this code does not pin).
+    spec = tokenizer_spec(record["encoding"]) if record["encoding"] in TOKENIZERS else None
+    if spec is not None and digest == spec.digest:
+        lines += [f"{key!r} is {record[key]!r}, but the tokenizer digest the record names is {spec.encoding}'s, whose {key} is {getattr(spec, key)}"
+                  for key in ("eot_id", "pad_id", "cls_id") if key in record and record[key] != getattr(spec, key)]
     return lines
 
 

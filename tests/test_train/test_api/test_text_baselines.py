@@ -230,3 +230,20 @@ def test_a_constant_classifier_clears_chance_and_misses_the_majority_bar():
     assert tr.strictly_above(0.61, majority) and tr.strictly_above(majority + 1e-6, majority)
     # the image task's auto bar is 2 x chance clipped to 0.95: for two classes it is 0.95, not a number a constant model reaches
     assert min(2 * chance, 0.95) == 0.95 and not reached >= 0.95
+
+
+def test_the_bar_of_a_classifier_sits_three_standard_errors_above_the_majority_share_and_a_guesser_misses_it():
+    # review pass 1, W2: a bare `> share` was cleared by a coin flip in 98.3 percent of 8-epoch runs on IMDB's selection split
+    rows, positives = 2498, 1256
+    share = positives / rows
+    margin = tr.accuracy_margin(share, rows)
+    bar = share + margin
+    assert margin == pytest.approx(3 * math.sqrt(share * (1 - share) / rows)) and f"{bar:.4f}" == "0.5328", (margin, bar)
+    assert not tr.strictly_above(share + 0.01, bar) and not tr.strictly_above(bar, bar) and tr.strictly_above(bar + 1e-4, bar)
+    labels = np.arange(rows) < positives
+    guesses = np.random.default_rng(0).random((1000, 8, rows)) < 0.5       # 1000 guessers: an answer per row in each of 8 epochs
+    best = (guesses == labels).sum(axis=2).max(axis=1) / rows
+    assert np.mean([tr.strictly_above(b, bar) for b in best]) < 0.05, "a guesser does not pass"
+    assert np.mean([tr.strictly_above(b, share) for b in best]) > 0.9, "the control: it passed the bare share"
+    assert tr.strictly_above(1261 / rows, share) and not tr.strictly_above(1261 / rows, bar), "the best a 5-row-flipped constant model scores"
+    assert tr.accuracy_margin(0.95, 20) == pytest.approx(0.025) and 0.95 + tr.accuracy_margin(0.95, 20) < 1.0, "capped: a bar below 1.0"

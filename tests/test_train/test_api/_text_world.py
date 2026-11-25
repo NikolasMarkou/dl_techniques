@@ -50,7 +50,7 @@ BERT_MODEL_ARGS = {"hidden_size": 64, "num_layers": 2, "num_heads": 2, "intermed
 CLASSIFIER_ARGS = {"bert": BERT_MODEL_ARGS, "gpt2": TINY_MODEL_ARGS}
 SEQ_LEN, BATCH, EPOCHS = 32, 16, 3
 #: A classifier needs more steps than a language model to leave the majority share on a bank this small, and a selection split of
-#: 75 documents (a quarter of 300) keeps its majority share near the bank's 0.6 where one of 19 would swing to 0.526.
+#: 68 documents (a quarter of 300 by the hash split: 42 and 26) keeps its bar, 0.7944, under what a learner reaches (D-076).
 CLASSIFIER_EPOCHS = 8
 CLASSIFIER_DOCUMENTS = 300
 CLASSIFIER_SPLIT = 0.25

@@ -144,7 +144,7 @@ def test_resume_stream_returns_a_stream_that_starts_at_the_count_and_keeps_what_
     assert replacement is not data and replacement.train_ds is not data.train_ds, "None or `data` would be the replay"
     assert (replacement.steps_per_epoch, replacement.n_train, replacement.n_select, replacement.n_test) == (
         data.steps_per_epoch, data.n_train, data.n_select, data.n_test)
-    assert getattr(replacement, "fingerprint", None) is None and getattr(data, "fingerprint", None) is None
+    assert replacement.fingerprint == data.fingerprint and len(data.fingerprint) == 64, "the corpus digest, kept by the replacement"
     assert replacement.select_ds is data.select_ds and replacement.test_ds is data.test_ds, "the fixed sets are not rebuilt"
     first = next(iter(replacement.train_ds))
     assert digest((first[0].numpy(), first[1].numpy())) == digest(data.split.stream.batch_at(count))

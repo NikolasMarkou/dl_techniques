@@ -2037,6 +2037,37 @@ def test_language_split_on_imdb_derives_how_many_documents_the_source_read_or_sa
     assert expected > 0 and (split["relation"], split["n_select_overlap"], split["n_test_overlap"]) == ("overlap", expected, 0)
 
 
+def test_a_capped_labelled_source_overlaps_this_run_by_the_documents_it_really_shares():
+    # review pass 1, W1: the count is by document index, so document i has to be the same text and label at every cap (it was not:
+    # a source capped at 200 and a run capped at 300 on seed 7 counted 24 of 39 selection documents, 15 of them really shared)
+    from train.api.text_args import documents_overlap
+    from train.common import text_data
+
+    source, target = (text_data.synthetic_documents(text_data.BANK_SEED, n, text_data.CLASSIFICATION) for n in (200, 300))
+    fake = fake_documents(300, 7, 0.1)
+    ours = SimpleNamespace(seed=7, data=SimpleNamespace(dataset="synthetic", validation_split=0.1, max_samples=300))
+    theirs = a_source({"seed": 42, "data": {**LANGUAGE_DATA, "max_samples": 200}}, text_classification_record())
+    split = documents_overlap(theirs, ours, fake, "text_classification")
+    trained = set(range(200)) - held_out(200, 42, 0.1)
+    shared = [i for i in fake.split.select_index.tolist() if i in trained and source[0][i] == target[0][i] and source[1][i] == target[1][i]]
+    assert split["relation"] == "overlap" and split["n_select_overlap"] == len(shared) > 0, (split["n_select_overlap"], len(shared))
+
+
+def test_a_source_that_read_other_documents_under_the_same_keys_is_unknown_and_not_counted(tmp_path):
+    # review pass 1, N6: the count is by document index, and the same keys over another corpus are other documents
+    from train.api.text_args import documents_overlap
+
+    (tmp_path / "checkpoints").mkdir()
+    fake = fake_documents(200, 42, 0.1)
+    fake.fingerprint = "b" * 64
+    ours = SimpleNamespace(seed=42, data=SimpleNamespace(dataset="synthetic", validation_split=0.1, max_samples=200))
+    for earlier, relation in (("a" * 64, "unknown"), ("b" * 64, "same_split")):
+        (tmp_path / "checkpoints" / "fit_state.json").write_text(json.dumps({"data_fingerprint": earlier}))
+        theirs = a_source({"seed": 42, "data": LANGUAGE_DATA}, text_classification_record(), tmp_path)
+        split = documents_overlap(theirs, ours, fake, "text_classification")
+        assert split["relation"] == relation and ("data_fingerprint" in split["reason"]) == (relation == "unknown"), split
+
+
 def language_run(out: Path, **changes: Any) -> Dict[str, np.ndarray]:
     """A tiny ``gpt2_lm`` run in a fresh Keras session; return the weights its ``fit`` started from."""
     return started(LanguageModelPretrainingTrainer, train_language_model_pretraining, **language_request(out, **changes))

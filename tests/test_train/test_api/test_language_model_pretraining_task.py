@@ -156,6 +156,7 @@ def test_the_summary_names_the_tokenizer_the_sequence_and_the_stream_rule(tiny):
     assert (summary["seq_len"], summary["input_shape"]) == (SEQ_LEN, [SEQ_LEN])
     assert "num_classes" not in summary, "a language model has no classes (never a stand-in count)"
     assert summary["documents"]["train"] + summary["documents"]["select"] == tiny.asked["data"]["max_samples"]
+    assert summary["corpus_sha256"] == json.loads((tiny.out / "checkpoints" / "fit_state.json").read_text())["data_fingerprint"]    # N6
     rule = summary["stream"]["rule"]
     assert "(seed, step)" in rule and "never" in rule
     assert any("not judged" in note for note in summary["notes"]), "the untrained loss against a unigram is no scale test"

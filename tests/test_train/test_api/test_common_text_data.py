@@ -345,16 +345,29 @@ def test_the_synthetic_bank_is_a_pure_function_of_its_arguments():
 
 
 def test_the_synthetic_classification_bank_has_a_fixed_60_40_class_split_and_label_correlated_words():
-    for n in (100, 37, 5):
+    for n in (100, 35, 5):      # blocks of five hold three documents of class 0 and two of class 1: a multiple of five is exact
         texts, labels = td.synthetic_documents(11, n, td.CLASSIFICATION)
         assert labels.dtype == np.int64 and labels.shape == (n,)
-        assert np.bincount(labels).tolist() == [round(0.6 * n), n - round(0.6 * n)]
+        assert np.bincount(labels).tolist() == [3 * n // 5, 2 * n // 5]
     texts, labels = td.synthetic_documents(11, 100, td.CLASSIFICATION)
     assert np.bincount(labels).tolist() == [60, 40]
     # a bag-of-words oracle reads the class off the words: the words correlate with the label
     positive, negative = set(td.POSITIVE_WORDS), set(td.NEGATIVE_WORDS)
     guessed = [int(sum(w in positive for w in t.split()) > sum(w in negative for w in t.split())) for t in texts]
     assert np.mean(np.asarray(guessed) == labels) >= 0.95
+
+
+def test_a_bank_of_n_documents_is_the_first_n_documents_of_every_longer_bank():
+    # review pass 1, W1: the labels were one shuffle of n labels, so another data.max_samples was another corpus (197 of the first 300
+    # documents agreed between n = 300 and n = 301) and the init overlap, which counts by document index, counted other texts
+    for kind in (td.LM, td.CLASSIFICATION):
+        longest_texts, longest_labels = td.synthetic_documents(0, 301, kind)
+        for n in (1, 5, 37, 200, 300):
+            texts, labels = td.synthetic_documents(0, n, kind)
+            assert texts == longest_texts[:n] and (labels is None or labels.tolist() == longest_labels[:n].tolist()), (kind, n)
+    zeros, prefix = np.cumsum(longest_labels == 0), np.arange(1, 302)     # the classification bank's, the loop's last
+    assert ((zeros >= 3 * (prefix // 5)) & (zeros <= 3 * (prefix // 5) + np.minimum(prefix % 5, 3))).all(), "every prefix stays near 60/40"
+    assert td.synthetic_documents(0, 100, td.CLASSIFICATION)[1].tolist() != td.synthetic_documents(0, 100, td.CLASSIFICATION, "test")[1].tolist()
 
 
 def test_the_synthetic_language_bank_has_structure_a_unigram_cannot_use():
@@ -470,6 +483,18 @@ def split_of(seed=7, stream_seed=None, share=0.25, seq_len=SEQ, batch=BATCH, tra
     docs_spec = dataclasses.replace(spec, eot_id=EOT, vocab_size=EOT + 1, n_vocab=EOT + 1)
     return td.lm_split(train, test, spec=docs_spec, seq_len=seq_len, batch_size=batch, seed=seed,
                        stream_seed=stream_seed, validation_split=share)
+
+
+def test_the_corpus_digest_sees_a_token_a_label_the_order_and_a_boundary_and_the_split_carries_it():
+    # review pass 1, N6: a run recorded nothing that identified the documents it read, so a resume could not see another corpus
+    docs, labels, test = [np.array(ids, np.int32) for ids in ([5, 6, 7], [8, 9], [4])], np.array([0, 1, 0]), [np.array([3, 3], np.int32)]
+    base = td.corpus_digest((docs, labels), (test, None))
+    assert len(base) == 64 and base == td.corpus_digest((list(docs), labels.copy()), (test, None))
+    for name, part in {"a token": ([docs[0] + 1, *docs[1:]], labels), "a label": (docs, np.array([0, 1, 1])),
+                       "the order": (docs[::-1], labels[::-1]), "a boundary": ([docs[0][:2], docs[0][2:], *docs[1:]], np.array([0, 0, 1, 0]))}.items():
+        assert td.corpus_digest(part, (test, None)) != base, name
+    assert td.corpus_digest((docs, labels), ([test[0] + 1], None)) != base, "a test document"
+    assert split_of().fingerprint == td.corpus_digest((corpus(60, seed=1), None), (corpus(30, seed=2), None)) != split_of(train=corpus(60, seed=3)).fingerprint
 
 
 def test_the_split_follows_the_seed_and_never_the_stream_seed():

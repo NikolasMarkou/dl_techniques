@@ -260,8 +260,8 @@ function of `(seed, step)` so that a resume continues it, a bar strictly below `
 `predict` (per-document `mean_nll` and the next tokens) and `export` (float32 token ids), and `init` from its own family. Its tokenizer is
 pinned outside the repository because tiktoken's own cache is in `/tmp`. `text_classification` is built and tested on a CPU too: the eighth task,
 two families, `bert` and `gpt2` (functional classifiers over the library encoder and decoder with the sentiment head, the padding mask read from the
-pad id), the language task's stream, split and tokenizer, a bar strictly above the majority share of the selection split (a floor, so the gate
-reports the accuracies beside it), the eighth record kind with `predict` (`labels` and `scores`) and `export`, and `init` from its own family and,
+pad id), the language task's stream, split and tokenizer, a bar strictly above the majority share of the selection split plus three binomial standard errors of it (so
+the gate reports the accuracies beside it), the eighth record kind with `predict` (`labels` and `scores`) and `export`, and `init` from its own family and,
 for `gpt2`, from a `gpt2_lm` run (`bert` has no cross-task source). Not done: the GPU gate. Nothing of either task has run on a GPU; its one block in
 `src/train/README.md`, "Measured: the language gate", is empty. User-facing rules: `src/train/README.md`, the two task sections.
 

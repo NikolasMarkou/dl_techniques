@@ -266,7 +266,7 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
         table = registry.MODELS[context.family].load_variants()
         return build_language_model_record(
             model=config.model, family=context.family, variant=context.variant, seq_len=data.input_shape[0],
-            tokenizer=data.spec.record(),
+            tokenizer=data.spec.record(), tokenizer_dir=config.data.tokenizer_dir,
             variant_overrides=overrides_of_variant(table[context.variant], self._model_kwargs(config, context)),
         )
 
@@ -383,7 +383,7 @@ class LanguageModelPretrainingTrainer(TaskTrainer):
     def summary_fields(self, config: LanguageModelPretrainingConfig, data: Any) -> Dict[str, Any]:
         return {
             "seq_len": config.data.seq_len,
-            "tokenizer": data.spec.record(),
+            "tokenizer": data.spec.record(), "corpus_sha256": data.fingerprint,
             "documents": {
                 "train": len(data.split.train_index), "select": len(data.split.select_index), "test": data.split.n_test_docs},
             "stream": {"seed": data.seed, "rule": _STREAM_RULE},

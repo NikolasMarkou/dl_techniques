@@ -61,7 +61,8 @@ Interface contract
     ``watch_metric`` (the one value accepted: ``val_loss``, ``val_accuracy``; auto is the recipe's) and ``watch_mode`` (``min``,
     ``max``; likewise): the success bar is a statement about the MINIMUM ``val_loss`` or the MAXIMUM ``val_accuracy`` of the selection
     window, so the checkpoint that is saved and reloaded must be that epoch, and ``problems`` refuses any other metric or direction
-    by key. The classifier's group has no ``success_threshold``: its bar is the majority-class share of the selection split.
+    by key. The classifier's group has no ``success_threshold``: its bar is the majority-class share of the selection split plus a
+    margin (:func:`train.common.text_run.accuracy_margin`).
 
 ``tokenizer_identity(data)`` / ``documents_overlap(source, config, data, task)``
     The ``init_identity`` and ``init_overlap`` of both text tasks (a language run seeds a classifier, so the two must agree on what a
@@ -306,7 +307,7 @@ class LanguageMetricArgs(_SelectionMetricArgs):
 
 @dataclasses.dataclass(frozen=True)
 class ClassifierMetricArgs(_SelectionMetricArgs):
-    """The metric that selects the checkpoint; read by the text-classification task (its bar is the majority-class share)."""
+    """The metric that selects the checkpoint; read by the text-classification task (its bar is the majority share plus a margin)."""
 
     ONLY: ClassVar[Tuple[str, str, str]] = (CLASSIFIER_METRIC, CLASSIFIER_MODE, "maximum")
 
@@ -378,6 +379,13 @@ def documents_overlap(source: Any, config: Any, data: Any, task: str) -> Dict[st
             "data.validation_split": theirs.get("validation_split"), "data.max_samples": theirs.get("max_samples")}
     if keys == {"data.dataset": ours.dataset, "seed": config.seed, "data.validation_split": ours.validation_split,
                 "data.max_samples": ours.max_samples}:
+        # DECISION plan-2026-11-24T092348-7806a290/D-079
+        # The same keys over another corpus (a TFDS build, a change to the bank) are other documents under the same numbers, so the
+        # split is not "the same": a source whose sidecar holds another corpus digest is `unknown`. Do NOT count by index then.
+        earlier = init_from._fingerprint(source.path)
+        if earlier is not None and earlier != getattr(data, "fingerprint", None):
+            return init_from.split_block("unknown", "the source's fit sidecar records another data_fingerprint than this run's corpus, so "
+                                                    "the same keys read other documents and which of them are shared is not known")
         return init_from.same_split("documents", keys)
     # DECISION plan-2026-11-24T092348-7806a290/D-042
     # The source's train documents are rebuilt with the SOURCE's seed, split and cap (its config.json), and this run's selection

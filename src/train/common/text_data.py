@@ -37,9 +37,10 @@ Interface contract
 
 ``synthetic_documents(seed, n, kind, split="train")``
     :param kind: :data:`LM` (a first-order word chain a unigram cannot match) or :data:`CLASSIFICATION` (class words and neutral
-        words, exactly ``round(0.6 n)`` documents of class 0).
-    :return: ``(texts, labels)``, ``labels`` an int64 array for a classification bank and ``None`` for a language one. Each text is
-        a function of ``(seed, split, index)`` through a ``RandomState`` (a frozen stream), so a bank is the same in any interpreter.
+        words; each block of :data:`BLOCK` documents holds three of class 0, so a multiple of five has exactly 60 percent).
+    :return: ``(texts, labels)``, ``labels`` an int64 array for a classification bank and ``None`` for a language one. Each text and
+        each label is a function of ``(seed, split, index)`` (a frozen ``RandomState`` and a sha256), so a bank is the same in any
+        interpreter and the first ``n`` documents are the same for every size of bank.
 
 ``imdb_documents(split, data_dir=None, max_documents=None, *, loader=None)``
     :return: ``(texts, labels)`` of the TFDS ``imdb_reviews`` split ``train`` or ``test`` in READ ORDER (the document index is
@@ -53,6 +54,13 @@ Interface contract
         synthetic bank ``max_samples`` train documents and a quarter of that many test documents (``None``: the sizes
         ``train.api.text_args`` names). The bank is keyed on :data:`BANK_SEED`, never on the run's seed, so a corpus is the same
         documents for every run and the seed only splits and orders them.
+
+``corpus_digest(*parts)``
+    :param parts: ``(documents, labels)`` pairs, each ``documents`` a sequence of int arrays and ``labels`` an int array or ``None``.
+    :return: the sha256 (64 hex digits) of every part's document count, each document's length and ids, and the labels: the identity of
+        the documents a run read, which the run sequence records in the fit sidecar and a resume compares (D-079). A token, a label, the
+        order, a document boundary or the number of documents each change it. ``lm_split`` and ``class_split`` hold it as
+        ``TextSplit.fingerprint`` (train part, then test part), ``TextBatches.fingerprint`` is the same string.
 
 ``split_documents(n, seed, validation_split)``
     :return: ``(train_index, select_index)``, int64, ascending: document ``i`` is selected when ``sha256(f"{seed}:select:{i}")``,
@@ -155,8 +163,11 @@ POSITIVE_WORDS: Tuple[str, ...] = ("good", "great", "fine", "nice", "best", "lov
 NEGATIVE_WORDS: Tuple[str, ...] = ("bad", "poor", "awful", "worst", "hate", "dull")
 NEUTRAL_WORDS: Tuple[str, ...] = ("the", "a", "movie", "was", "film", "it", "and", "this")
 CUE_SHARE = 0.6
-#: The share of class 0 in a classification bank: a fixed 60/40 split, so a constant predictor scores 0.6, above chance.
-CLASS_ZERO_SHARE = 0.6
+#: A classification bank labels its documents in blocks of ``BLOCK``, each holding ``BLOCK - 2`` of class 0 and 2 of class 1 in a seeded
+#: order: a fixed 60/40 split, so a constant predictor scores 0.6, above chance, and the label of document ``i`` is a function of
+#: ``(seed, split, i)`` alone (a bank of ``n`` documents is the first ``n`` of every longer one).
+BLOCK = 5
+BLOCK_ORDERS = tuple(itertools.combinations(range(BLOCK), 2))   # where the two class-1 documents of a block sit: 10 orders
 
 
 # ---------------------------------------------------------------------
@@ -299,9 +310,12 @@ def synthetic_documents(seed: int, n: int, kind: str, split: str = "train") -> T
         raise ValueError(f"split must be one of {list(SPLITS)}, got {split!r}")
     if kind == LM:
         return [_language_document(_bank_rng(seed, split, index)) for index in range(n)], None
-    zeros = round(CLASS_ZERO_SHARE * n)
-    labels = np.repeat(np.array([0, 1], np.int64), [zeros, n - zeros])
-    _bank_rng(seed, split, "labels").shuffle(labels)
+    # DECISION plan-2026-11-24T092348-7806a290/D-075
+    # A label is a function of (seed, split, index) ALONE: block `i // BLOCK` picks one of the ten orders by a sha256, so document `i`
+    # is the same text and label at every `data.max_samples` (`init_overlap` counts by index, D-042). Do NOT build the label vector for
+    # exactly n documents and shuffle it with one RandomState (the permutation, and every label after it, then depends on n).
+    labels = np.array([int(index % BLOCK in BLOCK_ORDERS[_hash64(f"{seed}:{split}:labels:{index // BLOCK}") % len(BLOCK_ORDERS)])
+                       for index in range(n)], np.int64)
     return [_classification_document(_bank_rng(seed, split, index), int(label)) for index, label in enumerate(labels)], labels
 
 
@@ -365,6 +379,19 @@ def tokenized_corpus(data: Any, kind: str) -> Tuple[TokenizerSpec, Tuple[List[np
 # ---------------------------------------------------------------------
 # the split and the windows
 # ---------------------------------------------------------------------
+
+
+def corpus_digest(*parts: Tuple[Sequence[np.ndarray], Optional[np.ndarray]]) -> str:
+    """The sha256 of the documents (and labels) of ``parts``; see the module contract."""
+    digest = hashlib.sha256()
+    for docs, labels in parts:
+        digest.update(np.int64(len(docs)).tobytes())
+        for doc in docs:
+            digest.update(np.int64(len(doc)).tobytes())     # the length first: [5, 6, 7] is not [5, 6] and [7]
+            digest.update(np.ascontiguousarray(doc, np.int32).tobytes())
+        if labels is not None:
+            digest.update(np.ascontiguousarray(labels, np.int64).tobytes())
+    return digest.hexdigest()
 
 
 def _hash64(text: str) -> int:
@@ -517,7 +544,8 @@ class TextSplit:
         documents and of the test documents (a classifier's: ``(ids, labels)`` rows). :param train_index, select_index: the document
         numbers of the train and of the selection parts, in the corpus given. :param n_test_docs: documents of the test part.
         :param truncated, train_labels: a classifier's only: the documents (of every part) cut at ``seq_len - 1`` tokens and the
-        labels of the train rows in document order (a language split holds ``0`` and ``None``).
+        labels of the train rows in document order (a language split holds ``0`` and ``None``). :param fingerprint: the
+        :func:`corpus_digest` of the train and test documents the split was cut from (labels included for a classifier).
     """
 
     stream: TextStream
@@ -528,6 +556,7 @@ class TextSplit:
     n_test_docs: int
     truncated: int = 0
     train_labels: Optional[np.ndarray] = field(default=None, repr=False)
+    fingerprint: str = ""
 
 
 def lm_split(
@@ -553,7 +582,8 @@ def lm_split(
     logger.info(
         f"language-model split: {len(train_index)} train, {len(select_index)} selection, {len(test_docs)} test documents; "
         f"{stream.n_rows} train, {len(select[0])} selection, {len(test[0])} test windows of {seq_len + 1} tokens")
-    return TextSplit(stream, select, test, train_index, select_index, len(test_docs))
+    return TextSplit(stream, select, test, train_index, select_index, len(test_docs),
+                     fingerprint=corpus_digest((train_docs, None), (test_docs, None)))
 
 
 # ---------------------------------------------------------------------
@@ -618,7 +648,8 @@ def class_split(
         f"classification split: {len(train_index)} train, {len(select_index)} selection, {len(test_docs)} test documents; "
         f"{cut + test_cut} documents cut at {seq_len - 1} tokens")
     return TextSplit(stream, (ids[select_index], train_labels[select_index]), (test_ids, test_labels), train_index, select_index,
-                     len(test_docs), cut + test_cut, train_labels[train_index])
+                     len(test_docs), cut + test_cut, train_labels[train_index],
+                     corpus_digest((train_docs, train_labels), (test_docs, test_labels)))
 
 
 # ---------------------------------------------------------------------
@@ -696,6 +727,11 @@ class TextBatches:
     spec: TokenizerSpec
     seed: int
     batch_size: int
+
+    @property
+    def fingerprint(self) -> str:
+        """The :func:`corpus_digest` of the documents the run read: the run sequence records it and a resume compares it (D-079)."""
+        return self.split.fingerprint
 
     def with_start(self, step: int) -> "TextBatches":
         """The same data whose train stream begins at ``step``: the fixed datasets are the same objects."""

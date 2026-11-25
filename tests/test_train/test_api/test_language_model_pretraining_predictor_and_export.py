@@ -363,6 +363,32 @@ def test_the_tokenizer_is_reopened_from_the_record_and_refused_when_its_files_ar
         LanguageModelPredictor(run.model, doctored).predict(["hello"])
 
 
+@pytest.mark.parametrize("pinned", [False, True], ids=["null_is_the_pinned_copy", "the_directory_of_the_run"])
+@pytest.mark.parametrize("task", [TASK, "text_classification"])
+def test_predict_opens_the_tokenizer_from_the_directory_the_record_names_and_checks_its_hashes_before_get_encoding(
+        task, pinned, tmp_path, monkeypatch):
+    # review pass 1, N2: predict always read the pinned default, so a run trained with data.tokenizer_dir=/elsewhere could not be used
+    import tiktoken
+
+    from train.api import predictor
+    from train.api.text_predictor import LanguageModelPredictor, TextClassifierPredictor
+
+    from ._text_world import wrong_tokenizer_dir
+
+    spec, named, default = tt.tokenizer_spec("gpt2"), str(wrong_tokenizer_dir(tmp_path)), str(tmp_path / "no_such_default")
+    options = {"model": "m/tiny", "family": "m", "variant": "tiny", "seq_len": 8, "tokenizer": spec.record(),
+               **({"tokenizer_dir": named} if pinned else {})}
+    if task == TASK:
+        record, make = predictor.build_language_model_record(**options), LanguageModelPredictor
+    else:
+        record, make = predictor.build_text_classification_record(**options, class_names=["neg", "pos"]), TextClassifierPredictor
+    assert predictor.record_problems(record) == [] and ("tokenizer_dir" in record) == pinned, "a key written only when the run set it"
+    monkeypatch.setattr(tt, "DEFAULT_TOKENIZER_DIR", default)
+    monkeypatch.setattr(tiktoken, "get_encoding", lambda name: pytest.fail("get_encoding ran before the files were hashed"))
+    with pytest.raises(ConfigError, match=rf"cannot be opened.*{re.escape(named if pinned else default)}"):
+        make(lambda batch, training=False: None, record).predict(["hello"])
+
+
 # ---------------------------------------------------------------------
 # predict: the command
 # ---------------------------------------------------------------------

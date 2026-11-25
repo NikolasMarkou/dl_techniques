@@ -180,7 +180,7 @@ class _TextPredictor:
         self._tokenizer: Any = None
 
     def tokenizer(self) -> Any:
-        """Return the run's tokenizer, opened on first use from the record; see the module contract."""
+        """Return the run's tokenizer, opened on first use from the record (its ``tokenizer_dir``, else the pinned copy); see the module contract."""
         if self._tokenizer is None:
             from train.common import text_data
 
@@ -192,8 +192,12 @@ class _TextPredictor:
                     f"{spec.digest} for {spec.encoding}; the ids of that run mean something else here, so it cannot be predicted "
                     "with (its model can still be exported)"
                 )
+            # DECISION plan-2026-11-24T092348-7806a290/D-077
+            # The files are read from the directory the run was trained with (`tokenizer_dir`, absent: the pinned copy) and hashed before
+            # tiktoken's loader runs, as in training. Do NOT open the pinned default only (a run trained with data.tokenizer_dir=/elsewhere
+            # could not be used) and do NOT fall back to the default when that directory fails: a refusal names it.
             try:
-                self._tokenizer = text_data.open_tokenizer(spec)
+                self._tokenizer = text_data.open_tokenizer(spec, record.get("tokenizer_dir"))
             except ConfigError as exc:
                 raise ConfigError(f"Invalid value for 'model': the tokenizer of this run ({spec.encoding}) cannot be opened: {exc}") from exc
         return self._tokenizer

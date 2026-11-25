@@ -1390,10 +1390,10 @@ result = train_language_model_pretraining(out="auto", model="gpt2_lm/tiny", data
 |---|---|---|
 | `data.format` | `"builtin"` | `TextData`; the only value |
 | `data.tokenizer` | `"gpt2"` | `tokenizer_spec`, `check_tokenizer_dir` (before the claim), `text_data.open_tokenizer`; `ascii95` or `gpt2` |
-| `data.tokenizer_dir` | `null` | `check_tokenizer_dir` (before the claim), `open_tokenizer`: where the two BPE files are; null is the pinned copy; refused for `ascii95` |
+| `data.tokenizer_dir` | `null` | `check_tokenizer_dir` (before the claim), `open_tokenizer`: where the two BPE files are, which `predict` reads there too (the record's `tokenizer_dir`); null is the pinned copy; refused for `ascii95` |
 | `data.seq_len` | `256` | `LanguageModelPretrainingTrainer.check_model_args` (at most the variant's `max_seq_len`, before the claim), `build_data` (a window is `seq_len + 1` ids) |
 | `data.validation_split` | `0.1` | `text_data.lm_split`: the share of the train DOCUMENTS held out to select the best epoch |
-| `data.max_samples` | `null` | `text_data.corpus_documents`: the first N documents of each split in read order (synthetic: 600 train and 150 test when null, else N and N // 4); `debug_args.smoke` sets 512 when null |
+| `data.max_samples` | `null` | `text_data.corpus_documents`: the first N documents of each split in read order (synthetic: 600 train and 150 test when null, else N and max(1, N // 4)); `debug_args.smoke` sets 512 when null |
 | `metric_args.watch_metric` | `"auto"` | `LanguageMetricArgs.problems`, `fit_callbacks.build_callbacks`; auto is `val_loss`, the only value accepted |
 | `metric_args.watch_mode` | `"auto"` | the same path; auto is `min`, the only value accepted |
 
@@ -1434,13 +1434,13 @@ result = train_language_model_pretraining(out="auto", model="gpt2_lm/tiny", data
   (`encoder.json`, 1,042,301 bytes) and `6d1cbeee0f20b3d9449abfede4726ed8212e3aee` (`vocab.bpe`, 456,318 bytes), beside a `cl100k_base`
   file the tasks do not use. Before the run directory is claimed their sha256 are checked against `GPT2_FILES` in
   `train/api/text_tokenizer.py`: a missing or different file is refused by name with the pinned hash, with no fallback to `/tmp` or the
-  network, and before tiktoken's loader, which DELETES a cache file whose hash differs. To restore the pin, `cp -n` those two files from any
-  tiktoken cache that holds them (`/tmp/data-gym-cache` while it exists, or the directory `TIKTOKEN_CACHE_DIR` names when a
-  `get_encoding("gpt2")` call with a network fills it) and check their sha256. To give tiktoken's own cache back after a reboot (the legacy
-  trainers read it), copy them into `/tmp/data-gym-cache` or set `TIKTOKEN_CACHE_DIR` to the pinned directory.
+  network, and before tiktoken's loader, which DELETES a cache file whose hash differs. To restore the pin, `cp -n` those two files from a kept
+  copy (`/tmp/data-gym-cache` while it exists, or a directory that a `get_encoding("gpt2")` call with a network filled) and check their sha256.
+  To give the legacy trainers tiktoken's own cache back after a reboot, copy the two files into `/tmp/data-gym-cache`. Do not point
+  `TIKTOKEN_CACHE_DIR` at the pinned directory: it is writable, so that loader could delete a file there; the tasks set it themselves, for one call.
 * **The record.** A run writes `task.json` (schema version 2, the seventh record kind) before its first epoch: `seq_len`, `encoding`,
-  `n_vocab`, `vocab_size`, `eot_id`, `pad_id`, `tokenizer` (the digest), `tokenizer_files` and `output` (`next_token_logits`); a resume
-  compares `seq_len`, `encoding`, `vocab_size` and `tokenizer`.
+  `n_vocab`, `vocab_size`, `eot_id`, `pad_id`, `tokenizer` (the digest), `tokenizer_files`, `tokenizer_dir` (if set: `predict` reads the BPE files there)
+  and `output` (`next_token_logits`); a resume compares `seq_len`, `encoding`, `vocab_size` and `tokenizer`, and the corpus digest (`corpus_sha256`).
 * **`predict`**: `python -m train predict model=results/lm_synthetic data=documents.jsonl out=predictions.json` reads one `.txt` file (a
   document per line) or one `.jsonl` file (a `{"text": ...}` object per line) and writes one JSON file, last, with per document `n_tokens`,
   `mean_nll` (nats per predicted id), `perplexity` and `next_tokens` (the five most likely ids after the last, each with `token`, `text` and
@@ -1534,19 +1534,19 @@ result = train_text_classification(out="auto", model="gpt2/tiny", data={"dataset
   review's label (a test follows a labelled row through every epoch); batch `i` is a function of `(seed, i)` and the selection and test rows are
   fixed, so `val_accuracy` is a function of the weights alone. A resume continues the stream at the settled step, as the language task's does (the
   task sets `resume_stream_exact`, so the four sentences about a resume from a copy taken inside an epoch say so for it too).
-* **The bar is a floor.** `success_value` is the highest `val_accuracy` of the selection rows and `success_threshold` the share of their majority
-  class, counted from their labels: `pos` is 1,256 of the 2,498 IMDB selection rows above, so the bar is 0.5028, and 10 of the 19 rows of the smoke
-  run, so 0.5263 (the bank is 60 percent `neg`, the bar is about the selection rows, which hold 9 `neg` and 10 `pos`). The bar is STRICTLY above it,
-  in float32 and with no band: a model that answers one class to every row scores that share to the last bit, so a constant predictor clears chance
-  and misses the bar (a test compiles one), and under `init` the best value must also beat the loaded weights' epoch-zero accuracy. Met is exit 0,
-  missed exit 1. It is a floor, not a result: on balanced reviews it is 0.5 plus noise, and a model that learned nothing can pass it on a small
-  selection split, so the gate below reports each arm's best `val_accuracy` and the accuracy of its best checkpoint on the test reviews
-  (`test_metrics_best`) beside the share, and the accuracy is the number to read. `results_summary.json` holds `baseline` (the class and its share),
-  `class_counts` and `documents` by part, `truncated_documents` (the reviews cut to a row) and `stream`.
+* **The bar is the share plus a margin.** `success_value` is the highest `val_accuracy` of the selection rows and `success_threshold` the share of their
+  majority class, counted from their labels, plus three binomial standard errors of that share on those rows, `3 * sqrt(share * (1 - share) / rows)`, at
+  most half the way to 1.0 (so the bar is attainable). IMDB: `pos` is 1,256 of the 2,498 selection rows above, so 0.5028 + 0.0300 = 0.5328, which a model
+  that guesses clears in 0.44 percent of 8-epoch runs (the bare share let 97.9 percent through); the 19 selection rows of the first command above hold 12
+  `neg` and 7 `pos`: 0.6316, a margin capped at 0.1842, a bar of 0.8158. The bar is STRICTLY above it, in float32 and with no band: a model that answers one
+  class to every row scores the share to the last bit and misses it, and under `init` the best value must also beat the loaded weights' epoch-zero accuracy.
+  Met is exit 0, missed exit 1. It says the model learned something, not how much: the gate below reports each arm's best `val_accuracy`, the accuracy of
+  its best checkpoint on the test reviews (`test_metrics_best`), the share and the margin. `results_summary.json` holds `baseline` (the class, its share,
+  `margin`, `standard_errors`, `rows`), `class_counts` and `documents` by part, `corpus_sha256`, `truncated_documents` and `stream`.
 * **The record.** A run writes `task.json` (schema version 2, the eighth record kind) before its first epoch: the language record's `seq_len`,
-  `encoding`, `n_vocab`, `vocab_size`, `eot_id`, `pad_id`, `tokenizer` and `tokenizer_files`, then `cls_id`, `class_names`, `layout`
+  `encoding`, `n_vocab`, `vocab_size`, `eot_id`, `pad_id`, `tokenizer`, `tokenizer_files` and `tokenizer_dir`, then `cls_id`, `class_names`, `layout`
   (`cls_head_pad`: a row is `[CLS]`, the head of the text, pad) and `output` (`logits`); a resume compares `seq_len`, `encoding`, `vocab_size`,
-  `tokenizer` and `class_names`. The `init` block rides in it, so a resume reports it without opening the source.
+  `tokenizer` and `class_names`, and the corpus digest. The `init` block rides in it, so a resume reports it without opening the source.
 * **`predict`**: `python -m train predict model=results/cls_synthetic data=reviews.jsonl out=predictions.json` reads one `.txt` file (a document per
   line) or one `.jsonl` file (a `{"text": ...}` object per line), as the language task does, and writes one JSON list, last, of `{"index", "labels",
   "scores"}` per document: the class names best first and their softmax probabilities (the image classifier's shape). A text becomes a row by the
@@ -1557,9 +1557,8 @@ result = train_text_classification(out="auto", model="gpt2/tiny", data={"dataset
   before a file is written). The file takes float32 token ids `(batch, seq_len)`, each a whole number written as a float, in the row layout above,
   and returns the raw logits `(batch, classes)` in the order of `class_names` in `<out>.task.json`, with no softmax. No cell is refused: a test
   converts each of the 16 (both families, a tiny build and a build at the 50,261-id vocabulary, four formats) and holds the file within the export
-  check's tolerance of the model on valid rows. Measured on the CPU on the trained 64-wide run above, each file is within 2.8e-7 of the model's
-  logits (`keras` 0.0, `saved_model` 2.8e-7, `tflite` 2.1e-7, `onnx` 1.8e-7; the logits are below 1, the floor of the check's scale), where the
-  check allows 1e-4.
+  check's tolerance of the model on valid rows. Measured on the CPU on the trained 64-wide run above, each file is within 3.4e-7 of the model's
+  largest logit, 1.15 (`keras` 0.0, `saved_model` 2.6e-7, `tflite` 3.4e-7, `onnx` 1.0e-7), where the check allows 1e-4.
 * **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed) unless said; a tokenizer directory that is
   missing or holds a file of another hash, and `imdb_reviews` without TFDS records, are refused as in the language section:
 
@@ -1572,7 +1571,7 @@ result = train_text_classification(out="auto", model="gpt2/tiny", data={"dataset
 | `init` from a classifier run into the language task, or from `bert` into `gpt2` | `Invalid value for 'init': gpt2 (text_classification) cannot seed gpt2_lm (language_model_pretraining); gpt2_lm takes weights from gpt2_lm (language_model_pretraining)`; `... 'init': bert (text_classification) cannot seed gpt2 (text_classification); gpt2 takes weights from gpt2 (text_classification) or gpt2_lm (language_model_pretraining)` |
 | a key of `gpt2`'s language-model head | `Invalid value for 'model_args.tie_word_embeddings': tie_word_embeddings is not offered by 'gpt2' (it ties the language-model head to the embeddings, and a classifier has no language-model head), got False` |
 | `metric_args.watch_metric` other than `val_accuracy`, `analysis_args.conformal_alpha` | `Invalid value for 'metric_args.watch_metric': expected auto or 'val_accuracy', got 'val_loss'; ...`; `Invalid value for 'analysis_args.conformal_alpha': a conformal prediction set is the image classifier's calibrated set, which a text_classification run does not produce; ...` |
-| after the claim: a part with no document of a class, or fewer train rows than a batch | `Invalid argument for the data loader: the selection documents (1 of them) hold no document of class 1: the majority share and the accuracy would be about fewer classes than the model has; raise data.max_samples or change data.validation_split. The run directory <out> was claimed before this failed, ...`; `Invalid argument for the data loader: the train stream holds 72 rows per epoch, fewer than one batch of 128: ...` |
+| after the claim: a part with no document of a class, or fewer train rows than a batch | `Invalid argument for the data loader: the selection documents (1 of them) hold no document of class 0: the majority share and the accuracy would be about fewer classes than the model has; raise data.max_samples or change data.validation_split. The run directory <out> was claimed before this failed, ...`; `Invalid argument for the data loader: the train stream holds 72 rows per epoch, fewer than one batch of 128: ...` |
 
 * **Limits.** As the language task's (the corpus lives in memory, `data.max_samples` caps the test split too, only the built-in corpora and the two
   tokenizers are offered, the equalities were measured on the CPU only), and: two classes, `neg` and `pos`; `predict` has no `top_k` or `threshold`
@@ -1800,9 +1799,9 @@ forecasting (another `seed`, `data.series_length`, `data.patterns` or `data.real
 deterministic patterns barely move with the seed and a shorter series is the start of a longer one; other fractions count the
 windows that start inside the source's train segment)
 scenes for depth (the source's train scenes among this run's selection and test scenes) and documents for the two text tasks (the source's
-train documents among this run's selection documents, rebuilt from the source's seed, split and cap; `unknown` when this run's own
-`data.max_samples` hides how many a capped source read; a classifier seeded from a language run on the synthetic bank is `different_data`, the
-two banks being other texts under the same document numbers, and on `imdb_reviews` the count is exact). A CIFAR-10 source trained at
+train documents among this run's selection documents, rebuilt from the source's seed, split and cap; `unknown` when this run's own `data.max_samples` hides
+how many a capped source read or the source's `data_fingerprint` is another corpus under equal keys; a classifier seeded from a language run on the
+synthetic bank is `different_data` (other texts, same numbers), and on `imdb_reviews` the count is exact for one corpus). A CIFAR-10 source trained at
 seed 42 seeds a run at seed 43: 4,531 of its 5,000 selection rows were trained on. `results_summary.json` then sets
 `selection_biased`, `test_biased` (a count above 0) and `overlap_unknown`, the log line `init split: <relation>: <reason>` is a
 warning, and the success line ends in `(selection-biased)`, `(selection-biased, test-biased)` or `(split overlap unknown)`. No

@@ -282,6 +282,8 @@ def test_the_language_section_states_the_numbers_of_the_code():
     assert f"synthetic: {text_args.SYNTHETIC_TRAIN_DOCUMENTS} train and {text_args.SYNTHETIC_TEST_DOCUMENTS} test when null" in text
     assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in text and f"`data.max_samples` {SMOKE_MAX_SAMPLES} when it is null" in text
     assert all(name in text for name, _ in tt.GPT2_FILES) and tt.DEFAULT_TOKENIZER_DIR in text
+    # review pass 1, N4: tiktoken's loader deletes a cache file of another hash and the pinned directory is writable (D-015)
+    assert "Do not point `TIKTOKEN_CACHE_DIR` at the pinned directory" in text and "or set `TIKTOKEN_CACHE_DIR` to the pinned directory" not in text
     # the stream bullet says what the four shared sentences say for this task (D-050; D-049 named the defect they were): the clause it
     # quotes is the code's, so a change of the wording moves the document with it, and the other tasks' sentences still say a fresh pass
     from train.api.args import CheckpointArgs
@@ -353,8 +355,11 @@ def test_the_classification_section_and_the_init_pairs_state_the_numbers_of_the_
     from dl_techniques.models.language.bert.model import BERT
     from train.api import text_args, text_models
     from train.api.trainer import SMOKE_MAX_SAMPLES
+    from train.common import text_data, text_run
 
     text = " ".join(README.read_text().split())
+    assert f"plus {({3: 'three'})[int(text_run.BAR_STANDARD_ERRORS)]} binomial standard errors of that share on those rows" in text, "the bar's margin"
+    assert "max(1, max_samples // 4)" in inspect.getsource(text_data.corpus_documents) and "else N and max(1, N // 4)" in text, "the test split's size"
     table, positions = BERT.MODEL_VARIANTS, inspect.signature(BERT.__init__).parameters["max_position_embeddings"].default
     order = sorted(table, key=lambda name: table[name]["hidden_size"])
     rows = [f"`{name}` ({table[name]['hidden_size']:,}, {table[name]['num_layers']}, {table[name]['num_heads']})" for name in order[1:]]
