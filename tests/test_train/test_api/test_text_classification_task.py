@@ -91,7 +91,9 @@ def test_the_task_does_not_name_a_stage():
 
 
 def test_the_task_and_both_families_are_registered_and_each_family_trains_this_task_only(world):  # noqa: F811
-    assert registry.TASKS[TASK].name == TASK and list(registry.TASKS)[-1] == TASK
+    tasks = list(registry.TASKS)
+    # the task follows the language task in registration order (a later phase may register more tasks after it)
+    assert registry.TASKS[TASK].name == TASK and tasks.index(TASK) == tasks.index("language_model_pretraining") + 1
     for family in FAMILIES:
         assert registry.MODELS[family].tasks == (TASK,)
         assert registry.parse_model_name(f"{family}/tiny", task=TASK) == (family, "tiny")
