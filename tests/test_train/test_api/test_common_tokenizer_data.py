@@ -522,6 +522,16 @@ def test_codes_that_describe_content_are_worth_the_same_pooled_and_per_cell():
     assert td.per_cell_usage(codes).perplexity == pytest.approx(16.0, rel=1e-12) == pytest.approx(tokenizer_usage(codes).perplexity, rel=1e-12)
 
 
+def test_an_image_wide_code_repeated_at_every_cell_meets_both_floors_so_the_floors_do_not_test_locality():
+    # Review pass 2, N1: both floors count how the codes vary ACROSS images and cells; nothing in them asks that a code describe ITS OWN patch. One id of the whole
+    # image (its cluster among 128, say), the same at all 64 cells, is worth 128 pooled and 128 per cell: the control that pins the limit the README states.
+    images, ids = 256, 128
+    codes = np.broadcast_to((np.arange(images) % ids).reshape(images, 1, 1), (images, 8, 8)).copy()
+    pooled, usage = tokenizer_usage(codes), td.per_cell_usage(codes)
+    assert pooled.perplexity == pytest.approx(ids, rel=1e-12) and usage.perplexity == pytest.approx(ids, rel=1e-12)
+    assert usage_meets_floor(pooled) is True and td.per_cell_meets_floor(usage) is True
+
+
 def test_the_per_cell_usage_equals_a_loop_over_the_cells_on_random_codes():
     codes = np.random.default_rng(0).integers(0, 7, size=(50, 3, 4))
     usage = td.per_cell_usage(codes)

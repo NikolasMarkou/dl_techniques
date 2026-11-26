@@ -919,10 +919,12 @@ classification task calls the same `train.common.classification_run` helpers as 
   keep: the task adds no `train_step`, no loss and no metric, because the file it saves is the `VQVAERotationTrick` that `beit_mim` loads (D-003, D-037:
   `test_the_task_compiles_no_loss_and_no_metric`, `test_the_task_adds_no_train_step_no_figure_and_no_callback`); `bar_is_met` reads both parts of the bar, each through the repo's
   one definition (`forecast_run.beats_bar`, `pretrain_run.usage_meets_floor`), never a bare compare, and the codebook part is TWO floors: the pooled one is met by a code that is the
-  cell index alone wherever the grid has 64 cells, so `tokenizer_data.per_cell_meets_floor` judges what one cell carries (D-067: `test_a_tokenizer_whose_code_is_the_cell_index_alone_misses_though_its_pooled_perplexity_meets_the_floor`;
-  D-038: `test_the_bar_needs_both_parts`,
+  cell index alone wherever the grid has 64 cells, so `tokenizer_data.per_cell_meets_floor` judges what one cell carries, and neither floor tests locality (one image-wide id repeated at every cell
+  meets both, so the reconstruction part is the only evidence of local content) (D-067: `test_a_tokenizer_whose_code_is_the_cell_index_alone_misses_though_its_pooled_perplexity_meets_the_floor`;
+  D-072: `test_an_image_wide_code_repeated_at_every_cell_meets_both_floors_so_the_floors_do_not_test_locality`; D-038: `test_the_bar_needs_both_parts`,
   `test_eight_compiled_constant_models_are_not_called_a_success_though_a_bare_compare_would_call_some`); the geometry rule checked before the claim is held equal to a real build of the
-  library class at every patch and side (D-065: `test_the_pre_claim_geometry_rule_is_exactly_what_the_library_can_build`); the usage is counted once, after `fit`, on the BEST weights and before
+  library class at every patch and side (D-065: `test_the_pre_claim_geometry_rule_is_exactly_what_the_library_can_build`) and every offered model key to the type its constructor declares, a bool being no int and no
+  float and `use_ema` `true` or `false` only, because the library reads the string "False" as true (D-071: `test_a_value_the_library_reads_as_another_is_refused_before_the_claim`); the usage is counted once, after `fit`, on the BEST weights and before
   `report_data_free_run` swaps the last epoch's in (D-039: `test_a_best_epoch_that_is_not_the_last_reports_the_best_weights_usage_and_not_the_last_ones`); `resume_stream` is
   the batches object's `with_stream(completed_steps)` and `resume_stream_exact` stays false (D-040: `test_resume_stream_returns_a_stream_that_is_not_the_fresh_one_and_keeps_what_the_sequence_checks`); the row's `fixed` holds the codebook size and the image size, the second by POLICY, since every
   weight copies across sizes (D-050: `test_production_order_the_image_size_is_refused_before_the_claim_by_policy_though_every_weight_would_copy`), and its refusal is the row's own `policy` sentence, never the engine's "sizes its weights by"

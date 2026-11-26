@@ -112,7 +112,7 @@ D-020, 4g-D17 D-021, load cost D-022. Kept as designed: 4g-D2, 4g-D5, 4g-D8, 4g-
 - **The row fixes `channels`, `input_size`, `patch_size` and `num_embeddings` (D-050).** The plan named three; the codebook size is the fourth, because the engine refuses before
   the claim only what a row fixes. `GEOMETRY_NAMES` and `GEOMETRY_KEYS` gain `num_embeddings` (no other record has the key), and `HEAD_KEYS` has an empty row (a tokenizer has no
   head). The image size is fixed by POLICY, not by shape: every weight of the default model (47 of 47) copies into a 64 px one, a census test says so, and lifting the refusal
-  is one line. A width, a depth, an embedding size or an EMA codebook that differs is no record key and is refused after the claim by the weight check.
+  is two entries of the family row (the `fixed` tuple and the `policy` entry of `train/api/tokenizer_models.py`) and its census test. A width, a depth, an embedding size or an EMA codebook that differs is no record key and is refused after the claim by the weight check.
 - **The bar stays strictly below `min(baseline, loaded)` (D-051).** `Evaluation.loaded` stays `None`, as for the other loss bars; `init_overlap` counts the source's seeded
   train rows among this run's selection rows against a numpy oracle. The ninth record kind is the tokenizer's.
 

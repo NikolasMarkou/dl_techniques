@@ -297,19 +297,24 @@ def test_a_selection_split_too_small_to_show_the_floor_is_refused_by_name_after_
     assert trainer.build_data(resolved, context).n_select == data.n_select
 
 
-def test_a_selection_split_with_fewer_images_than_the_per_cell_floor_is_named_in_a_warning_and_the_run_goes_on(world, cifar, tmp_path, caplog):
-    # 70 rows select 7 images: 7 x 64 = 448 positions pass the pooled check, but a perplexity counted PER CELL over 7 images is at most 7, under the
-    # per-cell floor of 8, so the run can only miss (review pass 1, W3). It is a WARNING and not a refusal: the resume tests train on six images and
-    # their data may not change. A smoke run applies no bar and says nothing.
+def test_a_selection_split_with_fewer_images_than_the_per_cell_number_reads_true_from_is_named_in_a_warning_and_the_run_goes_on(world, cifar, tmp_path, caplog):
+    # A perplexity counted PER CELL over n images is at most n (7 images cannot reach the floor of 8) and reads low well above that: on the saved codes of two
+    # trained arms every draw of 8 images missed the floor and none of 300 draws of 12 did (review pass 2, N3; `tokenizer_data.MIN_PER_CELL_IMAGES` is 16 with the
+    # numbers). So the run says so below 16 images, when its data is built: 7 (the bound itself) and 15 (the last size under it) name it, 16 does not, and a smoke
+    # run applies no bar and says nothing. A WARNING and not a refusal: the resume tests train on six images and their data may not change.
     caplog.set_level(logging.WARNING, logger="dl")
-    trainer, resolved, context = prepared(tmp_path / "run", **{"data": {"dataset": "cifar10", "max_samples": 70}})
-    assert trainer.build_data(resolved, context).n_select == 7
-    said = [record.getMessage() for record in caplog.records if "per-cell floor" in record.getMessage()]
-    assert len(said) == 1 and "7 images" in said[0] and "at most 7" in said[0] and "cannot meet the bar" in said[0] and "data.max_samples" in said[0], said
+    said = lambda: [record.getMessage() for record in caplog.records if "per-cell floor" in record.getMessage()]  # noqa: E731
+    for rows, images in ((70, 7), (150, 15)):
+        caplog.clear()
+        trainer, resolved, context = prepared(tmp_path / f"run{rows}", **{"data": {"dataset": "cifar10", "max_samples": rows}})
+        assert trainer.build_data(resolved, context).n_select == images
+        assert len(said()) == 1 and f"{images} images" in said()[0] and f"at most {images}" in said()[0] and "data.max_samples" in said()[0], said()
+        assert f"fewer than the {td.MIN_PER_CELL_IMAGES}" in said()[0] and td.MIN_PER_CELL_IMAGES == 16, said()
     caplog.clear()
+    trainer, resolved, context = prepared(tmp_path / "enough", **{"data": {"dataset": "cifar10", "max_samples": 160}})
+    assert trainer.build_data(resolved, context).n_select == 16 and not said(), "16 images read true: no warning"
     trainer, resolved, context = prepared(tmp_path / "smoke", **{"data": {"dataset": "cifar10", "max_samples": 70}, "debug_args.smoke": True})
-    assert trainer.build_data(resolved, context).n_select == 7
-    assert not [record for record in caplog.records if "per-cell floor" in record.getMessage()], "a smoke run applies no bar"
+    assert trainer.build_data(resolved, context).n_select == 7 and not said(), "a smoke run applies no bar"
 
 
 def test_eight_compiled_constant_models_are_not_called_a_success_though_a_bare_compare_would_call_some(world, cifar, capsys):
@@ -626,6 +631,8 @@ REFUSALS = [
     (['model_args={"kmeans_init":true}'], "model_args.kmeans_init", "not offered"),
     (['model_args={"num_embeddings":32}'], "model_args.num_embeddings", "64"),
     (['model_args={"hidden_channels":0}'], "model_args.hidden_channels", "positive int"),
+    (["model_args.use_ema=False"], "model_args.use_ema", "true or false"),
+    (["model_args.num_res_blocks=true"], "model_args.num_res_blocks", "expected an int"),
     (['model_args={"downsample_factor":2}'], "model_args.downsample_factor", "data.patch_size"),
     (["precision=mixed_float16"], "precision", "float32"),
     (["metric_args.watch_metric=val_loss"], "metric_args.watch_metric", "val_reconstruction_loss"),

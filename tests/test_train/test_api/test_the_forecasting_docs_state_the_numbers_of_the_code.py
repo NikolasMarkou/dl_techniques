@@ -412,6 +412,7 @@ def test_the_tokenizer_section_states_the_numbers_of_the_code(world):
     from train.common import pretrain_run, tokenizer_data as td
     from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
 
+    from . import test_common_tokenizer_data as data_tests
     from .test_common_tokenizer_data import cell_index_codes, with_image_wide_bits
 
     text = " ".join(README.read_text().split())
@@ -449,8 +450,8 @@ def test_the_tokenizer_section_states_the_numbers_of_the_code(world):
         with pytest.raises(ConfigError) as caught:
             call()
         refusals.append(str(caught.value))
-    refusals += [tm.problems_of({"kmeans_init": True})[0], tm.problems_of({"hidden_channels": 0})[0]]
-    assert len(refusals) == 6 and all(f"`{message}`" in section for message in refusals), refusals
+    refusals += [tm.problems_of({"kmeans_init": True})[0], tm.problems_of({"hidden_channels": 0})[0], tm.problems_of({"use_ema": "False"})[0]]
+    assert len(refusals) == 7 and all(f"`{message}`" in section for message in refusals), refusals
     # Review pass 1, W2: the `init` refusal of another image size is the row's own sentence (the weights would copy), quoted whole
     from train.api import init_from
 
@@ -460,6 +461,20 @@ def test_the_tokenizer_section_states_the_numbers_of_the_code(world):
     assert f"`{caught.value}`" in section and "sizes its weights by transform_args.image_size" not in section
     # the file `beit_mim` takes is best_model.keras: the checkpoint is selected on the reconstruction alone, so it holds the epoch the verdict judged (D-006)
     assert "**`best_model.keras` is the file `beit_mim` takes.**" in section and "so give it `best_model.keras`" in section and "the last epoch's" in section
+    # Review pass 2. W1: every offered key is held to its declared type, and `use_ema` is quoted (the library reads the string "False" as true). N1: what the floors do not certify,
+    # and the test that pins it. N3: the size of a selection split the per-cell number reads true from, and the rows it means at the default split. N4: the two entries that lift
+    # the size refusal of `init` (read off the row: one in `fixed`, one in `policy`).
+    assert f"`{tm.problems_of({'use_ema': 'False'})[0]}`" in section and "a bool is no int and no float" in section
+    locality = "test_an_image_wide_code_repeated_at_every_cell_meets_both_floors_so_the_floors_do_not_test_locality"
+    assert callable(getattr(data_tests, locality)) and f"`{locality}`" in section
+    assert "**The bar does not test locality:** the two floors count how the codes vary across images and cells, not whether a code describes its own patch" in section
+    assert "so the reconstruction part, which asks only to be strictly below the constant image, is the only evidence of local content" in section
+    assert f"one of fewer than {td.MIN_PER_CELL_IMAGES} images (`tokenizer_data.MIN_PER_CELL_IMAGES`" in section and td.MIN_PER_CELL_IMAGES == 16
+    assert f"`data.max_samples` of {round(td.MIN_PER_CELL_IMAGES / DEFAULT_VALIDATION_SPLIT)} at the default split of {DEFAULT_VALIDATION_SPLIT:g}" in section
+    row = registry.MODELS[tm.FAMILY].transfer
+    assert "input_size" in row.fixed and set(row.policy) == {"input_size"}, "the refusal is two entries of the row: one in `fixed`, one in `policy`"
+    assert "lifting the refusal is two entries of the family row (the `fixed` tuple and the `policy` entry) and its census test" in section
+    assert "neither floor tests locality" in " ".join(AGENTS.read_text().split())
 
 
 def test_the_tokenizer_record_and_the_init_keys_the_documents_name_are_the_codes():
@@ -515,6 +530,12 @@ def test_the_repo_map_and_the_roadmaps_count_the_tasks_the_registry_has(world):
     assert f"`python -m train <task> help` of all {words[len(names)]};" in scripts and f"and `{newest}` (Phase 4j), in that order" in scripts
     assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Code done, GPU gate NOT run" in scripts
     assert "Phase 4j (plan fa94f59c, branch `train-api/phase-4j`: code done, GPU gate NOT run)" in init and f"`{newest}` in Phase 4j" in init
+    # Review pass 2, N4: both roadmaps state what the code does: the bar's two floors, and the two entries of the family row that lift the size refusal of `init`
+    from train.common import pretrain_run, tokenizer_data as td
+
+    assert (f"a codebook perplexity over every selection position of at least {pretrain_run.MIN_TOKENIZER_PERPLEXITY:g} pooled and at least "
+            f"{td.MIN_PER_CELL_PERPLEXITY:g} per cell") in scripts
+    assert "lifting the refusal is two entries of the family row (the `fixed` tuple and the `policy` entry of `train/api/tokenizer_models.py`) and its census test" in init
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

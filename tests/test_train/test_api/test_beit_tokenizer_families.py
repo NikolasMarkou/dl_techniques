@@ -350,7 +350,7 @@ def test_an_unknown_key_is_refused_with_a_suggestion_and_every_refusal_is_named_
 #: Requests that must NOT be refused (the control of the rows above: a resolver that refused everything would pass them).
 ACCEPTED = [
     {}, {"num_embeddings": 64}, {"embedding_dim": 16}, {"hidden_channels": 64, "num_res_blocks": 1}, {"commitment_cost": 0.5},
-    {"use_ema": True}, {"num_res_blocks": 0}, {"commitment_cost": 0},
+    {"use_ema": True}, {"use_ema": False}, {"num_res_blocks": 0}, {"commitment_cost": 0},
 ]
 
 
@@ -375,6 +375,46 @@ def test_a_value_the_library_rejects_when_it_builds_is_refused_before_the_claim(
         resolve(model_args={key: value})
     text = str(raised.value)
     assert f"'model_args.{key}'" in text and "expected" in text and repr(value) in text, text
+
+
+#: Values the library BUILDS and then reads as another value than the one written (review pass 2, W1): `use_ema` is read by truthiness, so the string
+#: "False" (all the command line keeps of `False` or `no`) builds the EMA codebook, and a bool is the int 1 or 0 for a count and a cost. "What the library
+#: rejects" cannot hold these, so every offered key is held to the type its constructor declares (a bool is no int and no float); the build is the control.
+LIBRARY_MISREADS = [
+    ("use_ema", "False"), ("use_ema", "no"), ("use_ema", 0), ("use_ema", 1), ("num_res_blocks", True), ("num_res_blocks", False),
+    ("commitment_cost", True), ("commitment_cost", False),
+]
+
+
+def library_built(**model_args):
+    model = VQVAERotationTrick(input_shape=(32, 32, 3), downsample_factor=4, **{**TINY, **model_args})
+    model.build((None, 32, 32, 3))
+    return model
+
+
+@pytest.mark.parametrize("key, value", LIBRARY_MISREADS, ids=[f"{key}={value!r}" for key, value in LIBRARY_MISREADS])
+def test_a_value_the_library_reads_as_another_is_refused_before_the_claim(key, value):
+    assert library_built(**{key: value}) is not None, "the control: the library builds it, so a rule of 'what the library rejects' lets it through"
+    with pytest.raises(ConfigValidationError) as raised:
+        resolve(model_args={key: value})
+    text = str(raised.value)
+    assert f"'model_args.{key}'" in text and "expected" in text and f"got {value!r}" in text, text
+    assert key != "use_ema" or ("true or false, in lowercase" in text and "string" in text), "the refusal names the spelling to type, and why"
+
+
+def test_the_library_builds_a_use_ema_string_as_the_opposite_model_and_the_real_bools_as_what_they_say():
+    codebook = {value: library_built(use_ema=value).quantizer.embeddings.trainable for value in (True, False, "False", "no")}
+    assert codebook == {True: False, False: True, "False": False, "no": False}, "the two bools differ, and both strings build the EMA codebook"
+
+
+def test_a_count_of_residual_blocks_under_zero_builds_as_none_and_stays_accepted():
+    # D-071: only the TYPE of a count is the rule; a count under 0 builds as no block (the model of a count of 0), so the README says it is left alone
+    assert resolve(model_args={"num_res_blocks": -1}) == {"num_embeddings": 512, "num_res_blocks": -1}
+    assert len(library_built(num_res_blocks=-1).weights) == len(library_built(num_res_blocks=0).weights) < len(library_built(num_res_blocks=1).weights)
+
+
+def test_every_offered_key_has_a_value_rule_but_the_codebook_size_which_the_geometry_check_holds():
+    assert set(tm.VALUE_RULES) == set(tm.ALLOWED) - {"num_embeddings"}
 
 
 @pytest.mark.parametrize("model_args", [{"num_res_blocks": 0}, {"commitment_cost": 0}], ids=["no residual block", "no commitment"])

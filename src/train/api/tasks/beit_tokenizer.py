@@ -249,13 +249,15 @@ class BeitTokenizerTrainer(TaskTrainer):
                 f"perplexity counted over {positions} positions cannot reach the floor of {floor:g} effective codes: the bar could never be "
                 "met (raise data.max_samples or data.validation_split, or set debug_args.smoke=true for a run with no bar)"
             )
-        if not config.debug_args.smoke and data.n_select < tokenizer_data.MIN_PER_CELL_PERPLEXITY:
+        if not config.debug_args.smoke and data.n_select < tokenizer_data.MIN_PER_CELL_IMAGES:
             # A WARNING and not a refusal (unlike the pooled floor above): a run on a handful of images is still a run worth its files (the
-            # resume tests train on six), but its per-cell perplexity is at most the number of images, so it can only miss, and says why now.
+            # resume tests train on six). The per-cell perplexity is at most the number of images and reads low well above that
+            # (`MIN_PER_CELL_IMAGES` holds the measurement), so a run on fewer can miss its floor with good codes, and says why now.
             logger.warning(
-                f"the selection split holds {data.n_select} images, and a perplexity counted per cell over {data.n_select} images is at most "
-                f"{data.n_select}, under the per-cell floor of {tokenizer_data.MIN_PER_CELL_PERPLEXITY:g} effective codes: this run cannot meet "
-                "the bar (raise data.max_samples or data.validation_split, or set debug_args.smoke=true for a run with no bar)"
+                f"the selection split holds {data.n_select} images, fewer than the {tokenizer_data.MIN_PER_CELL_IMAGES} the per-cell perplexity needs to read "
+                f"true: counted over {data.n_select} images it is at most {data.n_select} and reads low well above that, so this run can miss the per-cell floor "
+                f"of {tokenizer_data.MIN_PER_CELL_PERPLEXITY:g} effective codes with good codes (raise data.max_samples or data.validation_split, or set "
+                "debug_args.smoke=true for a run with no bar)"
             )
         started = time.perf_counter()
         baseline = tokenizer_data.constant_image_baseline(data.select_ds)

@@ -241,6 +241,26 @@ def code_ids_of(model: Any, select_ds: "tf.data.Dataset") -> np.ndarray:
 #: Effective codes a cell must use, on average over the cells, for the codebook part of the bar.
 MIN_PER_CELL_PERPLEXITY = 8.0
 
+# DECISION plan-2026-11-25T124419-fa94f59c/D-072
+# NEITHER floor tests locality: both count how the codes vary across images and cells. MEASURED on 5,000 CIFAR-10 images (review pass 2, N1; `scratch_step11_2/
+# probe_imagewide_run.txt`): the image's k-means cluster among 128, the SAME id at every cell, has a pooled and a per-cell perplexity of 103.25 (both floors met), and a
+# decoder that outputs the cluster's centroid scores 0.4908 against the mean image's 0.9978; the cell index plus the cluster among 16 meets all three parts (0.6008, pooled
+# 975.35, per cell 15.24). The reconstruction part (strictly below the constant image) is the only evidence of local content, and a weak one (the two trained 750-step arms
+# reached 0.1440 and 0.1410). The bar is NOT changed (ruled at review pass 2): the limit is stated in the README, AGENTS and D-067 and pinned by `test_an_image_wide_code_
+# repeated_at_every_cell_meets_both_floors_so_the_floors_do_not_test_locality`. Do NOT read a met bar as proof that a code describes its own patch, and do NOT add a locality
+# part without measuring its threshold first (the in-sample image-level k-means error at the codebook size is the review's candidate).
+
+# DECISION plan-2026-11-25T124419-fa94f59c/D-073
+# The per-cell number is a plug-in entropy of the codes of ONE cell over the selection images, so it is BIASED LOW on a small split: the hard bound is the number of
+# images n (a perplexity over n images is at most n, so under 8 images no tokenizer can meet the floor at all) and it reads low well above n. MEASURED (review pass 2,
+# N3): the saved codes of the two trained 750-step arms of Step 2 (`scratch_step11/p2_codes`, 36.07 and 46.53 per cell over 5,000 images), 300 draws without replacement per
+# size (`scratch_step11_2/probe_subsample_run.txt`; the review read 6.70 and 6.91 at 8 images and 7.96 and 8.28 at 10): at 8 images every draw misses the floor of 8 (means
+# 6.69 and 6.88), at 10 images 47 and 14 percent of the draws miss, at 11 images 7 and 1 percent, and from 12 images none of the 300 draws misses. 16 is a third above that
+# first clean size and twice the floor: the smallest draw at 16 images is 9.45 and 10.55. Do NOT set it back to the floor (8: a good tokenizer on 8 to 11 images missed the
+# floor with no word said, the first round's warning), and do NOT make it a refusal (the resume tests train on six images and their data may not change).
+#: Selection images below which the per-cell number reads low enough to miss its floor with good codes: a run on fewer says so in a warning when its data is built.
+MIN_PER_CELL_IMAGES = 16
+
 
 @dataclass(frozen=True)
 class CellUsage:

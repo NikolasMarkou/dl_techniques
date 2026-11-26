@@ -267,7 +267,7 @@ tests, a wrongly defined claim) were fixed; its numbers are in `src/train/README
 
 **Phase 4j: the BEiT tokenizer. Code done, GPU gate NOT run** (branch `train-api/phase-4j`, plan fa94f59c; one task). `beit_tokenizer` is the ninth task, one family
 `vq_vae_rotation` (the library `VQVAERotationTrick` itself, with its own `train_step`: the task adds none): a bar of two parts (the reconstruction strictly below the constant
-image and the untrained model, and a codebook perplexity of at least 64 over every selection position), the ninth record kind with `predict` (the int32 code grid) and `export`
+image and the untrained model, and a codebook perplexity over every selection position of at least 64 pooled and at least 8 per cell), the ninth record kind with `predict` (the int32 code grid) and `export`
 (all four formats), and `init` from its own family. The auto decoder's last layer is linear now (the sigmoid could not reach a standardized image). `beit_mim` takes the `best_model.keras`
 of a tokenizer run and holds its `task.json` to its own patch, size and statistics before the claim. The tokenizer of the 4h `beit_mim` rows is lost and its figures are not
 reproduced. Not done: the GPU gate (its block in `src/train/README.md`, "Measured: the tokenizer gate", is empty). User-facing rules: `src/train/README.md`, the `beit_tokenizer` section.
