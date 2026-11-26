@@ -6,13 +6,13 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 ## `python -m train` and `train.api`
 
-A key=value command line over strict configs. It has eight tasks, `image_classification`
+A key=value command line over strict configs. It has nine tasks, `image_classification`
 (families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`, `beit`, `energy_transformer`),
 `image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), `image_denoising`
 (families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), `pretrain` (families `et_mim`, `beit_mim`),
 `time_series_forecasting` (families `nbeats`, `prism`, `tirex`, `xlstm`, `ets`, `timestral`, `mdn`) and
-`depth_estimation` (family `depth_anything`), `language_model_pretraining` (family `gpt2_lm`) and `text_classification`
-(families `bert`, `gpt2`), and the same code is a Python function. Run it from the repo root with `.venv`, with
+`depth_estimation` (family `depth_anything`), `language_model_pretraining` (family `gpt2_lm`), `text_classification`
+(families `bert`, `gpt2`) and `beit_tokenizer` (family `vq_vae_rotation`), and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
 ```bash
@@ -307,7 +307,7 @@ denoised = load_model("<run>/final_model.keras").predict("noisy.png")["denoised"
 ```
 
 * **Families** (`train/api/denoising_models.py`; each trains this task only: `python -m train image_denoising model=vit/vit_pico` exits 2 naming
-  the families of this task, and the other seven tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
+  the families of this task, and the other eight tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
   `"bias_free"`: no additive constant anywhere, so `f(a x) = a f(x)`; the three are checked, see Homogeneity below);
   `convunext_biased` (ConvUNext with `use_bias=true`, its own family because the segmentation family forces
   `output_channels` to the class count) and `scunet` carry constants and are never checked. `scunet` has no variants table in the
@@ -611,8 +611,9 @@ the best epoch, as in the other tasks, and the test split is scored once after `
 python -m train list_models task=pretrain
 python -m train pretrain                     # every key of the task, its type and default
 python -m train pretrain out=auto model=et_mim/et_tiny data.dataset=cifar10 epochs=12
+# the tokenizer is a beit_tokenizer run: "The tokenizer" below trains one, and its best_model.keras is the file this key takes
 python -m train pretrain out=auto model=beit_mim/beit_tiny data.dataset=cifar10 epochs=12 \
-    model_args.tokenizer_checkpoint=/path/to/stage0_run/best_model.keras
+    model_args.tokenizer_checkpoint=results/beit_tok_c10/best_model.keras
 ```
 
 ```python
@@ -622,7 +623,7 @@ result = train_pretrain(out="auto", model="et_mim/et_tiny", data={"dataset": "ci
 
 * **Families** (`train/api/pretrain_models.py`; the variants are the keys of each model module's `MODEL_VARIANTS`, and
   `python -m train list_models task=pretrain` prints them). Each family trains this task only: a `vit/vit_pico` model given to `pretrain`
-  exits 2 naming the families of this task, and the other seven tasks refuse these two the same way. The names before plan 5c6cc105,
+  exits 2 naming the families of this task, and the other eight tasks refuse these two the same way. The names before plan 5c6cc105,
   `energy_transformer` and `beit`, are the classifiers of `image_classification` now, with no alias (Limits).
 
 | Family | Method | Variants | Recipe (the legacy trainer's) |
@@ -703,18 +704,19 @@ directory is claimed, and so is a `model_args` key the model takes from the task
   `val_loss` the killed run logged for them. Equality on a GPU is not claimed here (the gate below is the first GPU measurement).
   Without the per-call `rng=`, a shared generator whose state is swapped per call corrupted 291 to 363 of 2,000 masks per pass at
   `sys.setswitchinterval(1e-6)` and none at the interpreter's default interval, so the concurrency test sets that interval.
-* **The tokenizer** (BEiT only). `model_args.tokenizer_checkpoint` is the `.keras` file of a stage-0 `VQVAERotationTrick`, made by the
-  legacy `python -m train.beit.train_tokenizer`; the run reads its code ids as targets and takes `vocab_size` from its codebook. The key
-  is required, and a request without it, or with a path that does not exist or does not end in `.keras`, exits 2 before the run
-  directory is claimed with a sentence that names that script (no file is read at that point). The grid is proved at build time, after
-  the claim, by a real forward pass at the run's `transform_args.image_size`: the expected grid is the patches', never the
-  tokenizer's own `downsample_factor`, so a tokenizer built at another size or another down-sample is refused naming the file and the
-  size, and a `.keras` file that is not a `VQVAERotationTrick` is refused by name. The grid must be the patches': 32 px at patch 4 needs
-  `--image-size 32 --downsample-factor 4`, and 224 px at patch 16 needs `--downsample-factor 16`.
+* **The tokenizer** (BEiT only). `model_args.tokenizer_checkpoint` is the `.keras` file of a stage-0 `VQVAERotationTrick`: the `best_model.keras` of a `beit_tokenizer` run
+  (the task below says why that file); the run reads its code ids as targets and takes `vocab_size` from its codebook. The key is required, and a request without it, or with a
+  path that does not exist or does not end in `.keras`, exits 2 before the run directory is claimed with a sentence that names `python -m train beit_tokenizer` (no model file is
+  read at that point). When the file sits beside the `task.json` of a `beit_tokenizer` run, that record is read too (JSON only, before the claim) and held to this run: another
+  `data.patch_size`, `transform_args.image_size`, `mean` or `std` than the tokenizer was trained at is refused naming both values and the tokenizer run, and so is a record that
+  fails its own check. The record is looked for beside the file's RESOLVED path, so a symlink to a run's `best_model.keras` is checked like the file; a file with no sibling record (a tokenizer of
+  the legacy `train.beit.train_tokenizer`, or a copy of `best_model.keras` made without its `task.json`) gets NO check of its statistics before the claim and only the checks after it (the grid proof and the usage floor): keep `task.json` beside the file. The grid is proved at build
+  time, after the claim, by a real forward pass at the run's `transform_args.image_size`: the expected grid is the patches', never the tokenizer's own `downsample_factor`, so a
+  tokenizer built at another size or another down-sample is refused naming the file and the size, and a `.keras` file that is not a `VQVAERotationTrick` is refused by name. The
+  grid must be the patches': `cifar10` is 32 px at patch 4 and `imagenette` 224 px at patch 16, which is what `beit_tokenizer` trains by default.
 
 ```bash
-python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsample-factor 4 --num-embeddings 512 \
-    --epochs 5 --output-dir results --experiment-name my_tokenizer_cifar10
+python -m train beit_tokenizer out=results/beit_tok_c10 model=vq_vae_rotation/small data.dataset=cifar10 epochs=5
 ```
 
   **The usage floor.** Over the masked positions of the selection split (one pass of the tokenizer) the run counts the distinct codes
@@ -736,7 +738,9 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   number of positions, and a small sample reads low for a healthy tokenizer. The 5-epoch tokenizer reads 59.0 over 96 positions
   (`data.max_samples=40`, 4 selection images, 68 distinct codes: REFUSED), 116.1 over 240, 195.6 over 480, 259.5 over 1,223 and 354.5 over
   11,977 (`data.max_samples=5000`). The refusal therefore names the positions and the distinct codes it counted and says the estimate is
-  limited by the split size, so a small `data.max_samples` is not blamed on the tokenizer alone.
+  limited by the split size, so a small `data.max_samples` is not blamed on the tokenizer alone. The `beit_tokenizer` task counts the same perplexity over ALL positions of its own
+  selection split (320,000 on CIFAR-10 at the defaults) where `beit_mim` counts the masked ones of its own, and the two counts differ: on the two tokenizers above the masked one
+  is 0.9 and 6.0 percent above the all-positions one (354.8 against 351.7, 24.7 against 23.3), so a tokenizer near 64 can clear the floor in one count and miss it in the other.
 * **The bar and its baseline** (D-009). `success_metric` is `val_loss`. `success_value` is the lowest `val_loss` of the selection
   window (the whole run, as `selection_start_epoch` is 0), `success_threshold` is `min(baseline, epoch-zero val_loss)` and the bar is
   STRICTLY below, compared in float32 (the base class's `>=` reads a loss backwards, and a model that equals the constant predictor must
@@ -822,7 +826,7 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
     and runs made before their task wrote one have none)`) and cannot be predicted from or exported, and a resume under the new
     name is refused by name (`Cannot resume <run>: it is a pretrain run recorded before its family was renamed ...`, D-052; the
     old name is refused as a classifier's before that). Its `best_model.keras` still loads in Keras.
-  * The tokenizer is made by hand with the legacy script, and the floor rests on two tokenizers.
+  * The floor rests on two tokenizers, and both are gone from `results/` (the `beit_tokenizer` gate is the third measurement it asked for).
   * The recipe's learning rate and batch are doubted, not measured, and `run.log` says so (a recipe notice): ET lr 5e-4 is the paper's
     Table 4 value at a batch of 768, 24 times the batch here, and BEiT lr 1.5e-3 is the recipe's at a global batch of 2,048 (128 on 16
     GPUs), neither scaled to batch 32. The legacy trainers are not a parity arbiter (no ET or BEiT run existed to compare with), and
@@ -861,8 +865,8 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   `research/roadmap/20261117_train_api_init_from.md`). The pretrain record with `predict` and `export`, and the `beit` and
   `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code and their GPU gate has run (Phase 4h,
   plan 5c6cc105, with the gate under "Measured: the Phase 4h gate" below). `language_model_pretraining` and `text_classification`, the
-  two language tasks, are in the code and their GPU gate has run (Phase 4i, with the gate under "Measured: the language gate" below).
-  Named and not started: DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`). `load_model`, `export`, `list_models` and
+  two language tasks, are in the code and their GPU gate has run (Phase 4i, with the gate under "Measured: the language gate" below). `beit_tokenizer`, the ninth task, trains
+  the tokenizer that `beit_mim` reads: it is in the code and its GPU gate has run (Phase 4j, plan fa94f59c, with the gate under "Measured: the tokenizer gate" below). Named and not started: DINO. `load_model`, `export`, `list_models` and
   `list_tasks` were built in the earlier phases and stay on `train.api` (since plan 98c9aac5 `list_tasks` and `list_models` register the
   built-in tasks and families themselves, so they answer in a fresh process), and the repo map entry is `REPO_MAP.md`, section "Entry points".
 
@@ -887,7 +891,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 
 * **Families** (`train/api/forecast_models.py`; the variants are the keys of each family's variants table, `python -m train list_models
   task=time_series_forecasting` prints them). Each family trains this task only; `model=vit/vit_pico` exits 2 naming the families of
-  this task, and the other seven tasks refuse these seven the same way. Every row is held to its library factory's signature by
+  this task, and the other eight tasks refuse these seven the same way. Every row is held to its library factory's signature by
   `signature_census`: a key the family offers is passed through (and may override a variant's value), a key it refuses or forces is
   named in the refusal, and a key the adapter takes from the data (`lookback`, `horizon`, the channels) is refused as `model_args`.
 
@@ -1161,7 +1165,7 @@ result = train_depth_estimation(out="auto", model="depth_anything/vit_s", data={
 ```
 
 * **Family** (`train/api/depth_models.py`; `python -m train list_models task=depth_estimation` prints the variants). `depth_anything`
-  trains this task only: `model=vit/vit_pico` exits 2 naming it, and the other seven tasks refuse it the same way. Its variants are
+  trains this task only: `model=vit/vit_pico` exits 2 naming it, and the other eight tasks refuse it the same way. Its variants are
   `vit_s`, `vit_b` and `vit_l` (DINOv2 small, base and large). The adapter is held to the factory's signature by `signature_census`:
   it offers one key, `model_args.pretrained`; it supplies `variant`, `encoder_type` and `image_shape` itself (the last from
   `transform_args.image_size`); it forces `encoder_kind` to `"real"`, `use_feature_alignment` to false, `include_top` to true and
@@ -1371,7 +1375,7 @@ result = train_language_model_pretraining(out="auto", model="gpt2_lm/tiny", data
 ```
 
 * **Family** (`train/api/text_models.py`). `gpt2_lm` trains this task only: a family of another task given here exits 2 naming the families of
-  this one, and the other seven tasks refuse `gpt2_lm` the same way. Its variants are the keys of the library's `GPT2.MODEL_VARIANTS`: `tiny`
+  this one, and the other eight tasks refuse `gpt2_lm` the same way. Its variants are the keys of the library's `GPT2.MODEL_VARIANTS`: `tiny`
   (256 wide, 4 blocks, 4 heads, a position table of 512 rows), `small` (768, 12, 12), `medium` (1,024, 24, 16), `large` (1,280, 36, 20) and
   `xl` (1,600, 48, 25), the last four with 1,024 rows. The model is a FUNCTIONAL `keras.Model`: float32 token ids in, a cast to int32 inside
   the graph, the library GPT-2 (a layer named `gpt2_backbone`, the key `init` transfers by), logits `(seq_len, vocab_size)` out. `compile`
@@ -1494,7 +1498,7 @@ result = train_text_classification(out="auto", model="gpt2/tiny", data={"dataset
 ```
 
 * **Families** (`train/api/text_models.py`). `bert` and `gpt2` train this task only: a family of another task given here, `gpt2_lm` included, exits
-  2 naming these two, and the other seven tasks refuse `bert` and `gpt2` the same way. `model` has no default: `bert` is the library's encoder
+  2 naming these two, and the other eight tasks refuse `bert` and `gpt2` the same way. `model` has no default: `bert` is the library's encoder
   classifier the phase assumed, and `gpt2` the only one a language-model run can seed (`init`, below). Both are FUNCTIONAL `keras.Model`s: float32
   token ids in, a cast to int32 inside the graph, the library backbone (a layer named `bert_backbone` or `gpt2_backbone`, the key `init` transfers
   by) and the library's sentiment head (`task_head`), the logits of the classes out; `compile` and `fit` are the stock ones. `bert` is read at the
@@ -1635,6 +1639,197 @@ output, in the order `keras`, `saved_model`, `tflite`, `onnx`: 0.0, 3.5e-5, 5.7e
 before this one and 29 after it.
 <!-- language-gate:end -->
 
+**`beit_tokenizer`** (plan fa94f59c, Phase 4j): trains the BEiT stage-0 tokenizer, the library `VQVAERotationTrick` that `beit_mim` loads as its frozen tokenizer, to
+reconstruct CIFAR-10 or Imagenette images through a codebook: one code per `data.patch_size` x `data.patch_size` cell, so the code grid is `transform_args.image_size /
+data.patch_size` on a side. `out`, `model` and `data.dataset` are required. It is built and tested on a CPU, and **its GPU gate has run** (its numbers are in the block that ends this
+section).
+
+```bash
+python -m train list_models task=beit_tokenizer
+python -m train beit_tokenizer                 # every key of the task, its type and default
+python -m train beit_tokenizer out=results/beit_tok_smoke model=vq_vae_rotation/small data.dataset=cifar10 debug_args.smoke=true
+python -m train beit_tokenizer out=results/beit_tok_c10 model=vq_vae_rotation/small data.dataset=cifar10 epochs=5
+```
+
+```python
+from train.api import train_beit_tokenizer
+result = train_beit_tokenizer(out="auto", model="vq_vae_rotation/small", data={"dataset": "cifar10"}, epochs=5)
+```
+
+* **Family and recipe** (`train/api/tokenizer_models.py`). `vq_vae_rotation` trains this task only: a family of another task given here exits 2 naming the families of this
+  one, and the other eight tasks refuse `vq_vae_rotation` the same way. The library has no named scales, so the one variant is the API's, `small`: 128 hidden channels, 2
+  residual blocks and an embedding of 32 (the legacy trainer's defaults), 2,004,003 parameters in 47 weights at 32 px with 512 codes. The model is the class itself, with its
+  own `train_step` and `test_step`: the task adds no step and compiles with no loss and no metric, because the file it saves must be the `VQVAERotationTrick` that `beit_mim`
+  loads. Six `model_args` are offered (`num_embeddings`, `embedding_dim`, `hidden_channels`, `num_res_blocks`, `commitment_cost`, `use_ema`), 4 are given by the task and 15
+  more are refused by name before the claim, each with its reason (`kmeans_init` and `dead_code_threshold`, the remedies for a collapsed codebook, because no run measured
+  them through this task; `encoder` and `decoder`, which the task builds); a census holds the three tables equal to the constructor's signature. Every offered key is held, before the
+  claim, to the type its constructor declares, and a bool is no int and no float: a width or an embedding size that is not a positive int, a count of residual blocks that is not an
+  int, a commitment cost that is not a number of at least 0 and a `use_ema` that is not `true` or `false` in lowercase are refused (the command line keeps `False` or `no` as text,
+  which the library reads as true and builds the opposite model; a count of residual blocks under 0 builds as none and is left alone). The recipe is the legacy
+  trainer's, held equal by a test that reads its `TrainingConfig`: AdamW at 5e-4, weight decay 0.05, 2 warmup epochs, cosine decay over the whole run to 0.01 of the peak, a
+  global gradient clip of 1.0, batch 32, 50 epochs, patience 15; the command above passes `epochs=5`, as the lost tokenizer below had. The geometry follows the dataset: `cifar10` is 32 px at patch 4 (grid 8 x 8,
+  512 codes) and `imagenette` is 224 px at patch 16 (grid 14 x 14, 8,192 codes). The `cifar10` row is the pairing every `beit_mim` gate used, not the legacy command line's (a
+  down-sample of 8, a 4 x 4 grid that `beit_mim` refuses at its patch of 4, and 8,192 codes); the `imagenette` row is the legacy default at its geometry, which no run in
+  this repository had trained before the gate below (the recipe notice in `run.log` still says so: the notice is part of the code the gate ran, which was frozen first). Whether
+  this recipe reaches the floor below with a linear decoder is what the gate block below measured, once on each dataset; the bar still says it, run by run.
+* **Keys of the task** (`python -m train beit_tokenizer` lists all, with their help; the shared groups and top-level keys mean what they mean for the other tasks). `data.dataset`
+  is required (`cifar10` or `imagenette`); `transform_args` is the `pretrain` task's group (the image size and the augmentation of the TRAIN stream); there is no `loss_args` group.
+
+<!-- keys-of: beit_tokenizer -->
+| Key | Default | Read at |
+|---|---|---|
+| `data.format` | `"builtin"` | `TokenizerData`; the only value |
+| `data.validation_split` | `null` | `BeitTokenizerTrainer.build_data`, then `tokenizer_data.load_tokenizer_batches`; null is the loader's 0.1 |
+| `data.max_samples` | `null` | the same path (the test split is never capped); `debug_args.smoke` sets 512 when null |
+| `data.patch_size` | `"auto"` | `TokenizerData.resolve_auto`, `check_geometry` (a power of 2, at least 2, that divides `transform_args.image_size`, before the claim), `BeitTokenizerTrainer.build_model`; auto is 4 for cifar10 and 16 for imagenette |
+| `transform_args.image_size` | `"auto"` | `BeitTokenizerTrainer.describe_data`, `BeitTokenizerTrainer.build_data`; auto is 32 for cifar10 and 224 for imagenette |
+| `transform_args.augment` | `true` | `BeitTokenizerTrainer.build_data`: flip and pad-crop of the TRAIN stream only |
+| `metric_args.watch_metric` | `"auto"` | `TokenizerMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`; auto is `val_reconstruction_loss`, the only value accepted (`val_loss` carries the quantizer's terms, which a constant image's score has none of) |
+| `metric_args.watch_mode` | `"auto"` | the same path; auto is `min`, the only value accepted |
+
+  `debug_args.smoke` runs one epoch on at most 512 train samples and applies no bar (`success` and `success_threshold` are null; both parts of the bar are still reported).
+  `analysis_args.conformal_alpha` is refused (a conformal set is a set of classes) and so is a `precision` other than `float32` (the quantizer's nearest-code search and its
+  codebook update were never measured in half precision); `optim_args.optimizer=sgd` with a positive `optim_args.weight_decay` is refused, because the adapter builds no L2 penalty.
+* **The bar has two parts, and both are required.** `success_value` is the lowest `val_reconstruction_loss` of the selection window: the mean over batches of the squared error
+  between a standardized image and its reconstruction through the codebook, without the quantizer's terms. (1) It is STRICTLY below `success_threshold`, the smaller of the
+  constant image's score and the untrained model's (`epoch_zero`, read from the fit sidecar), in float32 and beyond `forecast_run.tie_band` steps (64 at the 157 selection
+  batches of CIFAR-10 at the defaults): a compiled constant model scores a few float32 steps either side of its analytic score, so a bare `<` or `<=` would call one a success.
+  The baseline is the lower of the best per-channel constant and the in-sample mean image of the selection images, in the metric's own mean over batches: 1.0049 and 0.9874 on
+  the CIFAR-10 selection split (5,000 rows of seed 42), so the baseline is the mean image's. (2) The codes the BEST weights give to every position of every selection image (5,000 images x 64 cells = 320,000 positions), counted once after `fit` by one eager pass, meet
+  TWO floors. The pooled perplexity is at least the floor of 64 effective codes: the one definition `beit_mim` refuses by (`pretrain_run.usage_meets_floor`, "The usage floor"
+  above). At 32 px and patch 4 the grid has 64 cells, so a code that is the cell index and nothing else, whatever the image, has a pooled perplexity of exactly 64 and meets it.
+  The PER-CELL perplexity, exp of the mean over the grid's cells of the entropy of each cell's codes (`tokenizer_data.per_cell_usage`), is at least 8 (`tokenizer_data.MIN_PER_CELL_PERPLEXITY`):
+  that code is worth 1 per cell, the cell index plus one image-wide bit 2 and two bits 4, and the two 750-step linear-head arms of the probe that chose the decoder were worth
+  36.07 and 46.53 per cell (39.04 and 51.73 pooled; the lost 4h tokenizer's per-cell number died with its file, at least 5.5 by the entropy bound on its pooled 354.8 over 64 cells). 8 is the power of 2 nearest the geometric
+  mean of 2 and 36.07: 4 times above the best code that carries one bit and 4.5 times under the trained arms. A constant model, a collapsed codebook, a code that describes position
+  only and a tokenizer that meets one part only each miss: exit 1, the run kept, and `results_summary.json` says which (`reconstruction` with `beats_bar`, `codebook_usage` with
+  `meets_floor` and `per_cell_meets_floor`, the two perplexities beside `baseline`, `epoch_zero` and `selection`). A selection split of fewer positions than the pooled floor cannot show it
+  and is refused by name after the data is read (raise `data.max_samples`); one of fewer than 16 images (`tokenizer_data.MIN_PER_CELL_IMAGES`, derived in its comment from the saved codes of the two trained arms) reads the per-cell
+  number low (it is at most the number of images, and lower still on a small split for a good tokenizer), so the run says so in a warning when its data is built and reports the
+  miss (`data.max_samples` of 160 at the default split of 0.1 is the first that does not warn).
+* **`best_model.keras` is the file `beit_mim` takes.** The checkpoint is selected on `val_reconstruction_loss` alone, so `best_model.keras` holds the epoch the verdict judged:
+  the bar and `codebook_usage` are its weights'. `final_model.keras` is written too and is the last epoch's, which the verdict does not describe (the 4h gate read a
+  `final_model.keras`); `beit_mim` loads either, so give it `best_model.keras`. A later epoch that spreads the codes more but reconstructs worse is not the one judged.
+* **The decoder's last layer is linear.** The library's auto decoder used to end in a sigmoid, and every tokenizer the legacy trainer made before this change has it. The
+  streams are standardized, so 52.0 percent of their pixels lie below 0 and 18.5 percent above 1, out of the `[0, 1]` a sigmoid can give, and the best output confined to
+  `[0, 1]` scores 0.5339 on the selection split; 750 steps from the same weights gave `val_reconstruction_loss` 0.1440 and 0.1410 (two seeds) against 0.5778 and 0.5766
+  (`src/dl_techniques/models/vision/vq_vae_rotation/README.md` has the rest). A file written before the change carries its sigmoid decoder in its own config and loads
+  unchanged, with its sigmoid, and `beit_mim` takes it as before; a tokenizer made now has other codes than every earlier one.
+* **The record, `predict` and `export`.** A run writes `task.json` (schema version 2, the ninth record kind) before its first epoch: `input_size`, `channels`, `normalize`,
+  `mean`, `std`, `patch_size`, `num_embeddings` and `output` (`code_ids`); a resume compares the six from `input_size` to `patch_size`. `predict model=<run> data=<image or
+  directory> out=<new directory>` writes one int32 `.npy` of shape `(8, 8)` per image (the code of each cell, row-major; the image is resized to the trained side) and LAST
+  `index.json`. `export` writes image to code ids (standardized pixels `(batch, 32, 32, 3)` in, int32 `(batch, 8, 8)` out) at the trained size only, in `keras`,
+  `saved_model`, `tflite` and `onnx`; all four convert. Measured on the CPU: 4 models (the 2,004,003-parameter default and one of 23,819, each untrained and trained) x 4
+  formats, 720,896 positions compared with Keras's, none differs; through the real command line 8 cells (32,768 positions) equal `predict`. The limit is the argmin's: a
+  position whose two nearest codes are within float32 rounding of each other can take the other code in a file of another runtime. Exact duplicates take the lowest in every
+  format; a codebook BUILT to be all pairs 1e-7 to 1e-4 apart differs from Keras at 0.01 to 12.4 percent of the positions in the SavedModel, TFLite and ONNX files (the tflite export compares
+  128 positions with Keras's and refuses a file that differs there, so it sees such a flip by chance only). No trained tokenizer showed it, and the export note says it. The `keras` file holds a layer of the `train` package (`TokenizerCodes`), so it loads only where `train` is importable. 720,896 positions, 23,819 parameters and 12.4 percent are recorded measurements of this phase's export probe, which no test repeats (the tests hold the cells and the limit, not these counts).
+* **`init`** takes a `beit_tokenizer` run only. The row fixes the input channels, the image size, the patch and the codebook size: another one is refused before the claim,
+  naming both values. A width, a depth, an embedding size or an EMA codebook that differs is no key of the record, and the engine refuses it after the claim (complete or
+  raise). Every weight of the default model copies (47 of 47, none reset). **The image size is refused by policy, not by shape, and the refusal says so**: a convolutional tokenizer has no weight that
+  depends on it, 47 of 47 copy into a 64 px model too (measured), so the sentence is the family row's own (`policy`, below) and not the engine's "sizes its weights by", which would
+  be false here; a different size is a different code grid, which `beit_mim` reads, and lifting the refusal is two entries of the family row (the `fixed` tuple and the `policy` entry) and its census test. Epoch zero is the
+  LOADED weights' `val_reconstruction_loss` and the threshold `min(baseline, loaded)`, still strictly below: a fine-tune that moves no weight misses on the reconstruction part.
+  A `beit_mim` run is no `init` source of a tokenizer, and a tokenizer is none of `beit_mim`'s (it takes `model_args.tokenizer_checkpoint`).
+* **The tokenizer of the Phase 4h gate is lost.** The `beit_source` and `beit_mim_from_beit_mim` arms of the 4h gate read `results/p4d_tokenizer_cifar10_e5/final_model.keras`, made by
+  the legacy trainer. It is gone (74 of the 95 run directories of `results/` vanished on 2026-11-24, cause unknown, and the backup taken that day holds only the 21 that were left), and its sha256,
+  `cdb578c78471b4198b502401c9c0db153f613df8816dc96b20ab66bb1bdfd3f8`, survives only in the `task.json` of those two runs. The rows of the 4h gate stay as evidence about THAT file.
+  A tokenizer trained now has another sha256 (a GPU run is not bit-reproducible, and the decoder is linear now), so the 4h figures (`val_loss` 3.7778 and 3.6336, the unigram
+  bar 5.8716, the perplexity 354.8) are NOT reproduced by a `beit_mim` run on it.
+* **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed) unless said; a message quoted with `<run>`, `<out>` or `...` is abbreviated there, and each piece between those marks is the code's own, in that order:
+
+| Case | Message |
+|---|---|
+| a family of another task | `Invalid value for 'model': the family 'vit' trains image_classification, not 'beit_tokenizer'; the families of 'beit_tokenizer' are vq_vae_rotation` |
+| a patch that is not a power of 2 | `Invalid value for 'data.patch_size': 3 is not a power of 2: the encoder is a stack of stride-2 convolutions, so one code can only describe a cell whose side is a power of 2 (transform_args.image_size is 32); the patch must be a power of 2, at least 2, that divides the image side` |
+| a patch of 1 | `Invalid value for 'data.patch_size': 1 is below 2: the encoder is a stack of stride-2 convolutions, so a patch of 1 leaves it no stage, and this task asks for a code that describes a cell of at least 2 x 2 pixels, not one pixel (transform_args.image_size is 32); the patch must be a power of 2, at least 2, that divides the image side` |
+| `model_args.num_embeddings=32` | `Invalid value for 'model_args.num_embeddings': 32 is below the 64 effective codes the bar asks of a tokenizer: a codebook of 32 codes cannot reach a perplexity above 32, so the run could never meet it; expected at least 64, or set debug_args.smoke=true for a run with no bar` |
+| `model_args.kmeans_init=true` | `Invalid value for 'model_args.kmeans_init': kmeans_init is not offered by 'vq_vae_rotation' (the k-means warm start is a remedy for a collapsed codebook, and no run of this task measured it; the bar reports a collapse), got True` |
+| `model_args.hidden_channels=0` (a value the library rejects after the claim) | `Invalid value for 'model_args.hidden_channels': expected a positive int, got 0` |
+| `model_args.use_ema=False` (the library would read the text as true) | `Invalid value for 'model_args.use_ema': expected true or false, in lowercase (the command line keeps any other spelling, such as False or no, as a string, and the library reads a string as true), got 'False'` |
+| `init` from another patch, size or codebook | `Invalid value for 'init': vq_vae_rotation sizes its weights by data.patch_size; the source trained at 4, this run asks for 8` (the codebook: `... by the codebook size (model_args.num_embeddings); the source trained at 512, this run asks for 256`; the size, which the weights would copy, is the row's own sentence: `Invalid value for 'init': beit_tokenizer holds transform_args.image_size to the source's by policy, not because a weight depends on it: the source trained at [32, 32], this run asks for [64, 64]; a different size is a different code grid (the image size over data.patch_size), which is what a beit_mim run reads, and every weight of this convolutional tokenizer would copy, so this is the task's choice and not a limit of the weights: it is the policy entry of the family row in train/api/tokenizer_models.py`) |
+| `init` from a `beit_mim` run | `Invalid value for 'init': beit_mim (pretrain) cannot seed vq_vae_rotation (beit_tokenizer); vq_vae_rotation takes weights from vq_vae_rotation (beit_tokenizer)` |
+| a `beit_mim` run at another patch than its tokenizer run's | `Invalid value for 'model_args.tokenizer_checkpoint': <run>/best_model.keras belongs to the beit_tokenizer run in <run>, which was trained at data.patch_size 4, and this run asks for data.patch_size 8; a beit_mim run reads the code of each patch of its own standardized images, so give a tokenizer trained at this run's values ...` |
+| after the claim: `init` from a source of another width | `Invalid argument for the init transfer: Invalid value for 'init': 44 of 47 weights of vq_vae_rotation/small have no source weight of their shape and no declared rule: enc_down_0/enc_down_0_conv1/kernel: target (4, 4, 3, 64) float32, source (4, 4, 3, 128) float32; ... nothing was copied (paths without the model's root). The run directory <out> was claimed before this failed, ...` |
+
+* **Limits.** The recipe is measured with a linear decoder only by the gate's runs below (one 5-epoch run on each dataset, a repeat, a one-epoch control and an `init` run on `cifar10`, one seed): nothing about a longer run or another seed. **The bar does not test locality:** the two floors count
+  how the codes vary across images and cells, not whether a code describes its own patch (one image-wide id repeated at every cell, say the image's cluster among 128, has the same
+  pooled and per-cell perplexity and meets both: `test_an_image_wide_code_repeated_at_every_cell_meets_both_floors_so_the_floors_do_not_test_locality`), so the reconstruction part, which
+  asks only to be strictly below the constant image, is the only evidence of local content. No per-epoch usage reaches the CSV or the history
+  (the perplexity is counted once, after `fit`), and the checkpoint is not selected on it. A resume continues a fresh stream, not the unkilled run's next batches
+  (`resume_stream_exact` stays false). The equalities claimed (the same `val_reconstruction_loss` across passes, epochs and a resume; the reload gap) were measured on the CPU;
+  on a GPU the transposed-convolution engine can differ in the last bits, so the reload gap is reported, never asserted 0. `keras.datasets.cifar10.load_data()`
+  rewrites its extracted files on every call, so two processes that read the real CIFAR-10 rows in the same moment can read a half-written batch file (seen once in this phase;
+  the files were intact afterwards): start the tokenizer run and any other CIFAR-10 run one after the other.
+
+<!-- tokenizer-gate:begin -->
+**Measured: the tokenizer gate** (plan fa94f59c: `beit_tokenizer` on `cifar10`, a control that should miss, a repeat, an `init`
+pair, a first Imagenette run, a `beit_mim` run from the new tokenizer, and the refusal, `predict` and `export` on the CPU). Run
+on the code HEAD `69d4f7aab8f2593fa7c0218218610cb080c845e1` of the branch `train-api/phase-4j` (the commits after it change
+under `src/` only `src/train/AGENTS.md` and `src/train/README.md`, and 2 files under `tests/`:
+`tests/test_train/test_api/test_text_classification_task.py` and
+`tests/test_train/test_api/test_the_forecasting_docs_state_the_numbers_of_the_code.py`), one job at a time, at the recipes'
+rates and seed 42: no optimizer key and no batch key is on any command line, so the batch is 32 for the tokenizer and 32 for
+`beit_mim`. The test file `tests/test_train/test_api/test_text_classification_task.py` differs only in that its registration
+check no longer pins the task as the last one registered, the one check of the night's Phase A that failed (below). The test
+file `tests/test_train/test_api/test_the_forecasting_docs_state_the_numbers_of_the_code.py` differs only in that it pins the
+words of the documents that say the tokenizer gate has run, which the block's own commit writes. The six training runs ran on an
+NVIDIA GeForce RTX 4090 (`CUDA_VISIBLE_DEVICES=0`, no `--gpu`), the refusal, `predict` and `export` on the CPU. Each log names
+the HEAD and the worktree `src` as the origin of `dl_techniques` and `train`; the `best_model.keras` and the `final_model.keras`
+of `tok_cifar10` kept their sha256 through every job. With none of the new rows used nothing changed: three CPU reference runs
+(API classification, the legacy convnext trainer, API segmentation) reproduce the runs recorded before Phase 4g exactly
+(`GOLDEN: EXACT for api, convnext, seg`), the `checkpoint` key that Phase 4g renamed `init` aside. Before those, the same night
+ran this work's targeted tests on the CPU at that HEAD: 107 pytest commands, which overlap, so 5,568 test executions (5,559
+passed, 1 failed, 8 skipped) of 5,177 distinct tests, of which 5,168 passed, 1 failed and 8 were skipped, and 129 of 129 planted
+mutants made their tests fail (0 survived, 0 specs stale, not run), so the Phase A verdict was FAIL. The failed test,
+`test_the_task_and_both_families_are_registered_and_each_family_trains_this_task_only` in
+`tests/test_train/test_api/test_text_classification_task.py`, pinned its task as the last one registered, which this phase's
+ninth task made stale; it is the test file named above, changed in the one commit after the gate HEAD, and run again on the CPU
+at the block's HEAD it gave 73 passed and 0 failed. Every one of the gate's 90 claims holds (6 further checks, marked extra in
+`plans/plan-*-fa94f59c/scratch_gate/gate_numbers.md`, hold too). The predictions below were written before any run and are
+reported apart. Every number is read by script from the runs' own files and the night's logs. The bar has two parts, both
+required: the lowest `val_reconstruction_loss` of the selection window strictly below the smaller of the constant image's score
+(0.9874 for the mean image, 1.0049 for the best per-channel constant) and the untrained model's, AND a perplexity of the best
+weights over all selection positions of at least 64 pooled over the positions AND of at least 8 per cell (the exponential of the
+mean over the grid's cells of the entropy of each cell's codes). Step is the median epoch after the first over its steps (for
+the one-epoch control, its only epoch, which includes the first epoch's tracing), peak memory TensorFlow's GPU allocator peak.
+
+| Arm | Run | Bar | Best `val_reconstruction_loss` (epoch of) | Perplexity: pooled, per cell (distinct codes) | Verdict | Step | Peak memory | Wall |
+|---|---|---|---|---|---|---|---|---|
+| `tok_cifar10` | `vq_vae_rotation/small`, cifar10, 5 epochs | reconstruction below 0.9874, perplexity at least both floors | 0.0828 (4 of 5) | 393.50, 328.91 (506) | met, exit 0 | 7.1 ms | 1,005.5 MiB | 128 s |
+| `tok_cifar10_repeat` | the same command again, 5 epochs | the same bar (0.9874) | 0.0824 (5 of 5) | 358.40, 303.01 (500) | met, exit 0 | 7.0 ms | 1,005.5 MiB | 123 s |
+| `tok_cifar10_e1` | the same, 1 epoch | the same bar (0.9874) | 0.1791 (1 of 1) | 27.56, 26.07 (271) | missed, exit 1 | 23.6 ms | 1,005.5 MiB | 77 s |
+| `tok_cifar10_init` | 4 epochs from `tok_cifar10` (`same_task`, `same_split`, copied 47) | reconstruction below 0.08279 (the loaded weights 0.08279), perplexity at least both floors | 0.08277 (1 of 4) | 388.59, 325.92 (504) | met, exit 0 | 6.7 ms | 999.4 MiB | 113 s |
+| `tok_imagenette` | `vq_vae_rotation/small`, imagenette, 5 epochs (a recipe never run before) | reconstruction below 1.6175, perplexity at least both floors | 0.2616 (5 of 5) | 112.67, 93.67 (692) | met, exit 0 | 73.3 ms | 3,894.5 MiB | 205 s |
+| `beit_mim_from_tok` | `beit_mim/beit_tiny`, cifar10, 12 epochs, the tokenizer `tok_cifar10/best_model.keras` | `val_loss` below the unigram bar 5.9887 (untrained 6.2679) | 3.9779 | 398.91 on 119,730 masked positions | met, exit 0 | 43.5 ms | 1,308.2 MiB | 972 s |
+
+**The tokenizer.** `tok_cifar10` met the bar (reconstruction met, pooled floor met, per-cell floor met): best 0.0828 against
+0.9874, perplexity 393.50 pooled and 328.91 per cell over its 506 used codes; the independent recomputation from the file
+(`check_tokenizer_usage.py`) gives 393.50 pooled and 328.91 per cell for `best_model.keras` and, beside it and not claimed,
+368.07 and 310.12 for `final_model.keras` (501 codes). **Predictions** (reported, not counted among the claims): `tok_cifar10`
+(best at most 0.1410, perplexity at least the floor and the per-cell perplexity at least its own floor) held; `tok_cifar10_e1`
+(perplexity under the floor with the reconstruction part met) held: its reconstruction met, its pooled floor missed, its
+per-cell floor met; `tok_cifar10_init` (best below the loaded weights' value beyond the tie band) held: best 0.08277 against the
+loaded weights' 0.08279, a gain of 1.3e-5 where the tie band is 64 float32 steps of that value; the best epoch was the first and
+no epoch after it improved on it, so what the pair shows is that the loaded weights are a valid start whose first epoch gains a
+little, not that more epochs gain more. The repeat of the first command differs from it by 0.0004 in the best value and 35.10 in
+the perplexity (reported, not claimed); `tok_imagenette`, whose recipe had never run, met the bar (reconstruction met, pooled
+floor met, per-cell floor met) with no prediction written. It fitted the card: the process held at most 8,608 MiB of the card by
+the periodic samples of `nvidia-smi` (TensorFlow's allocator peak, in the table, is lower), and its wall of 205 s was far under
+the 2,400 s the plan estimated. Nothing was tuned or run again.
+
+**`beit_mim` from the new tokenizer.** `beit_mim_from_tok` read `tok_cifar10/best_model.keras` (its `task.json` names that
+file's sha256): best `val_loss` 3.9779 against the unigram bar 5.9887 of the codes, a ratio of 0.6642; the prediction (below 0.8
+of the bar, the lost-tokenizer 4h arm having reached 0.6434) held. `beit_mim` counts the tokenizer's usage over the masked
+positions it reads, 119,730 of them: 398.91. The 4h rows stay evidence about the lost file and are not reproduced.
+
+**On the CPU.** `beit_mim_refused` (the same command at `data.patch_size` 8 against a tokenizer trained at 4) exited 2 before
+any run directory existed, naming both patch sizes. `predict` and `export` of `tok_cifar10` ran 5 commands and 7 checks, all
+holding: the code grids of 8 `cifar10` test images (512 positions, 254 distinct codes) equal an independent encoder's at every
+position, and so does each of the four exported files. The gate added only `p4j_gate_<arm>_69d4f7aa` run directories to
+`results/`, and nothing was removed: it held 29 entries before and 35 after.
+<!-- tokenizer-gate:end -->
+
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
 the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). A list is JSON with every text
@@ -1645,7 +1840,7 @@ problems and a "did you mean". `auto` asks for the family's recipe default.
 images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns `path` and `label`).
 **A data file and dotted keys are two layers of one group** (plan 98b866fb 7.1, D-021): `data=<file>` is the path of a YAML
 file holding the group, and `data.<key>=` tokens put over it, key by key, so a capped or tweaked run needs no copy of the file.
-The same rule holds for all eight tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
+The same rule holds for all nine tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
 the group's file, then the dotted keys, and the file's `format` reads dotted keys that state none (`data.path_column=` after a
 csv file); a `data.format=` that differs from the file's is refused naming both formats (give a file of that format, or every key on the command line with no file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
 refused as a repeated key. `config.json` records the resolved values, as for every key, and not which layer a value came from.
@@ -1700,7 +1895,7 @@ spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or 
 
 **Starting from an earlier run: `init`** (plan 0fd54b91, `train/api/init_from.py`; the design and its decisions are in
 `research/roadmap/20261117_train_api_init_from.md`; pretrain and its two classifiers are plan 5c6cc105, below). `init=<run directory>`
-names an earlier `python -m train` run whose weights start this one, for every task (`pretrain` and `language_model_pretraining` from a run of the same family
+names an earlier `python -m train` run whose weights start this one, for every task (`pretrain`, `language_model_pretraining` and `beit_tokenizer` from a run of the same family
 only, `text_classification` from a run of the same family or, for `gpt2`, of `gpt2_lm`). A relative path starts at the repo root, as `out` does, and `train_<task>(init=...)`
 takes a str or a `Path`. It replaced `checkpoint`, which is gone with no alias: `checkpoint=` on the command line, in a
 `config=` file or in a YAML mapping is refused by name, and a Python call with `checkpoint=` is a `TypeError`. The run builds its
@@ -1723,9 +1918,12 @@ python -m train image_classification out=results/convnext_c10 model=convnext_v1/
     transform_args.normalize=unit
 python -m train image_segmentation out=results/convnext_seg_pet model=convnext_seg/cifar10 data.dataset=oxford_pet \
     init=results/convnext_c10
+# a tokenizer into another run of the same family (the size, the patch and the codebook size must agree)
+python -m train beit_tokenizer out=results/beit_tok_c10 model=vq_vae_rotation/small data.dataset=cifar10 epochs=5
+python -m train beit_tokenizer out=results/beit_tok_c10_more model=vq_vae_rotation/small data.dataset=cifar10 epochs=4 init=results/beit_tok_c10
 # a pretrain run's trunk into its classifier (the record's patch kept, the decoder dropped, the head fresh)
 python -m train pretrain out=results/beit_mim_c10 model=beit_mim/beit_tiny data.dataset=cifar10 \
-    model_args.tokenizer_checkpoint=/path/to/stage0_run/best_model.keras
+    model_args.tokenizer_checkpoint=results/beit_tok_c10/best_model.keras
 python -m train image_classification out=results/beit_c10 model=beit/beit_tiny data.dataset=cifar10 init=results/beit_mim_c10
 # forecasting at a longer lookback
 python -m train time_series_forecasting out=results/tirex_168 model=tirex/tiny data.format=builtin
@@ -1761,7 +1959,9 @@ two is refused after the claim unless the segmenter is given `model_args.strides
 the 8 weights of `task_head`, dropping none (an `lm_head` an untied source holds is dropped, not refused). Those four, the two pretrain pairs
 below and that language-model pair are the seven declared cross-task pairs (the ConvUNext pair counts once each way); any other pair, and a
 width change (`convnext_v2` atto to femto: 139 of 140 weights differ), are refused, `bert` has no cross-task source (an encoder cannot start
-from a causal decoder), and a language-model run into it is refused by the declared-sources sentence (the table of the `text_classification` section).
+from a causal decoder), and a language-model run into it is refused by the declared-sources sentence (the table of the `text_classification` section). A `beit_tokenizer` run takes an
+earlier run of its own task only, so it is no pair: `vq_vae_rotation/small` copies 47 of 47 and resets none at its own size, and the engine would copy all 47 into a 64 px model too,
+which `init` refuses by policy (see `beit_tokenizer`).
 
 **Pretrain and its two classifiers** (plan 5c6cc105). `beit_mim` (pretrain) seeds `beit` and `et_mim` seeds `energy_transformer`
 (image_classification): the trunk (`beit_backbone`, `et_backbone`) is copied, the decoder is dropped (`decoder_norm` and
@@ -1825,7 +2025,7 @@ stops before it trains, naming both sha256.
 
 **The head** is copied only when the two `task.json` records say it means the same thing: classification, text classification and
 segmentation `class_names` equal as ordered lists (the same names in another order reset it), denoising `channels`, forecasting `horizon`,
-`head`, `quantile_levels` and `channels`, pretrain `tokenizer`, `mean` and `std`; depth always copies (one output), and a language model has no head to reset (its fixed tokenizer makes every source's embedding mean the same ids). Otherwise the family's declared head is fresh and
+`head`, `quantile_levels` and `channels`, pretrain `tokenizer`, `mean` and `std`; depth always copies (one output), a language model has no head to reset (its fixed tokenizer makes every source's embedding mean the same ids) and neither has a tokenizer (the codebook and both convolution stacks are the model). Otherwise the family's declared head is fresh and
 the source's is dropped; across tasks the head is always fresh. A channel change of the input is a stem change and refused,
 except for `timestral`, whose weights do not depend on it.
 
@@ -1841,7 +2041,7 @@ refused before the claim.
 **Split overlap is counted, never refused.** After the data is built, each task compares the source's training data with this
 run's selection and test data, by the source's own split keys, and records `split` in the `init` block: `same_split` (counts
 0), `different_data` (counts 0), `overlap` (`n_select_overlap`, `n_test_overlap`, and a reason naming the keys that would give
-0) or `unknown` (the reason). The unit is the task's: rows for classification, segmentation and pretrain (both seeded cuts rebuilt with
+0) or `unknown` (the reason). The unit is the task's: rows for classification, segmentation, pretrain and the tokenizer (both seeded cuts rebuilt with
 each run's own `seed`, `data.validation_split` and `data.max_samples`; the test rows are another split; another built-in
 dataset is `different_data`; Imagenette against ImageNet, ImageNet itself, and file data under other paths or of another
 fingerprint are `unknown`),
@@ -1863,12 +2063,12 @@ exit code changes.
 Classification, text classification, segmentation and denoising, whose bars a good source meets at epoch 0, also need the best success value (the best of all the epochs, so the band below is a rounding band and not a noise margin)
 strictly above the loaded weights' epoch-zero value (read from the fit sidecar, so a resume judges the same number), by more
 than 16 float32 steps (`forecast_run.tie_band(1)`); a fine-tune that only holds its source's score is a miss, exit 1.
-Forecasting, depth, pretrain and language models keep `min(..., epoch zero)`, whose epoch-zero term is now the loaded weights (pretrain's
-bar stays strictly below in float32, with no tie band; the language bar is strictly below beyond the loss tie band, and a fine-tune that
-moves no weight scores the loaded value and misses).
+Forecasting, depth, pretrain, language models and tokenizers keep `min(..., epoch zero)`, whose epoch-zero term is now the loaded weights (pretrain's
+bar stays strictly below in float32, with no tie band; the language and the tokenizer bars are strictly below beyond the loss tie band, and a fine-tune that
+moves no weight scores the loaded value and misses; the tokenizer's second part, the floor, is judged on the best weights as always).
 
 **What the run records.** `task.json` and `results_summary.json` carry the `init` block: `source` (absolute), `file`,
-`sha256`, `task`, `family`, `variant`, `geometry` (with `patch_size` from a pretrain source, `seq_len` and `vocab_size` from a text source), `relation` (`same_task` or `cross_task`), `pinned`, `transfer` (`copied`, a
+`sha256`, `task`, `family`, `variant`, `geometry` (with `patch_size` from a pretrain source, `seq_len` and `vocab_size` from a text source, `num_embeddings` from a tokenizer source), `relation` (`same_task` or `cross_task`), `pinned`, `transfer` (`copied`, a
 count; `resampled`, with path, rule and both shapes; `reset`, `grown`, `dropped`, path lists) and `split`. The summary adds
 `epoch_zero_of: "init"`, the three flags and, for classification, text classification, segmentation and denoising, `loaded_success_value` (the
 loaded weights' epoch-zero `accuracy`, `miou` or PSNR gain, the value the bar had to beat; forecasting, depth, pretrain and the
@@ -1934,7 +2134,7 @@ logs. Step is the median epoch after the first over its steps, peak memory Tenso
 | Arm | Run | Copied, resampled, reset, dropped | Relation, split | Bar | Loaded weights at epoch zero | Best (epoch of) | Verdict | Step | Peak memory | Wall |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `et_source` | `et_mim/et_tiny`, cifar10 at 32 px, patch 4, 12 epochs | - | - | `val_loss` below min(zero patches 1.0041, untrained 2.3379) | - | 0.1751 (12 of 12) | met, exit 0 | 11.4 ms | 1,027.9 MiB | 363 s |
-| `beit_source` | `beit_mim/beit_tiny`, cifar10 at 32 px, patch 4, tokenizer `p4d_tokenizer_cifar10_e5`, 12 epochs | - | - | `val_loss` below min(unigram codes 5.8716, untrained 6.2661) | - | 3.7778 (12 of 12) | met, exit 0 | 57.9 ms | 1,308.2 MiB | 1,293 s |
+| `beit_source` | `beit_mim/beit_tiny`, cifar10 at 32 px, patch 4, tokenizer `p4d_tokenizer_cifar10_e5` (lost: see `beit_tokenizer`), 12 epochs | - | - | `val_loss` below min(unigram codes 5.8716, untrained 6.2661) | - | 3.7778 (12 of 12) | met, exit 0 | 57.9 ms | 1,308.2 MiB | 1,293 s |
 | `et_cls_init` | `energy_transformer/et_tiny`, cifar10, 20 epochs, from `et_source` | 9, 0, 4, 4 | `cross_task`, `same_split` | `val_accuracy` above 0.2 and above the loaded weights | 0.1022 | 0.5598 (19 of 20) | met, exit 0 | 20.0 ms | 1,738.2 MiB | 352 s |
 | `et_cls_scratch` | `energy_transformer/et_tiny`, cifar10, 20 epochs | - | - | `val_accuracy` above 0.2 | - | 0.5988 (20 of 20) | met, exit 0 | 19.6 ms | 1,738.1 MiB | 374 s |
 | `beit_cls_init` | `beit/beit_tiny`, cifar10, 20 epochs, from `beit_source` | 220, 0, 4, 4 | `cross_task`, `same_split` | `val_accuracy` above 0.2 and above the loaded weights | 0.0724 | 0.8660 (19 of 20) | met, exit 0 | 49.1 ms | 2,297.3 MiB | 969 s |

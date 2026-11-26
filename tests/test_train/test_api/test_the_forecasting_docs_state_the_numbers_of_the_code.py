@@ -30,7 +30,15 @@ from ._forecast_fixtures import SHIFT_BOUND, world  # noqa: F401  (fixture)
 ROOT = Path(__file__).resolve().parents[3]
 README = ROOT / "src" / "train" / "README.md"
 AGENTS = ROOT / "src" / "train" / "AGENTS.md"
+VQ_README = ROOT / "src" / "dl_techniques" / "models" / "vision" / "vq_vae_rotation" / "README.md"
+TOKENIZER_DATA = ROOT / "src" / "train" / "common" / "tokenizer_data.py"
 FORECASTING = "time_series_forecasting"
+
+
+def defined_tests() -> str:
+    """The text of every ``test_*.py`` of the API tests: a test is looked up BY NAME in it (``def name(``), never by importing its module, which would register that
+    module's fixtures and state in this process."""
+    return "\n".join(path.read_text() for path in sorted((ROOT / "tests" / "test_train" / "test_api").glob("test_*.py")))
 
 
 def families_per_task():
@@ -64,7 +72,7 @@ def test_the_family_count_and_its_split_over_the_tasks_are_the_registrys(world):
 
 
 def test_the_number_of_tasks_is_the_registrys_in_both_documents(world):
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
     sentence = f"It has {words[len(registry.TASKS)]} tasks"
     assert FORECASTING in registry.TASKS
     assert sentence in README.read_text() and sentence in AGENTS.read_text()
@@ -79,8 +87,8 @@ def test_every_other_n_tasks_phrase_counts_the_tasks_of_the_registry_but_one(wor
 
     The denoising section kept "the other three tasks" after the pretrain and forecasting tasks were added; no test read it.
     """
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
-    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight) tasks?\b")
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight|nine) tasks?\b")
     found = pattern.findall(README.read_text()) + pattern.findall(AGENTS.read_text())
     assert len(found) >= 3, "the control: the README names the other tasks in the denoising, pretrain and forecasting sections"
     assert set(found) == {words[len(registry.TASKS) - 1]}, found
@@ -305,7 +313,7 @@ def test_the_agents_counts_about_the_tasks_their_hooks_and_the_language_record_a
 
     from train.api.trainer import TaskTrainer
 
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
     agents, readme = " ".join(AGENTS.read_text().split()), " ".join(README.read_text().split())
     trainers = []
     for spec in BUILTIN_TASKS:
@@ -374,8 +382,17 @@ def test_the_classification_section_and_the_init_pairs_state_the_numbers_of_the_
     keys = text[text.index("<!-- keys-of: text_classification -->"):][:2500]  # the section's own table and its next paragraphs
     assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in keys and text_args.CLASS_NAMES == ("neg", "pos")
     pairs = sum(len(spec.transfer.sources) for spec in registry.MODELS.values() if spec.transfer)
-    words = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    words = {1: "one", 2: "two", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
     assert f"are the {words[pairs]} declared cross-task pairs" in text, "the init section counts the pairs the families declare"
+    # Review pass 1, N1: "Those four, the two pretrain pairs below and that language-model pair" counts the declared pairs by the task of their SOURCE, derived here;
+    # the tokenizer takes no cross-task pair (an earlier run of its own task only), so its sentence comes after the count and is no part of it.
+    by_source = [task for spec in registry.MODELS.values() if spec.transfer for (task, _family) in spec.transfer.sources]
+    earlier = [task for task in by_source if task not in ("pretrain", "language_model_pretraining")]
+    assert f"Those {words[len(earlier)]}, the {words[by_source.count('pretrain')]} pretrain pairs below and that language-model pair are the {words[pairs]} declared" in text
+    assert by_source.count("language_model_pretraining") == 1 and len(earlier) + by_source.count("pretrain") + 1 == pairs
+    assert registry.MODELS["vq_vae_rotation"].transfer.sources == {}, "a tokenizer run takes no cross-task source"
+    assert text.index(f"are the {words[pairs]} declared cross-task pairs") < text.index("which `init` refuses by policy (see `beit_tokenizer`)")
+    assert "at its own size and at 64 px" not in text, "the 64 px copy is the engine's census with the refusal bypassed, not something `init` does"
     # review pass 2, concern 6: the recipe sentence says what the notice says the bar is, the guesser percentages are the exact binomial's
     # (IMDB: 1,256 of 2,498 selection rows, the bar and the bare share) in the README and in text_run, and both keys rows name the fallback
     from scipy.stats import binom
@@ -392,6 +409,317 @@ def test_the_classification_section_and_the_init_pairs_state_the_numbers_of_the_
     keys_rows = [line for line in README.read_text().splitlines() if line.startswith("| `data.tokenizer_dir` |")]
     assert len(keys_rows) == 2 and all("or the pinned copy when that directory is gone" in line for line in keys_rows)
     assert "a rounding band and not a noise margin" in text, "under init the loaded weights' term is the shared one, named for what it is"
+
+
+def tokenizer_refusals(side, patch, codes, floor):
+    """The messages of the first seven rows of the README's refusal table, as the code raises them, in the table's order."""
+    from train.api import tokenizer_args, tokenizer_models as tm
+    from train.api.errors import ConfigError
+
+    messages = []
+    for call in (lambda: registry.parse_model_name("vit/vit_pico", task=tm.TASK),
+                 lambda: tokenizer_args.check_geometry(3, side, codes, floor=floor, smoke=False),
+                 lambda: tokenizer_args.check_geometry(1, side, codes, floor=floor, smoke=False),
+                 lambda: tokenizer_args.check_geometry(patch, side, 32, floor=floor, smoke=False)):
+        with pytest.raises(ConfigError) as caught:
+            call()
+        messages.append(str(caught.value))
+    return messages + [tm.problems_of({"kmeans_init": True})[0], tm.problems_of({"hidden_channels": 0})[0], tm.problems_of({"use_ema": "False"})[0]]
+
+
+def test_the_tokenizer_section_states_the_numbers_of_the_code(world):
+    """Plan fa94f59c step 9: the variant, the model keys, the recipe, the geometry, the floor, the selection split and four refusals of the ``beit_tokenizer`` section."""
+    from dl_techniques.datasets.vision.classification import get_spec
+    from train.api import recipes, tokenizer_models as tm
+    from train.api.errors import ConfigError
+    from train.api.pretrain_args import GEOMETRY
+    from train.common import pretrain_run, tokenizer_data as td
+    from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
+
+    from ._tokenizer_world import cell_index_codes, with_image_wide_bits
+
+    text = " ".join(README.read_text().split())
+    start = text.index("**`beit_tokenizer`** (plan fa94f59c")
+    section = text[start:text.index("<!-- tokenizer-gate:end -->", start)]
+    words = {4: "four", 5: "five", 6: "six"}
+    small, (side, patch), codes = tm.VARIANTS["small"], GEOMETRY["cifar10"], tm.CODEBOOK["cifar10"]
+    model = recipes.build_model(registry.MODELS[tm.FAMILY], "small", None, (side, side, 3), {"num_embeddings": codes, "patch_size": patch})
+    assert f"{model.count_params():,} parameters in {len(model.weights)} weights at {side} px with {codes} codes" in section
+    assert f"{small['hidden_channels']} hidden channels, {small['num_res_blocks']} residual blocks and an embedding of {small['embedding_dim']}" in section
+    offered = ", ".join(f"`{key}`" for key in tm.ALLOWED[:-1]) + f", `{tm.ALLOWED[-1]}`"
+    assert f"{words[len(tm.ALLOWED)].capitalize()} `model_args` are offered ({offered}), {len(tm.SUPPLIED)} are given by the task and {len(tm.REFUSED)} more are refused" in section
+    optim = tm.RECIPE["optim_args"]
+    assert (f"AdamW at {optim['lr']:.0e}".replace("e-0", "e-") + f", weight decay {optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epochs, cosine decay over "
+            f"the whole run to {optim['min_lr_ratio']:g} of the peak, a global gradient clip of {optim['global_clipnorm']:.1f}, batch {tm.BATCH_SIZE}, {tm.EPOCHS} epochs, "
+            f"patience {tm.PATIENCE}") in section
+    assert " and ".join(f"`{name}` is {size} px at patch {cell} (grid {size // cell} x {size // cell}, {tm.CODEBOOK[name]:,} codes)"
+                        for name, (size, cell) in GEOMETRY.items()) in section
+    floor, cells = pretrain_run.MIN_TOKENIZER_PERPLEXITY, (side // patch) ** 2
+    selection = round(DEFAULT_VALIDATION_SPLIT * get_spec("cifar10").train_size)
+    batches = -(-selection // tm.BATCH_SIZE)
+    assert f"is at least the floor of {floor:g} effective codes" in section
+    # Review pass 1, W3: the second floor and the three controls that show why the pooled one is not enough (derived from the function, never typed)
+    alone, one, two = (td.per_cell_usage(codes).perplexity for codes in (cell_index_codes(64), with_image_wide_bits(1), with_image_wide_bits(2)))
+    assert f"is at least {td.MIN_PER_CELL_PERPLEXITY:g} (`tokenizer_data.MIN_PER_CELL_PERPLEXITY`)" in section
+    assert f"worth {alone:g} per cell, the cell index plus one image-wide bit {one:g} and two bits {two:g}" in section
+    assert f"a code that is the cell index and nothing else, whatever the image, has a pooled perplexity of exactly {cells} and meets it" in section
+    assert f"({forecast_run.tie_band(batches)} at the {batches} selection batches of CIFAR-10 at the defaults)" in section
+    assert f"({selection:,} rows of seed 42)" in section and f"({selection:,} images x {cells} cells = {selection * cells:,} positions)" in section
+    refusals = tokenizer_refusals(side, patch, codes, floor)
+    assert len(refusals) == 7 and all(f"`{message}`" in section for message in refusals), refusals
+    # Review pass 1, W2: the `init` refusal of another image size is the row's own sentence (the weights would copy), quoted whole
+    from train.api import init_from
+
+    source = {"channels": 3, "input_size": [side, side], "patch_size": patch, "num_embeddings": codes}
+    with pytest.raises(ConfigError) as caught:
+        init_from._check_identity(tm.FAMILY, tm.TASK, registry.MODELS[tm.FAMILY].transfer, source, {**source, "input_size": [2 * side, 2 * side]})
+    assert f"`{caught.value}`" in section and "sizes its weights by transform_args.image_size" not in section
+    # the file `beit_mim` takes is best_model.keras: the checkpoint is selected on the reconstruction alone, so it holds the epoch the verdict judged (D-006)
+    assert "**`best_model.keras` is the file `beit_mim` takes.**" in section and "so give it `best_model.keras`" in section and "the last epoch's" in section
+    # Review pass 2. W1: every offered key is held to its declared type, and `use_ema` is quoted (the library reads the string "False" as true). N1: what the floors do not certify,
+    # and the test that pins it. N3: the size of a selection split the per-cell number reads true from, and the rows it means at the default split. N4: the two entries that lift
+    # the size refusal of `init` (read off the row: one in `fixed`, one in `policy`).
+    assert f"`{tm.problems_of({'use_ema': 'False'})[0]}`" in section and "a bool is no int and no float" in section
+    locality = "test_an_image_wide_code_repeated_at_every_cell_meets_both_floors_so_the_floors_do_not_test_locality"
+    assert f"def {locality}(" in defined_tests() and f"`{locality}`" in section
+    assert "**The bar does not test locality:** the two floors count how the codes vary across images and cells, not whether a code describes its own patch" in section
+    assert "so the reconstruction part, which asks only to be strictly below the constant image, is the only evidence of local content" in section
+    assert f"one of fewer than {td.MIN_PER_CELL_IMAGES} images (`tokenizer_data.MIN_PER_CELL_IMAGES`" in section and td.MIN_PER_CELL_IMAGES == 16
+    assert f"`data.max_samples` of {round(td.MIN_PER_CELL_IMAGES / DEFAULT_VALIDATION_SPLIT)} at the default split of {DEFAULT_VALIDATION_SPLIT:g}" in section
+    row = registry.MODELS[tm.FAMILY].transfer
+    assert "input_size" in row.fixed and set(row.policy) == {"input_size"}, "the refusal is two entries of the row: one in `fixed`, one in `policy`"
+    assert "lifting the refusal is two entries of the family row (the `fixed` tuple and the `policy` entry) and its census test" in section
+    assert "neither floor tests locality" in " ".join(AGENTS.read_text().split())
+
+
+def test_the_tokenizer_record_and_the_init_keys_the_documents_name_are_the_codes():
+    """Plan fa94f59c step 9: the ninth record kind's keys and the keys a resume compares (README and AGENTS), and the geometry keys of ``init`` (AGENTS)."""
+    from train.api import init_from
+
+    task, text = "beit_tokenizer", " ".join(README.read_text().split())
+    agents = " ".join(AGENTS.read_text().split())
+    assert list(predictor.RECORD_KEYS).index(task) == 8, "the ninth kind"
+    keys = [key for key in predictor.RECORD_KEYS[task] if key not in ("schema_version", "task", "model", "family", "variant")]
+    own = ", ".join(f"`{key}`" for key in keys[:-1]) + f" and `{keys[-1]}`"
+    assert f"writes `task.json` (schema version 2, the ninth record kind) before its first epoch: {own} (`{predictor.TOKENIZER_OUTPUTS[0]}`)" in text
+    compared = predictor.DATA_KEYS[task]
+    assert f"a resume compares the {('zero', 'one', 'two', 'three', 'four', 'five', 'six')[len(compared)]} from `{compared[0]}` to `{compared[-1]}`" in text
+    assert "a tokenizer record (the ninth kind" in agents and "a resume compares `" + "`, `".join(compared[:-1]) + f"` and `{compared[-1]}`" in agents
+    assert "`fixed` (" + ", ".join(f"`{key}`" for key in init_from.GEOMETRY_NAMES) + ": refused before the claim)" in agents
+    assert all(f"`{key}`" in agents[agents.index("returns the record keys this run will write"):][:400] for key in (*init_from.GEOMETRY_NAMES, "normalize", "data_range"))
+    assert tuple(init_from.HEAD_KEYS[task]) == () and "neither has a tokenizer" in text, "a tokenizer has no head to reset"
+
+
+PLACEHOLDERS = re.compile(r"<run>|<out>|\.\.\.")
+
+
+def refusal_rows():
+    """``[(case, message cell)]``: the rows of the README's refusal table of the ``beit_tokenizer`` section, in its order."""
+    text = README.read_text()
+    start = text.index("* **What is refused, and the message.**", text.index("**`beit_tokenizer`** (plan fa94f59c"))
+    block = text[start:text.index("* **Limits.**", start)]
+    rows = [line.strip()[2:-2].split(" | ", 1) for line in block.splitlines() if line.startswith("| ") and not line.startswith(("| Case", "|---"))]
+    return [(case.strip(), message.strip()) for case, message in rows]
+
+
+def is_the_message(cell, live):
+    """Whether the backticked message of a table cell is ``live``: equal, or, when the cell is abbreviated (``<run>``, ``<out>``, ``...``), every piece between the
+    placeholders is in ``live``, in the cell's order."""
+    assert cell.startswith("`") and cell.endswith("`") and cell.count("`") == 2, cell
+    quoted = cell[1:-1]
+    if not PLACEHOLDERS.search(quoted):
+        return quoted == live
+    at = 0
+    for piece in (piece.strip() for piece in PLACEHOLDERS.split(quoted)):
+        found = live.find(piece, at) if piece else at
+        if found < 0:
+            return False
+        at = found + len(piece)
+    return True
+
+
+def test_every_row_of_the_refusal_table_is_the_message_the_code_raises(world, tmp_path):
+    """Hygiene finding 13 (Step 12): the table is read whole. Seven rows were compared with the code and four were written by hand (an ``init`` from another patch, size or
+    codebook, an ``init`` from a ``beit_mim`` run, a ``beit_mim`` run beside the tokenizer of another patch, an ``init`` after the claim): each cell is now the message the code
+    raises, equal or, where the cell is abbreviated (``<run>``, ``<out>``, ``...``), with every piece between the marks in the message, in order."""
+    import json
+    from types import SimpleNamespace
+
+    from train.api import init_from, run_sequence, tokenizer_models as tm
+    from train.api.errors import ConfigError
+    from train.api.pretrain_args import GEOMETRY
+    from train.api.tasks.beit_tokenizer import train_beit_tokenizer
+    from train.api.tasks.pretrain import PretrainTrainer
+    from train.common import pretrain_run
+    from train.common.image_streams import stream_statistics
+
+    from ._tokenizer_world import request
+
+    # the matcher can fail: an abbreviated cell is read in order, an exact one is read whole
+    assert is_the_message("`a <run> b ... c`", "a /x/y b and c") and not is_the_message("`b <run> a`", "a /x b")
+    assert is_the_message("`a b`", "a b") and not is_the_message("`a b`", "a b c") and not is_the_message("`a <out> d`", "a b c")
+
+    (side, patch), codes = GEOMETRY["cifar10"], tm.CODEBOOK["cifar10"]
+    mean, std = (list(map(float, values)) for values in stream_statistics("cifar10"))
+    rows = refusal_rows()
+    cells = [cell for _, cell in rows]
+    assert len(cells) == 11, [case for case, _ in rows]
+    # rows 1 to 7: one quoted message each
+    for number, (cell, live) in enumerate(zip(cells, tokenizer_refusals(side, patch, codes, pretrain_run.MIN_TOKENIZER_PERPLEXITY)), 1):
+        assert is_the_message(cell, live), f"row {number}: the table quotes {cell}, the code raises {live}"
+
+    # row 8, `init` from another patch, size or codebook: three messages of the one check (the codebook one quoted after "...")
+    spec = registry.MODELS[tm.FAMILY].transfer
+    source = {"channels": 3, "input_size": [side, side], "patch_size": patch, "num_embeddings": codes}
+
+    def identity(**changed):
+        with pytest.raises(ConfigError) as caught:
+            init_from._check_identity(tm.FAMILY, tm.TASK, spec, source, {**source, **changed})
+        return str(caught.value)
+
+    by_patch, by_codebook, by_size = identity(patch_size=2 * patch), identity(num_embeddings=codes // 2), identity(input_size=[2 * side, 2 * side])
+    assert f"`{by_patch}`" in cells[7] and f"`... {by_codebook.split('sizes its weights ', 1)[1]}`" in cells[7] and f"`{by_size}`" in cells[7], (cells[7], by_patch, by_codebook)
+
+    # row 9, `init` from a `beit_mim` run: a stand-in run directory the real task refuses before the claim
+    beit_mim = tmp_path / "beit_mim_run"
+    beit_mim.mkdir()
+    record = predictor.build_pretrain_record(model="beit_mim/beit_tiny", family="beit_mim", variant="beit_tiny", input_size=(side, side), channels=3, mean=mean, std=std,
+                                             patch_size=patch, tokenizer="0" * 64)
+    (beit_mim / "task.json").write_text(json.dumps(record))
+    (beit_mim / "config.json").write_text(json.dumps({"model": "beit_mim/beit_tiny", "used": {"model_args": {}}}))
+    (beit_mim / "best_model.keras").write_bytes(b"not an archive: nothing before the claim opens it")
+    with pytest.raises(ConfigError) as caught:
+        train_beit_tokenizer(**request(tmp_path / "run", init=str(beit_mim)))
+    assert is_the_message(cells[8], str(caught.value)), f"row 9: the table quotes {cells[8]}, the code raises {caught.value}"
+
+    # row 10, a `beit_mim` run at another patch than its tokenizer run's: the pre-claim check of the file's sibling record
+    run = tmp_path / "tokenizer_run"
+    run.mkdir()
+    (run / "task.json").write_text(json.dumps(predictor.build_tokenizer_record(
+        model=f"{tm.FAMILY}/small", family=tm.FAMILY, variant="small", input_size=(side, side), channels=3, mean=mean, std=std, patch_size=patch, num_embeddings=codes)))
+    (run / "best_model.keras").write_bytes(b"x")
+    this_run = SimpleNamespace(transform_args=SimpleNamespace(image_size=side), data=SimpleNamespace(dataset="cifar10", patch_size=2 * patch))
+    with pytest.raises(ConfigError) as caught:
+        PretrainTrainer._check_tokenizer_run(run / "best_model.keras", this_run)
+    assert is_the_message(cells[9], str(caught.value)), f"row 10: the table quotes {cells[9]}, the code raises {caught.value}"
+
+    # row 11, after the claim, `init` from a source of another width: two real models of the default size through the engine and the handler of the sequence
+    def built(**model_args):
+        return tm.create_vq_tokenizer(variant="small", input_shape=(side, side, 3), patch_size=patch, num_embeddings=codes, **model_args)
+
+    plan = init_from.plan_transfer(built(), built(hidden_channels=64), spec, name=f"{tm.FAMILY}/small")
+    with pytest.raises(ConfigError) as caught:
+        with run_sequence._bad_value_is_a_config_error(tmp_path / "out", "the init transfer"):
+            init_from.check(plan)
+    assert is_the_message(cells[10], str(caught.value)), f"row 11: the table quotes {cells[10]}, the code raises {caught.value}"
+    # the table says how to read an abbreviated cell, so a reader does not take a piece for the whole message
+    assert "a message quoted with `<run>`, `<out>` or `...` is abbreviated there, and each piece between those marks is the code's own, in that order" in " ".join(README.read_text().split())
+
+
+def test_the_measured_numbers_the_documents_repeat_are_the_same_digits():
+    """Hygiene finding 13 (Step 12): the numbers of the probes that chose the linear decoder and the per-cell floor stand in two to four places (the section of the README, the
+    README of the model, the comments of ``tokenizer_data.py``) and only 0.5339 had a reader. Read by pattern, no run: where a quantity is stated twice, its digits are equal."""
+    def text_of(path, comments=False):
+        text = path.read_text()
+        return " ".join((re.sub(r"(?m)^\s*#:? ?", "", text) if comments else text).split())
+
+    docs = {"README": text_of(README), "model README": text_of(VQ_README), "source": text_of(TOKENIZER_DATA, comments=True)}
+    num = r"(\d+\.\d+)"
+    quantities = {
+        "the share of the pixels below 0 and above 1": [("README", rf"{num} percent of their pixels lie below 0 and {num} percent above 1", (0, 1)),
+                                                        ("model README", rf"{num} percent of the pixels lie below 0 and {num} percent above 1", (0, 1))],
+        "the best output confined to [0, 1]": [("README", rf"scores {num} on the selection split", (0,)), ("model README", rf"scores a mean squared error of {num}", (0,))],
+        "the sigmoid decoder's loss at 750 steps": [("README", rf"{num} and {num} \(two seeds\) against {num} and {num}", (2, 3)),
+                                                    ("model README", rf"the sigmoid decoder's `val_reconstruction_loss` was {num} and {num}", (0, 1))],
+        "the linear decoder's loss at 750 steps": [("README", rf"{num} and {num} \(two seeds\) against", (0, 1)), ("model README", rf"the linear one's {num} and {num}", (0, 1)),
+                                                   ("source", rf"750-step arms reached {num} and {num}", (0, 1))],
+        "the pooled perplexity of the two linear arms": [("README", rf"{num} and {num} per cell \({num} and {num} pooled", (2, 3)),
+                                                         ("model README", rf"against {num} and {num} \(linear\)", (0, 1)), ("source", rf"of their pooled {num} and {num}\)", (0, 1))],
+        "the per-cell perplexity of the two linear arms": [("README", rf"were worth {num} and {num} per cell", (0, 1)), ("source", rf"selection images\) {num} and {num} per cell", (0, 1))],
+        "the lowest per-cell value the floor is cut from": [("README", rf"mean of 2 and {num}:", (0,)), ("source", rf"and {num} \(the lowest trained value\)", (0,))],
+    }
+    for quantity, places in quantities.items():
+        seen = {}
+        for document, pattern, groups in places:
+            found = re.findall(pattern, docs[document])
+            assert len(found) == 1, f"{quantity}: {document} states it {len(found)} times by {pattern!r}"
+            seen[document] = tuple(found[0][i] if isinstance(found[0], tuple) else found[0] for i in groups)
+        assert len(set(seen.values())) == 1, f"{quantity}: the documents state different digits: {seen}"
+
+
+def test_the_export_figures_no_test_repeats_are_named_recorded_measurements():
+    """Hygiene finding 13 (Step 12): 720,896 positions, 23,819 parameters and 12.4 percent are the export probe's own figures; no test re-measures them, so the README says so
+    in the sentence that states them (a figure with no reader is a recorded measurement, and is named one)."""
+    text = " ".join(README.read_text().split())
+    start = text.index("* **The record, `predict` and `export`.**", text.index("**`beit_tokenizer`** (plan fa94f59c"))
+    bullet = text[start:text.index("* **`init`**", start)]
+    sentence = "720,896 positions, 23,819 parameters and 12.4 percent are recorded measurements of this phase's export probe, which no test repeats"
+    before, found, _ = bullet.partition(sentence)
+    assert found and all(figure in before for figure in ("720,896 positions", "23,819", "12.4 percent")), "the figures are stated, then named recorded measurements"
+
+
+def test_every_test_the_agents_bullet_of_the_tokenizer_task_names_exists():
+    """Plan fa94f59c step 9: a rule line of the ``beit_tokenizer`` bullet names the test that holds it; a name that is no test is a rule held by nothing."""
+    agents = AGENTS.read_text()
+    start = agents.index("- **The `beit_tokenizer` task**")
+    bullet = agents[start:agents.index("\n- **", start + 10)]
+    names = re.findall(r"`(test_[a-z0-9_]+)(\.py)?`", bullet)
+    assert len(names) >= 8, names
+    directory = ROOT / "tests" / "test_train" / "test_api"
+    source = defined_tests()
+    missing = [name + suffix for name, suffix in names if not ((directory / f"{name}.py").is_file() if suffix else f"def {name}(" in source)]
+    assert missing == [], f"the AGENTS bullet names tests that do not exist: {missing}"
+
+
+def test_the_lost_tokenizers_sha256_is_quoted_in_full_once():
+    """Plan fa94f59c step 9: the 4h gate's tokenizer file is lost; its sha256 survives in two runs' ``task.json`` (read from them by ``scratch_docs/derive_docs_numbers.py``)."""
+    text = README.read_text()
+    shas = re.findall(r"cdb578c7[0-9a-f]*", text)
+    assert shas == ["cdb578c78471b4198b502401c9c0db153f613df8816dc96b20ab66bb1bdfd3f8"], "the full 64 digits, once, and no shortened form"
+    assert "lost" in text[text.index(shas[0]) - 600:text.index(shas[0]) + 600] and "are NOT reproduced" in text
+
+
+def test_the_repo_map_and_the_roadmaps_count_the_tasks_the_registry_has(world):
+    """Plan fa94f59c step 9: three documents no other test reads say how many tasks there are and which is the newest (a stale count stayed in the roadmap)."""
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    names = [spec.name for spec in BUILTIN_TASKS]
+    newest = names[-1]
+    ordinal = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth")[len(names) - 1]
+    assert newest == "beit_tokenizer" and len(names) == len(registry.TASKS)
+    repo_map = " ".join((ROOT / "REPO_MAP.md").read_text().split())
+    scripts = " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split())
+    init = " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split())
+    assert f"The {ordinal} task, `{newest}`, trains the BEiT tokenizer that a `beit_mim` run reads" in repo_map
+    assert f"`python -m train <task> help` of all {words[len(names)]};" in scripts and f"and `{newest}` (Phase 4j), in that order" in scripts
+    assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Phase 4j: the BEiT tokenizer. Code done, GPU gate run**" in scripts
+    assert ("Phase 4j (plan fa94f59c, branch `train-api/phase-4j`: code done, its GPU gate run, numbers in `src/train/README.md` under "
+            "\"Measured: the tokenizer gate\")") in init and f"`{newest}` in Phase 4j" in init
+    # Review pass 2, N4: both roadmaps state what the code does: the bar's two floors, and the two entries of the family row that lift the size refusal of `init`
+    from train.common import pretrain_run, tokenizer_data as td
+
+    assert (f"a codebook perplexity over every selection position of at least {pretrain_run.MIN_TOKENIZER_PERPLEXITY:g} pooled and at least "
+            f"{td.MIN_PER_CELL_PERPLEXITY:g} per cell") in scripts
+    assert "lifting the refusal is two entries of the family row (the `fixed` tuple and the `policy` entry of `train/api/tokenizer_models.py`) and its census test" in init
+
+
+def test_no_document_says_the_tokenizer_gate_has_not_run():
+    """Plan fa94f59c step 14: the gate ran, so the five documents that said it had not (the README twice and its block, the AGENTS bullet, both roadmaps) say it has, and
+    the block that ends the section is the gate's own, not the placeholder that stood there before the night."""
+    texts = {"README": " ".join(README.read_text().split()), "AGENTS": " ".join(AGENTS.read_text().split()),
+             "scripts": " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split()),
+             "init": " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split()),
+             "repo map": " ".join((ROOT / "REPO_MAP.md").read_text().split())}
+    stale = ["its GPU gate has not run", "GPU gate NOT run", "gate block is empty", "is empty until it has", "has not been run, so this block holds no measurement",
+             "Measured: the tokenizer gate.** Not run", "Not done: the GPU gate", "the block that ends this section is empty"]
+    found = [(name, phrase) for name, text in texts.items() for phrase in stale if phrase in text]
+    assert found == [], f"a document still says the tokenizer gate has not run: {found}"
+    readme = texts["README"]
+    block = readme[readme.index("<!-- tokenizer-gate:begin -->"):readme.index("<!-- tokenizer-gate:end -->")]
+    assert block.startswith("<!-- tokenizer-gate:begin --> **Measured: the tokenizer gate** (plan fa94f59c:") and "Run on the code HEAD" in block
+    assert "`beit_tokenizer`, the ninth task, trains the tokenizer that `beit_mim` reads: it is in the code and its GPU gate has run (Phase 4j" in readme
+    assert "and **its GPU gate has run** (its numbers are in the block that ends this section)" in readme[readme.index("**`beit_tokenizer`** (plan fa94f59c"):]
+    agents = texts["AGENTS"]
+    assert "[`README.md`](README.md), which holds the numbers of its GPU gate in its own block." in agents[agents.index("**The `beit_tokenizer` task**"):]
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

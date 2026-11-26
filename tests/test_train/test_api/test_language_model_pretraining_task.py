@@ -214,7 +214,7 @@ def test_a_compiled_constant_unigram_model_does_not_meet_the_bar_and_a_trained_r
     assert trainer.bar_is_met(resolved, unigram - 1.0, unigram) is True
 
 
-def test_the_threshold_needs_the_epoch_zero_term_the_reporting_reads(tmp_path):
+def test_the_threshold_needs_the_epoch_zero_term_the_reporting_reads(world, tmp_path):  # noqa: F811
     trainer, resolved, _ = prepared(tmp_path / "early")
     with pytest.raises(RuntimeError, match="baseline"):
         trainer.success_threshold(resolved)

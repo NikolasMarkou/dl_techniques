@@ -67,7 +67,10 @@ Interface contract
     never by the model (the resolver strips it). Before the claim ``check_model_args`` refuses a missing key, a path that does
     not exist and one that does not end in ``.keras``; at build time ``train.beit.common.load_frozen_tokenizer`` proves the
     code grid by a forward pass at the run's image size and refuses a file that is not a ``VQVAERotationTrick`` (these are
-    found after the claim, and the message says so). ``vocab_size`` is the tokenizer's codebook size. The usage of the codes
+    found after the claim, and the message says so). When the file sits beside the ``task.json`` of a ``beit_tokenizer`` run (the
+    task that makes one, ``python -m train beit_tokenizer``), the run's patch, image size and input statistics are held to that record
+    BEFORE the claim, JSON only, naming both values and the tokenizer run (plan-2026-11-25T124419-fa94f59c D-013, D-052); a file with no
+    such record (a legacy tokenizer) is checked as it always was. ``vocab_size`` is the tokenizer's codebook size. The usage of the codes
     over the masked positions of the selection split (distinct codes, perplexity, top-1 share) is reported in the summary's
     ``tokenizer`` block, and a perplexity below ``train.common.pretrain_run.MIN_TOKENIZER_PERPLEXITY`` (64) is refused.
 
@@ -98,6 +101,7 @@ packages ``train.energy_transformer.common`` and ``train.beit.common``) is impor
 
 import dataclasses
 import functools
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -124,8 +128,8 @@ from ..config import (
 )
 from ..data_args import DataFacts
 from ..errors import ConfigError
-from ..init_from import file_sha256
-from ..predictor import PRETRAIN_CHANNELS, PRETRAIN_NORMALIZE, build_pretrain_record, overrides_of_variant
+from ..init_from import GEOMETRY_NAMES, file_sha256
+from ..predictor import PRETRAIN_CHANNELS, PRETRAIN_NORMALIZE, build_pretrain_record, check_record, overrides_of_variant
 from ..pretrain_args import (
     BEIT,
     ET,
@@ -139,13 +143,22 @@ from ..pretrain_args import (
     read_pretrain_data_file,
 )
 from ..pretrain_models import METHOD_OF, TASK_KEYS, recipe_notices_of
-from ..run_dir import CHECKPOINTS_DIR
+from ..run_dir import CHECKPOINTS_DIR, TASK_FILE
+from ..tokenizer_args import TASK as BEIT_TOKENIZER
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
 
 # ---------------------------------------------------------------------
 
 #: The ``model_args`` key of ``beit_mim`` that names the frozen stage-0 tokenizer (the task reads it, the model never sees it).
 TOKENIZER_KEY = TASK_KEYS[BEIT][0]
+#: The command that makes the tokenizer file (the task of :mod:`train.api.tasks.beit_tokenizer`), which every message about a missing or
+#: unusable tokenizer names.
+TOKENIZER_COMMAND = f"python -m train {BEIT_TOKENIZER}"
+#: How a refusal names what a ``beit_tokenizer`` record and this run must agree on: the record key and its words (the four that carry a
+#: shape or a standardization; ``channels`` is no key here, the record check pins it to the pretrain streams' 3).
+TOKENIZER_RECORD_KEYS = {
+    "input_size": GEOMETRY_NAMES["input_size"], "patch_size": GEOMETRY_NAMES["patch_size"], "mean": "the input mean", "std": "the input std",
+}
 
 _RESUME_ORDER = (
     "the training masks and the shuffle continue on a fresh stream derived from the seed and the steps completed, never "
@@ -187,7 +200,7 @@ class PretrainConfig(StrictConfig):
         default_factory=dict,
         metadata={
             "help": RUN_HELP["model_args"] + f"; {BEIT} also takes model_args.tokenizer_checkpoint, the path of the "
-            f"stage-0 tokenizer .keras (python -m train.beit.train_tokenizer), which is required for {BEIT} and is "
+            f"stage-0 tokenizer .keras (the best_model.keras of a {TOKENIZER_COMMAND} run), which is required for {BEIT} and is "
             "not a model keyword"
         },
     )
@@ -326,8 +339,8 @@ class PretrainTrainer(TaskTrainer):
     def _tokenizer_required_message() -> str:
         return (
             f"Invalid value for 'model_args.{TOKENIZER_KEY}': a {BEIT} run predicts the code ids of a frozen stage-0 "
-            "tokenizer, so it needs the path of one (a .keras file); train one with "
-            "python -m train.beit.train_tokenizer, then give model_args.tokenizer_checkpoint=<its best_model.keras>"
+            f"tokenizer, so it needs the path of one (a .keras file); train one with {TOKENIZER_COMMAND}, then give "
+            "model_args.tokenizer_checkpoint=<its best_model.keras>"
         )
 
     def _tokenizer_block(self) -> Optional[Dict[str, Any]]:
@@ -388,15 +401,16 @@ class PretrainTrainer(TaskTrainer):
         # no regularizer would carry), and a BEiT run with no tokenizer (it has no targets).
         self._model_kwargs(config, context)
         if context.family == BEIT:
-            self._check_tokenizer_path(config.model_args.get(TOKENIZER_KEY))
+            self._check_tokenizer_path(config.model_args.get(TOKENIZER_KEY), config)
 
-    def _check_tokenizer_path(self, path: Any) -> None:
-        """Refuse a missing, non-string, non-``.keras`` or absent tokenizer path before the claim (no file is read)."""
+    def _check_tokenizer_path(self, path: Any, config: PretrainConfig) -> None:
+        """Refuse a missing, non-string, non-``.keras`` or absent tokenizer path before the claim, and a file that sits beside the record of a
+        ``beit_tokenizer`` run which says another patch, size or input statistics than this run's (no model file is read)."""
         # DECISION plan-2026-11-12T015747-46e5318f/D-007
         # The path is checked BEFORE the claim, by name, because the loader's own `FileNotFoundError` arrives after the run
-        # directory exists and as a traceback. Only existence and the suffix are checked here: the file's content (a
-        # `VQVAERotationTrick`, its grid, its usage) is read at build time, which this hook must not do (no tensor before
-        # `setup_gpu`). Do NOT load the file here "to refuse earlier".
+        # directory exists and as a traceback. Only existence, the suffix and, beside a `beit_tokenizer` run's file, its sibling `task.json`
+        # (JSON only, D-052) are checked here: the file's content (a `VQVAERotationTrick`, its grid, its usage) is read at build time, which
+        # this hook must not do (no tensor before `setup_gpu`). Do NOT load the file here "to refuse earlier".
         if not path:
             raise ConfigError(self._tokenizer_required_message())
         name = f"model_args.{TOKENIZER_KEY}"
@@ -405,12 +419,61 @@ class PretrainTrainer(TaskTrainer):
         if not str(path).endswith(".keras"):
             raise ConfigError(
                 f"Invalid value for {name!r}: {str(path)!r} does not end in .keras; the tokenizer is the .keras file a "
-                "stage-0 run saves (python -m train.beit.train_tokenizer)"
+                f"stage-0 run saves (the best_model.keras of a {TOKENIZER_COMMAND} run)"
             )
         if not Path(path).is_file():
             raise ConfigError(
                 f"Invalid value for {name!r}: {str(path)!r} does not exist (or is not a file); train a tokenizer with "
-                "python -m train.beit.train_tokenizer and give the path of its .keras"
+                f"{TOKENIZER_COMMAND} and give the path of its .keras"
+            )
+        self._check_tokenizer_run(Path(path), config)
+
+    @staticmethod
+    def _check_tokenizer_run(path: Path, config: PretrainConfig) -> None:
+        """Hold the ``task.json`` beside ``path`` to this run's patch, image size and statistics when it is a ``beit_tokenizer`` run's."""
+        # DECISION plan-2026-11-25T124419-fa94f59c/D-052
+        # JSON only and BEFORE the claim: a front-door tokenizer run keeps a `task.json` beside its `best_model.keras` that says what it was
+        # trained on, so a patch or a size that is not this run's is found here, naming both values and the run, instead of after the claim by
+        # the grid proof, and statistics that are not this run's (a tokenizer fed images standardized another way gives plausible and wrong
+        # codes) are found at all. A file with no sibling record (a legacy tokenizer, or a copy) and a sibling that is no `beit_tokenizer`
+        # record (another task's, not JSON, not an object) get exactly the checks they got before; a tokenizer record that fails its own
+        # check is refused, since the file it describes cannot be trusted to be what it says. Do NOT load the model here (no tensor before
+        # `setup_gpu`), do NOT require the record (a legacy file would stop loading), and do NOT take another task's record for a tokenizer's.
+        # DECISION plan-2026-11-25T124419-fa94f59c/D-068
+        # The sibling is read from the RESOLVED path: a symlink in another directory points into the run that trained the file, and the record
+        # sits there; read from the link's own directory it is not found and the statistics are checked nowhere (review pass 1, N2). A COPY of
+        # the file has no record beside it, whatever is done: no sibling means no check, which the README says. Do NOT drop `resolve()`.
+        run_dir = path.resolve().parent
+        record_path = run_dir / TASK_FILE
+        try:
+            record = json.loads(record_path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(record, dict) or record.get("task") != BEIT_TOKENIZER:
+            return
+        name = f"model_args.{TOKENIZER_KEY}"
+        try:
+            check_record(record, record_path)
+        except ConfigError as error:
+            raise ConfigError(
+                f"Invalid value for {name!r}: {path} sits beside the record of a {BEIT_TOKENIZER} run, which fails its check ({error})"
+            ) from error
+        from train.common.image_streams import stream_statistics
+
+        side = config.transform_args.image_size
+        mean, std = stream_statistics(config.data.dataset)
+        ours = {
+            "input_size": [side, side], "patch_size": config.data.patch_size,
+            "mean": [float(value) for value in mean], "std": [float(value) for value in std],
+        }
+        moved = [key for key in TOKENIZER_RECORD_KEYS if record[key] != ours[key]]
+        if moved:
+            trained = ", ".join(f"{TOKENIZER_RECORD_KEYS[key]} {record[key]}" for key in moved)
+            asked = ", ".join(f"{TOKENIZER_RECORD_KEYS[key]} {ours[key]}" for key in moved)
+            raise ConfigError(
+                f"Invalid value for {name!r}: {path} belongs to the {BEIT_TOKENIZER} run in {run_dir}, which was trained at {trained}, and "
+                f"this run asks for {asked}; a {BEIT} run reads the code of each patch of its own standardized images, so give a tokenizer "
+                f"trained at this run's values ({TOKENIZER_COMMAND})"
             )
 
     def init_identity(self, config: PretrainConfig, context: AutoContext) -> Dict[str, Any]:

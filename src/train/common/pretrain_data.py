@@ -41,6 +41,14 @@ min_mask_patches_per_block, tokenizer_fn)``
         first 4 bytes of ``sha256(f"{seed}:{completed_steps}")`` as an unsigned integer.
     :raises TypeError / ValueError: for a ``bool`` or a non-``int``, and a negative count.
 
+``states_its_length(name, ds, expected)``
+    The check that a finite stream states the length of one pass; :func:`load_pretrain_batches` and
+    ``train.common.tokenizer_data.load_tokenizer_batches`` call it (one definition, two callers).
+    :param name: the stream's name in the refusal. :param ds: a batched ``tf.data.Dataset``.
+    :param expected: the batches of one pass.
+    :return: ``None``. :raises ValueError: when ``ds.cardinality()`` is not ``expected`` (an unknown cardinality is shown
+        as ``unknown``); both numbers are named, because Keras logs ``n / (n + 1)`` of the loss over a stream of unknown length.
+
 ``masked_code_ids(select_ds)``
     :return: a 1-D integer array of the BEiT target ids at the masked positions of every element of
         a finite stream (one pass). :raises ValueError: for a stream whose target is not integer.
@@ -190,7 +198,7 @@ def _keyed_maps(
     return one_map(TRAIN_SALT, stream), one_map(SELECT_SALT, seed), one_map(TEST_SALT, seed)
 
 
-def _states_its_length(name: str, ds: "tf.data.Dataset", expected: int) -> None:
+def states_its_length(name: str, ds: "tf.data.Dataset", expected: int) -> None:
     """Refuse a finite stream whose cardinality is not the length of one pass.
 
     Keras logs ``n / (n + 1)`` of the loss over a dataset of unknown length, so both numbers
@@ -235,8 +243,8 @@ def load_pretrain_batches(
         validation_split=validation_split, max_samples=max_samples, augment=augment,
         indexed_element_map_fn=train_map, select_indexed_map_fn=select_map,
         test_indexed_map_fn=test_map)
-    _states_its_length("select_ds", streams.select_ds, streams.val_steps)
-    _states_its_length("test_ds", streams.test_ds, streams.test_steps)
+    states_its_length("select_ds", streams.select_ds, streams.val_steps)
+    states_its_length("test_ds", streams.test_ds, streams.test_steps)
 
     split = (f"validation_split={DEFAULT_VALIDATION_SPLIT if validation_split is None else validation_split}"
              " of the train set (seeded permutation)")

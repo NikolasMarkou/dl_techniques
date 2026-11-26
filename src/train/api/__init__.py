@@ -85,6 +85,10 @@ _LAZY: Dict[str, str] = {
     "train_language_model_pretraining": ".tasks.language_model_pretraining",
     "TextClassificationConfig": ".tasks.text_classification",
     "train_text_classification": ".tasks.text_classification",
+    "TokenizerData": ".tokenizer_args",
+    "load_tokenizer_data_config": ".tokenizer_args",
+    "BeitTokenizerConfig": ".tasks.beit_tokenizer",
+    "train_beit_tokenizer": ".tasks.beit_tokenizer",
 }
 
 __all__ = sorted(_LAZY)

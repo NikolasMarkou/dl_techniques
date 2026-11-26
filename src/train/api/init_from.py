@@ -32,8 +32,11 @@ Interface contract
     match is refused while planning; ``grow``: a regex matched at the start of a path, naming a
     depth-indexed block a deeper variant may add; ``pinned``: factory arguments the target takes
     from the source (a cross-task source pins those its record holds); ``fixed``: geometry keys the
-    family cannot change (``channels``, ``lookback``, ``horizon``, ``input_size``, ``patch_size``, and for the language
-    model ``vocab_size`` and ``tokenizer``, a tokenizer's digest; each needs a name in :data:`GEOMETRY_NAMES`);
+    family cannot change (``channels``, ``lookback``, ``horizon``, ``input_size``, ``patch_size``, for the language
+    model ``vocab_size`` and ``tokenizer``, a tokenizer's digest, and for the BEiT tokenizer ``num_embeddings``, its codebook size; each
+    needs a name in :data:`GEOMETRY_NAMES`); ``policy``: ``{key: reason}`` for the keys of ``fixed`` the family holds by its task's contract
+    although every weight would copy (the tokenizer's image size): the refusal before the claim then says "holds <key> to the source's by
+    policy, not because a weight depends on it" and gives the reason, where it would otherwise say the family "sizes its weights by" the key;
     ``sources``: ``(task, family)`` of another task to the
     :class:`~train.api.registry.CrossTask` that maps its paths; ``positional``: regexes, each
     matching whole top-level path components, inside which weights whose paths differ pair by
@@ -451,7 +454,8 @@ SOURCE_FILES = ("task.json", "config.json", "best_model.keras")
 #: How a refusal names a geometry key of the records.
 GEOMETRY_NAMES = {"channels": "the input channels", "lookback": "data.lookback", "horizon": "data.horizon",
                   "input_size": "transform_args.image_size", "patch_size": "data.patch_size",
-                  "vocab_size": "the model's vocabulary size", "tokenizer": "the tokenizer (data.tokenizer, as its digest)"}
+                  "vocab_size": "the model's vocabulary size", "tokenizer": "the tokenizer (data.tokenizer, as its digest)",
+                  "num_embeddings": "the codebook size (model_args.num_embeddings)"}
 
 #: How a refusal describes an input scaling, by the value :func:`_scaling` gives it.
 SCALING_WORDS = {"standardize": "standardizes its input", "unit": "takes its input in [0, 1]",
@@ -521,14 +525,25 @@ def _check_identity(family: str, task: str, spec: TransferSpec, source: Mapping[
                     target: Mapping[str, Any]) -> None:
     moved = [key for key in spec.fixed if key in source and key in target and source[key] != target[key]]
     if moved:  # every differing key at once: a dataset change moves a pretrain run's size and patch together
-        names = " and ".join(GEOMETRY_NAMES[key] for key in moved)
-        keeping = sorted(name for name, row in registry.MODELS.items()
-                         if task in row.tasks and row.transfer is not None and not set(moved) & set(row.transfer.fixed))
-        kept = f" (families of {task} that keep every weight across a {names} change: {', '.join(keeping)})" \
-            if keeping else ""
-        raise _refuse_init(f"{family} sizes its weights by {names}; the source trained at "
-                           f"{' and '.join(str(source[key]) for key in moved)}, this run asks for "
-                           f"{' and '.join(str(target[key]) for key in moved)}{kept}")
+        # DECISION plan-2026-11-25T124419-fa94f59c/D-066
+        # A key the row holds by POLICY (its `policy` reason) is refused in its own sentence: the weights would copy, so "sizes its weights by"
+        # would be false there (the tokenizer's image size: 47 of 47 weights copy into a 64 px model) and a user who read only the error would
+        # conclude the transfer is impossible. Do NOT fold the two kinds of key into one sentence, and do NOT drop `policy` for a plainer
+        # message: the sentence of a key the weights DO depend on stays as it was, byte for byte.
+        shaped = [key for key in moved if key not in spec.policy]
+        sentences = []
+        if shaped:
+            names = " and ".join(GEOMETRY_NAMES[key] for key in shaped)
+            keeping = sorted(name for name, row in registry.MODELS.items()
+                             if task in row.tasks and row.transfer is not None and not set(shaped) & set(row.transfer.fixed))
+            kept = f" (families of {task} that keep every weight across a {names} change: {', '.join(keeping)})" \
+                if keeping else ""
+            sentences.append(f"{family} sizes its weights by {names}; the source trained at "
+                             f"{' and '.join(str(source[key]) for key in shaped)}, this run asks for "
+                             f"{' and '.join(str(target[key]) for key in shaped)}{kept}")
+        sentences += [f"{task} holds {GEOMETRY_NAMES[key]} to the source's by policy, not because a weight depends on it: the source trained "
+                      f"at {source[key]}, this run asks for {target[key]}; {spec.policy[key]}" for key in moved if key in spec.policy]
+        raise _refuse_init("; ".join(sentences))
     theirs, ours = _scaling(source), _scaling(target)
     if theirs is not None and ours is not None and theirs != ours:
         raise _refuse_init(f"the source {SCALING_WORDS.get(theirs, f'has {theirs}')} and this run "
@@ -667,11 +682,18 @@ HEAD_KEYS: Dict[str, Tuple[str, ...]] = {
     # source of another one is refused before the claim. Do NOT add "tokenizer" "for symmetry" (it never fires) and do NOT drop the row:
     # `head_differs` indexes this table for every same-task transfer, which a classifier run now is (a source of its own family).
     "text_classification": ("class_names",),
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-050
+    # A tokenizer has NO head: both convolution stacks and the codebook are what `init` moves, so its row is empty. It exists because
+    # `head_differs` indexes this table by task for every same-task transfer (a missing row is a KeyError after the claim). Do NOT add
+    # "num_embeddings" or the input statistics "for symmetry with pretrain": another codebook size or geometry is refused BEFORE the claim
+    # (`fixed`), so a same-task head can never differ, and the statistics change no shape.
+    "beit_tokenizer": (),
 }
 
 #: The source record's keys the ``init`` block keeps as its geometry (those its task's record has). The language record's
 #: ``tokenizer`` is not one: the pretrain record has a key of that name too (a file's sha256), and its block must not change (D-041).
-GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon", "patch_size", "seq_len", "vocab_size")
+#: The tokenizer record's ``num_embeddings`` (its codebook size) is, and no other record has a key of that name (D-050).
+GEOMETRY_KEYS = ("input_shape", "input_size", "channels", "lookback", "horizon", "patch_size", "seq_len", "vocab_size", "num_embeddings")
 
 
 def head_differs(task: str, source_record: Mapping[str, Any], target_record: Mapping[str, Any]) -> bool:

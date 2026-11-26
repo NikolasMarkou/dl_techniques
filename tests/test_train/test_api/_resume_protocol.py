@@ -85,7 +85,8 @@ def _callback_classes(spec: Dict[str, Any], write: Callable[..., None]) -> Tuple
             if self.first and spec.get("probe_restored"):
                 # The weights a resume restored, scored before any step of this process: the selection set is fixed by the
                 # split seed, so these are the numbers the killed run logged for the epoch they came from.
-                fields["restored"] = self.model.evaluate(self.data.select_ds, verbose=0, return_dict=True)
+                # `float(v)`: a model with a `test_step` of its own (the tokenizer's) returns tensors, which the trace cannot hold.
+                fields["restored"] = {k: float(v) for k, v in self.model.evaluate(self.data.select_ds, verbose=0, return_dict=True).items()}
             self.first = False
             write("epoch_begin", **fields)
 

@@ -90,7 +90,7 @@ def _build_auto_decoder(
         num_res_blocks: int,
         norm_type: NormalizationType,
 ) -> keras.Model:
-    """Small Conv2DTranspose decoder mirroring the auto encoder."""
+    """Small Conv2DTranspose decoder mirroring the auto encoder; the output layer is linear."""
     import math
     n_up = int(math.log2(downsample_factor))
 
@@ -119,9 +119,12 @@ def _build_auto_decoder(
         x = create_normalization_layer(norm_type, name=f"dec_norm_{i}")(x)
         x = keras.layers.Activation("relu", name=f"dec_act_{i}")(x)
 
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-024: the output layer has no activation. The streams
+    # standardize, so their values are not confined to [0, 1] and a sigmoid cannot reach them (the best
+    # output confined to [0, 1] scores 0.5339 on CIFAR-10); do not restore it and do not add an
+    # output_activation argument, a caller who needs a bounded output passes decoder=. See decisions.md.
     out = keras.layers.Conv2D(
-        output_channels, 3, padding="same", activation="sigmoid",
-        name="dec_to_output",
+        output_channels, 3, padding="same", name="dec_to_output",
     )(x)
     return keras.Model(inp, out, name="vqvae_rotation_decoder")
 
@@ -168,7 +171,7 @@ class VQVAERotationTrick(keras.Model):
         │  ResBlock x num_res_blocks             │
         │  Conv2DTranspose(hidden, 4, s=2)       │
         │    x n_down, + Norm + ReLU             │
-        │  Conv2D(C_in, 3, 1, same) + sigmoid    │
+        │  Conv2D(C_in, 3, 1, same), linear      │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
@@ -176,6 +179,15 @@ class VQVAERotationTrick(keras.Model):
         └────────────────────────────────────────┘
 
         total_loss = recon(x, x_rec) + sum(layer.losses)
+
+    The auto-built decoder ends in a linear ``Conv2D`` (no activation), so its
+    output is unbounded. The streams this model trains on are standardized (a
+    per-channel mean and std), so their values are not confined to ``[0, 1]``,
+    which is all a sigmoid can give: the best output confined to ``[0, 1]``
+    scores a mean squared error of 0.5339 on the standardized CIFAR-10 selection
+    split of ``python -m train``. A caller who needs a bounded output passes
+    ``decoder``. A file written with the earlier sigmoid decoder carries it in
+    its own config and loads unchanged.
 
     :param encoder: Optional encoder model. If ``None``, auto-built.
     :param decoder: Optional decoder model. If ``None``, auto-built.

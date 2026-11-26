@@ -119,6 +119,18 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     output on a zero image (:func:`train.api.pretrain_predictor.check_output`). A resume compares the geometry, the
     scaling, the patch and the tokenizer.
 
+``input_size``, ``channels``, ``normalize``, ``mean``, ``std``, ``patch_size``, ``num_embeddings``, ``output`` (beit_tokenizer)
+    A tokenizer record has the pretrain record's geometry and scaling (the two tasks read the same image streams: ``input_size`` is
+    ``[side, side]`` the model was BUILT at, ``channels`` 3, ``normalize`` ``"standardize"`` with the streams' ``mean`` and ``std``,
+    ``patch_size`` a positive int dividing the side) and no ``tokenizer`` file hash. ``patch_size`` is the side of the cell one code
+    describes, the encoder's total stride, so the code grid is ``input_size / patch_size`` on a side; ``num_embeddings`` is the codebook
+    size, a positive int; ``output`` is ``"code_ids"`` (:data:`TOKENIZER_OUTPUTS`: the int32 grid of codes, row-major).
+    ``load_model`` refuses, before the model is called, a record whose size, patch or codebook is not the model's
+    (:func:`train.api.tokenizer_predictor.check_built_model`, which also proves the code grid by running the model on a zero image), a
+    variant the model is not (``ModelSpec.observe``) and a file that is no ``VQVAERotationTrick``; the model's reconstruction of the zero
+    image is held to the record's size (:func:`train.api.tokenizer_predictor.check_output`). A resume compares ``input_size``,
+    ``channels``, ``normalize``, ``mean``, ``std`` and ``patch_size``: the codebook is the model's and ``output`` is how the predictor answers.
+
 ``seq_len``, ``encoding``, ``n_vocab``, ``vocab_size``, ``eot_id``, ``pad_id``, ``tokenizer``, ``tokenizer_files``, ``output`` (language model)
     A language-model record has no ``class_names``, input size or statistics: the model takes ``seq_len`` token ids and returns the
     next-token logits ``(seq_len, vocab_size)`` (``output`` is ``"next_token_logits"``, :data:`LANGUAGE_OUTPUTS`). ``encoding`` is the
@@ -152,10 +164,11 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)`` / ``build_language_model_record(...)`` / ``build_text_classification_record(...)``
+``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)`` / ``build_language_model_record(...)`` / ``build_text_classification_record(...)`` / ``build_tokenizer_record(...)``
     :return: the record for a finished data load (not checked; see their docstrings). The first
         writes a classification record, the second a segmentation record, the third a denoising one, the fourth a forecasting
-        one, the fifth a depth one, the sixth a pretrain one, the seventh a language-model one, the eighth a text-classification one.
+        one, the fifth a depth one, the sixth a pretrain one, the seventh a language-model one, the eighth a text-classification one,
+        the ninth a tokenizer one.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
@@ -209,7 +222,8 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
         :class:`~train.api.depth_predictor.DepthPredictor`, a ``pretrain`` one a
         :class:`~train.api.pretrain_predictor.PretrainPredictor`, a ``language_model_pretraining`` one a
         :class:`~train.api.text_predictor.LanguageModelPredictor`, a ``text_classification`` one a
-        :class:`~train.api.text_predictor.TextClassifierPredictor`.
+        :class:`~train.api.text_predictor.TextClassifierPredictor`, a ``beit_tokenizer`` one a
+        :class:`~train.api.tokenizer_predictor.TokenizerPredictor`.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -234,16 +248,18 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     forecasting and pretrain only, :data:`CLASSIFICATION_EXPORT_REFUSALS`,
     :data:`train.api.denoising_predictor.EXPORT_REFUSALS`,
     :data:`train.api.forecast_predictor.EXPORT_REFUSALS`, :data:`train.api.pretrain_predictor.EXPORT_REFUSALS`) and,
-    for forecasting, depth, pretrain and the two text tasks, for a traced shape that is not the record's (a depth model exports
+    for forecasting, depth, pretrain, the two text tasks and the tokenizer, for a traced shape that is not the record's (a depth model exports
     every format at its trained size only, :func:`train.api.depth_predictor.check_export`, and so do a pretrain model,
-    :func:`train.api.pretrain_predictor.check_export`, and a language model or a text classifier, :func:`train.api.text_predictor.check_export`), and
+    :func:`train.api.pretrain_predictor.check_export`, a language model or a text classifier, :func:`train.api.text_predictor.check_export`,
+    and a tokenizer, :func:`train.api.tokenizer_predictor.check_export`, which refuses no cell of the table: all four formats were measured), and
     ``note(record)`` is the sentence logged beside an export.
     ``served`` is ``None`` for the other image tasks (the file is the model), for forecasting the layer that
     standardizes a raw window, runs the model, decodes and de-standardizes
     (:class:`train.common.forecast_run.ServedForecaster`), and for pretrain a functional model over the run's backbone
     that returns the patch-token embeddings (:func:`train.api.pretrain_predictor.served`), and for a language model or a text classifier the
     model with ``training=False`` (:func:`train.api.text_predictor.served`: a rule with no served function is written with no tflite check
-    at all); the rank of ``shape_of(record)`` is the rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster, 1 for
+    at all), and for a tokenizer the layer that returns the int32 code grid (:class:`train.common.tokenizer_data.TokenizerCodes`);
+    the rank of ``shape_of(record)`` is the rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster, 1 for
     a text model). ``sample`` is the two text tasks' check batch of seeded ids (:func:`train.api.text_predictor.sample_ids`) and
     ``None`` for every other task. A row in every table of :data:`TASK_TABLES`, this one included.
 
@@ -312,6 +328,7 @@ from .recipes import ET_CLASSIFIER
 from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 from .text_args import CLASSIFICATION_TASK as TEXT_CLASSIFICATION, TASK as LANGUAGE_MODEL
 from .text_tokenizer import ASCII95, TOKENIZERS, tokenizer_spec
+from .tokenizer_args import TASK as BEIT_TOKENIZER
 
 # ---------------------------------------------------------------------
 
@@ -436,6 +453,22 @@ RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
     # The language model's keys, then the classifier's own: the id its rows begin with, the label names (the model's outputs, in
     # label order), how a row is made from a document and what the model returns.
     TEXT_CLASSIFICATION: (*_TEXT_KEYS, "cls_id", "class_names", "layout", "output"),
+    # The pretrain record's geometry and scaling, the codebook size in place of the tokenizer file's hash (D-044).
+    BEIT_TOKENIZER: (
+        "schema_version",
+        "task",
+        "model",
+        "family",
+        "variant",
+        "input_size",
+        "channels",
+        "normalize",
+        "mean",
+        "std",
+        "patch_size",
+        "num_embeddings",
+        "output",
+    ),
 }
 
 #: What ``output`` may say in a segmentation record.
@@ -460,6 +493,11 @@ DEPTH_CHANNELS = 3
 PRETRAIN_NORMALIZE = "standardize"
 PRETRAIN_OUTPUTS = ("patch_embeddings",)
 PRETRAIN_CHANNELS = 3
+
+#: What ``output`` may say in a ``beit_tokenizer`` record: the int32 code of every patch cell, row-major. The task reads the pretrain
+#: streams, so its ``normalize`` word, its channels and its geometry rules are the pretrain record's (:data:`PRETRAIN_NORMALIZE`,
+#: :data:`PRETRAIN_CHANNELS`, ``_pretrain_geometry``).
+TOKENIZER_OUTPUTS = ("code_ids",)
 
 #: What ``output`` may say in a language-model record: the logits over the vocabulary at every position of the window (the row of
 #: position ``i`` is the distribution of the id after the ``i``-th).
@@ -820,6 +858,50 @@ def build_pretrain_record(
             "patch_size": int(patch_size),
             "tokenizer": tokenizer,
             "output": PRETRAIN_OUTPUTS[0],
+        },
+        variant_overrides,
+    )
+
+
+def build_tokenizer_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    input_size: Sequence[int],
+    channels: int,
+    mean: Sequence[float],
+    std: Sequence[float],
+    patch_size: int,
+    num_embeddings: int,
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a ``beit_tokenizer`` run; see the module contract.
+
+    :param input_size: ``(side, side)`` the model was built at.
+    :param channels: the model's input channels (3).
+    :param mean, std: the per-channel statistics the streams standardized with.
+    :param patch_size: the side of the cell one code describes (the encoder's total stride).
+    :param num_embeddings: the codebook size.
+    :return: the record; ``normalize`` is :data:`PRETRAIN_NORMALIZE` and ``output`` the first of :data:`TOKENIZER_OUTPUTS`. It is NOT
+        checked (:func:`check_record` does that).
+    """
+    return _record_of(
+        BEIT_TOKENIZER,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "task": BEIT_TOKENIZER,
+            "model": model,
+            "family": family,
+            "variant": variant,
+            "input_size": [int(side) for side in input_size],
+            "channels": int(channels),
+            "normalize": PRETRAIN_NORMALIZE,
+            "mean": [float(v) for v in mean],
+            "std": [float(v) for v in std],
+            "patch_size": int(patch_size),
+            "num_embeddings": int(num_embeddings),
+            "output": TOKENIZER_OUTPUTS[0],
         },
         variant_overrides,
     )
@@ -1329,15 +1411,21 @@ def _pretrain_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[i
     return lines, channels
 
 
+def _streams_normalize_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problem of ``normalize`` when it is a known word other than :data:`PRETRAIN_NORMALIZE`: the pretrain streams, which a
+    ``pretrain`` run and a ``beit_tokenizer`` run both read, always standardize."""
+    if record["normalize"] in _NORMALIZE and record["normalize"] != PRETRAIN_NORMALIZE:
+        return [
+            f"'normalize' must be {PRETRAIN_NORMALIZE!r} (the pretrain streams standardize with the dataset's mean and "
+            f"std), got {record['normalize']!r}"
+        ]
+    return []
+
+
 def _pretrain_tail_problems(record: Mapping[str, Any]) -> List[str]:
     """Return the problems of ``normalize`` (a known word other than :data:`PRETRAIN_NORMALIZE`), ``tokenizer`` and
     ``output``."""
-    lines: List[str] = []
-    if record["normalize"] in _NORMALIZE and record["normalize"] != PRETRAIN_NORMALIZE:
-        lines.append(
-            f"'normalize' must be {PRETRAIN_NORMALIZE!r} (the pretrain streams standardize with the dataset's mean and "
-            f"std), got {record['normalize']!r}"
-        )
+    lines = _streams_normalize_problems(record)
     tokenizer = record["tokenizer"]
     if tokenizer is not None and not (isinstance(tokenizer, str) and re.fullmatch(r"[0-9a-f]{64}", tokenizer)):
         lines.append(
@@ -1345,6 +1433,17 @@ def _pretrain_tail_problems(record: Mapping[str, Any]) -> List[str]:
         )
     if record["output"] not in PRETRAIN_OUTPUTS:
         lines.append(f"'output' must be one of {', '.join(PRETRAIN_OUTPUTS)}, got {record['output']!r}")
+    return lines
+
+
+def _tokenizer_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``normalize`` (a known word other than :data:`PRETRAIN_NORMALIZE`), ``num_embeddings`` and ``output``."""
+    lines = _streams_normalize_problems(record)
+    codes = record["num_embeddings"]
+    if not (_is_whole(codes) and codes > 0):
+        lines.append(f"'num_embeddings' must be a positive int (the codebook size), got {codes!r}")
+    if record["output"] not in TOKENIZER_OUTPUTS:
+        lines.append(f"'output' must be one of {', '.join(TOKENIZER_OUTPUTS)}, got {record['output']!r}")
     return lines
 
 
@@ -1549,6 +1648,9 @@ DATA_KEYS: Dict[str, Tuple[str, ...]] = {
     # A text-classification resume compares those and the class names (the labels): the rows are a function of them. ``cls_id`` is held
     # by the digest, ``layout`` and ``output`` are how the rows are made and the model answers.
     TEXT_CLASSIFICATION: (*_TEXT_DATA_KEYS, "class_names"),
+    # A tokenizer resume compares the geometry, the scaling and the patch: the images and the cells a code describes are functions of them.
+    # NOT the codebook (the model's: the request comparison has held it) and not ``output`` (how the predictor answers) (D-044).
+    BEIT_TOKENIZER: ("input_size", "channels", "normalize", "mean", "std", "patch_size"),
 }
 
 
@@ -2196,6 +2298,18 @@ def _pretrain_output_check(output: Any, record: Mapping[str, Any]) -> None:
     check_output(output, record)
 
 
+def _tokenizer_model_check(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> None:
+    from .tokenizer_predictor import check_built_model
+
+    check_built_model(model, record, model_file, task_file)
+
+
+def _tokenizer_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    from .tokenizer_predictor import check_output
+
+    check_output(output, record)
+
+
 def _language_model_output_check(output: Any, record: Mapping[str, Any]) -> None:
     """Raise :class:`ConfigError` unless ``output`` is the logits ``(1, seq_len, vocab_size)`` of the zero document."""
     wanted = (1, record["seq_len"], record["vocab_size"])
@@ -2262,6 +2376,12 @@ def _pretrain_predictor(model: Any, record: Mapping[str, Any]) -> Any:
     from .pretrain_predictor import PretrainPredictor
 
     return PretrainPredictor(model, record)
+
+
+def _tokenizer_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    from .tokenizer_predictor import TokenizerPredictor
+
+    return TokenizerPredictor(model, record)
 
 
 def _language_model_predictor(model: Any, record: Mapping[str, Any]) -> Any:
@@ -2419,6 +2539,24 @@ def _pretrain_export_note(record: Mapping[str, Any]) -> str:
     return export_note(record)
 
 
+def _tokenizer_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    from .tokenizer_predictor import check_export
+
+    check_export(record, format, shape)
+
+
+def _tokenizer_served(model: Any, record: Mapping[str, Any]) -> Any:
+    from .tokenizer_predictor import served
+
+    return served(model, record)
+
+
+def _tokenizer_export_note(record: Mapping[str, Any]) -> str:
+    from .tokenizer_predictor import export_note
+
+    return export_note(record)
+
+
 def _text_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
     from .text_predictor import check_export
 
@@ -2463,6 +2601,7 @@ GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Option
     PRETRAIN: _pretrain_geometry,
     LANGUAGE_MODEL: _language_model_geometry,
     TEXT_CLASSIFICATION: _text_classification_geometry,
+    BEIT_TOKENIZER: _pretrain_geometry,
 }
 
 #: The keys only one task holds (classification's ``eval_transform``, segmentation's void,
@@ -2476,6 +2615,7 @@ TAIL_CHECKS: Dict[str, Callable[[Mapping[str, Any]], List[str]]] = {
     PRETRAIN: _pretrain_tail_problems,
     LANGUAGE_MODEL: _language_model_tail_problems,
     TEXT_CLASSIFICATION: _text_classification_tail_problems,
+    BEIT_TOKENIZER: _tokenizer_tail_problems,
 }
 
 #: A denoiser's own input is flexible, so its row gives the zero image it is probed with.
@@ -2488,12 +2628,13 @@ INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
     PRETRAIN: _segmentation_input_shape,
     LANGUAGE_MODEL: _text_input_shape,
     TEXT_CLASSIFICATION: _text_input_shape,
+    BEIT_TOKENIZER: _segmentation_input_shape,
 }
 
 #: The record key that holds the input geometry, per task (a denoiser's is its channel count).
 INPUT_KEY: Dict[str, str] = {
     CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels", FORECASTING: "lookback",
-    DEPTH: "input_size", PRETRAIN: "input_size", LANGUAGE_MODEL: "seq_len", TEXT_CLASSIFICATION: "seq_len",
+    DEPTH: "input_size", PRETRAIN: "input_size", LANGUAGE_MODEL: "seq_len", TEXT_CLASSIFICATION: "seq_len", BEIT_TOKENIZER: "input_size",
 }
 
 #: What a loaded model says of itself against its record, run BEFORE the model is called (D-042): a forecaster's built
@@ -2509,6 +2650,9 @@ MODEL_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any], Path, Path], None]] = 
     LANGUAGE_MODEL: _no_model_check,
     # A classifier's output is class scores, which show no vocabulary: the embedding's rows are read off the backbone layer instead.
     TEXT_CLASSIFICATION: _text_classification_model_check,
+    # A tokenizer's size, patch and codebook are held to the model's own config, and its code grid is proved by running it on a zero image
+    # (the output of ``load_model``'s own call is the RECONSTRUCTION, which shows no grid): D-044.
+    BEIT_TOKENIZER: _tokenizer_model_check,
 }
 
 OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
@@ -2520,6 +2664,7 @@ OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
     PRETRAIN: _pretrain_output_check,
     LANGUAGE_MODEL: _language_model_output_check,
     TEXT_CLASSIFICATION: _text_classification_output_check,
+    BEIT_TOKENIZER: _tokenizer_output_check,
 }
 
 PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
@@ -2531,6 +2676,7 @@ PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
     PRETRAIN: _pretrain_predictor,
     LANGUAGE_MODEL: _language_model_predictor,
     TEXT_CLASSIFICATION: _text_classification_predictor,
+    BEIT_TOKENIZER: _tokenizer_predictor,
 }
 
 #: What ``export`` does per task (see :class:`ExportRule`). Classification and segmentation trace at the record's
@@ -2564,6 +2710,14 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     TEXT_CLASSIFICATION: ExportRule(
         _text_input_shape, _text_export_check, _text_classification_export_note, _text_served,
         _text_sample),
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-046
+    # A tokenizer's file takes standardized images at the trained size and returns the int32 code grid: `served` is the registered layer
+    # around the model, `check` refuses another size, and NO cell is refused (4 formats x 4 models measured: each file gave Keras's code at
+    # every one of 4,096 and of 32,768 positions; `scratch_export/measured.md`). Do NOT add a refusal table "for near ties": the limit is
+    # the argmin's, at positions whose two nearest codes are within float32 rounding; it holds for every format, and the export note says
+    # so. Do NOT add a `sample`: the shared check batch reaches 6 to 32 codes, and a mistranslated op of this graph (a wrong axis, a
+    # transposed grid) changes nearly every one of its 128 positions (a test plants one).
+    BEIT_TOKENIZER: ExportRule(_segmentation_input_shape, _tokenizer_export_check, _tokenizer_export_note, _tokenizer_served),
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of

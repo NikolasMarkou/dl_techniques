@@ -32,6 +32,13 @@ another image size is refused at the weight level, behind the refusal before the
 plan-2026-11-24T092348-7806a290 Step 6 (D-005, D-040) holds the language-model row (``gpt2_lm``) the same way, at the end of this
 file: its own family only; in the production order every weight is copied, a window of another length changes no shape (so the
 length is not a ``fixed`` key), and another vocabulary is refused at the weight level, behind the refusal before the claim.
+
+plan-2026-11-25T124419-fa94f59c Step 8 (D-012, D-050) holds the tokenizer row (``vq_vae_rotation``) the same way, at the end of this
+file: its own family only and no head; in the production order every weight is copied (35 of a tiny model, 47 of the gate's), another
+channel count, patch or codebook size is refused at the weight level behind the refusal before the claim, and so is another width, depth
+or embedding size, which the record does not carry (the engine refuses those after the claim). The image size is the one ``fixed`` key
+the engine would take: a convolutional tokenizer has no weight that depends on it, so the row refuses it before the claim by POLICY
+(the plan's contract is the same size), and a test says so and would fail the day a size-dependent weight made it a fact.
 """
 
 import dataclasses
@@ -42,7 +49,7 @@ import keras
 import pytest
 
 from dl_techniques.utils.logger import logger
-from train.api import recipes, registry
+from train.api import recipes, registry, tokenizer_models
 from train.api.args import AutoContext, OptimArgs
 from train.api.errors import ConfigError
 from train.api.forecast_models import FAMILIES as FORECAST_FAMILIES
@@ -60,6 +67,9 @@ LANGUAGE_MODEL, GPT2_LM = "language_model_pretraining", "gpt2_lm"
 #: The text-classification task has two families, ``bert`` and ``gpt2``: their pair with the language model is censused in
 #: ``test_text_init_pairs.py`` (plan-2026-11-24T092348-7806a290 steps 9 and 10), not here.
 TEXT_CLASSIFICATION = "text_classification"
+#: The tokenizer task has one family, ``vq_vae_rotation`` (plan-2026-11-25T124419-fa94f59c): censused at the end of the file, as the pretrain
+#: and language rows are.
+TOKENIZER, TOKENIZER_FAMILY = "beit_tokenizer", "vq_vae_rotation"
 #: The tasks that take ``init``.
 INIT_TASKS = (CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH)
 
@@ -70,7 +80,7 @@ VARIANT = {
     "convnext_seg": "cifar10", "bfcnn": "tiny", "bfunet": "tiny", "bfconvunext": "tiny", "convunext_biased": "tiny",
     "scunet": "tiny", "nbeats": "tiny", "prism": "tiny", "tirex": "tiny", "xlstm": "tiny", "ets": "ANN",
     "timestral": "5M", "mdn": "tiny", "depth_anything": "vit_s", "beit": "beit_tiny", "energy_transformer": "et_tiny",
-    BEIT_MIM: "beit_tiny", ET_MIM: "et_tiny", GPT2_LM: "tiny",
+    BEIT_MIM: "beit_tiny", ET_MIM: "et_tiny", GPT2_LM: "tiny", TOKENIZER_FAMILY: "small",
 }
 #: The geometry a source of each task is built at.
 SOURCE = {
@@ -81,6 +91,7 @@ SOURCE = {
     DEPTH: {"image_size": 112, "channels": 3},
     PRETRAIN: {"image_size": GEOMETRY["cifar10"][0], "channels": 3},
     LANGUAGE_MODEL: {"seq_len": SEQ_LEN, "vocab": ASCII_VOCAB},
+    TOKENIZER: {"image_size": 32, "channels": 3, "patch": 4},
 }
 #: The changes the census makes, one key at a time: the key and its new value.
 CHANGES = {
@@ -97,12 +108,14 @@ HEAD_KEYS = {CLASSIFICATION: ("classes",), SEGMENTATION: ("classes",), DENOISING
 GROWN = {"vit": "vit_tiny", "resnet": "resnet34", "resnet_seg": "resnet34"}
 #: The dataset name a task's builds resolve their recipe for.
 DATASET = {CLASSIFICATION: "cifar10", SEGMENTATION: "folder", DENOISING: "folder", FORECASTING: "builtin",
-           DEPTH: "megadepth", PRETRAIN: "cifar10", LANGUAGE_MODEL: "synthetic"}
+           DEPTH: "megadepth", PRETRAIN: "cifar10", LANGUAGE_MODEL: "synthetic", TOKENIZER: "cifar10"}
 #: The tokenizer codebook a ``beit_mim`` source is built with; its decoder head is dropped by the classifier pair.
 VOCAB = 64
+#: A tokenizer the CPU builds in a third of a second: 64 codes of 8 numbers, 16 wide, one residual block (35 weights).
+TOKENIZER_ARGS = {"num_embeddings": 64, "embedding_dim": 8, "hidden_channels": 16, "num_res_blocks": 1}
 #: ``model_args`` a row is built with: depth from scratch (no official weights read); a resnet classifier at
 #: 32 px resolves the cifar stem, which resnet_seg never builds, so its cross-task source asks for the other.
-MODEL_ARGS = {"depth_anything": {"pretrained": False}, GPT2_LM: TINY_MODEL_ARGS}
+MODEL_ARGS = {"depth_anything": {"pretrained": False}, GPT2_LM: TINY_MODEL_ARGS, TOKENIZER_FAMILY: TOKENIZER_ARGS}
 CROSS_SOURCE_ARGS = {"resnet": {"stem_type": "imagenet"}}
 
 _BUILT: Dict[Tuple[Any, ...], Tuple[keras.Model, Dict[str, Any]]] = {}
@@ -130,6 +143,8 @@ def build(family: str, variant: str, geometry: Mapping[str, Any],
         kwargs = {**kwargs, "patch_size": GEOMETRY[dataset][1], **({"vocab_size": VOCAB} if family == BEIT_MIM else {})}
     if task == LANGUAGE_MODEL:  # what the language task adds (tasks/language_model_pretraining.py build_model): the tokenizer's vocabulary
         kwargs = {**kwargs, "vocab_size": geometry["vocab"]}
+    if task == TOKENIZER:  # what the tokenizer task adds (tasks/beit_tokenizer.py build_model): the patch the encoder's stride is
+        kwargs = {**kwargs, "patch_size": geometry["patch"]}
     if task == FORECASTING:
         kwargs = {**kwargs, "horizon": geometry["horizon"]}
         if FORECAST_FAMILIES[family].static_batch:
@@ -195,12 +210,13 @@ def undeclared(specs: Mapping[str, registry.ModelSpec]) -> List[str]:
 
 
 def test_every_row_declares_a_spec():
-    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL, TEXT_CLASSIFICATION}
+    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL, TEXT_CLASSIFICATION, TOKENIZER}
     assert all(len(spec.tasks) == 1 for spec in registry.MODELS.values())
     assert undeclared(registry.MODELS) == []
     assert sum(task_of(family) == PRETRAIN for family in registry.MODELS) == 2
     assert sum(task_of(family) == LANGUAGE_MODEL for family in registry.MODELS) == 1
     assert sum(task_of(family) == TEXT_CLASSIFICATION for family in registry.MODELS) == 2
+    assert sum(task_of(family) == TOKENIZER for family in registry.MODELS) == 1
 
 
 def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():
@@ -211,7 +227,7 @@ def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():
 
 def test_the_census_covers_every_row_and_measures_every_declaration():
     families = init_families()
-    assert sorted(set(VARIANT) - {BEIT_MIM, ET_MIM, GPT2_LM}) == families
+    assert sorted(set(VARIANT) - {BEIT_MIM, ET_MIM, GPT2_LM, TOKENIZER_FAMILY}) == families
     # 23 rows before plan 5c6cc105 Step 5, which adds the beit and energy_transformer classifiers.
     assert len(families) == 25
     assert sorted(GROWN) == sorted(f for f in families if registry.MODELS[f].transfer.grow)
@@ -628,3 +644,82 @@ def test_production_order_a_language_row_at_another_vocabulary_is_refused_at_the
     assert got == "REFUSE" and "nothing was copied" in message and plan.copied, message
     assert len(plan.missing) == 1 and "word_embeddings/embeddings" in plan.missing[0]
     assert f"target ({ASCII_VOCAB + 19}, 64)" in plan.missing[0] and f"source ({ASCII_VOCAB}, 64)" in plan.missing[0]
+
+
+# --- the tokenizer row (plan-2026-11-25T124419-fa94f59c Step 8, D-012, D-050): its own family only, no head ---------------------------
+
+#: The gate's model: the variant's widths and the recipe's codebook, derived from the tables and never typed.
+TOKENIZER_DEFAULTS = {**tokenizer_models.VARIANTS["small"], "num_embeddings": tokenizer_models.CODEBOOK["cifar10"]}
+#: Each ``fixed`` key the engine refuses at the weight level: ``(the change of the geometry, the change of model_args)``. The census counts
+#: them, so a ``fixed`` key it never changes would be a declaration nothing measures.
+TOKENIZER_CHANGES = {"channels": ({"channels": 1}, {}), "patch_size": ({"patch": 8}, {}), "num_embeddings": ({}, {"num_embeddings": 128})}
+#: The ``fixed`` key the engine would TAKE: a convolutional tokenizer has no weight that depends on the image size, so the row refuses a size
+#: before the claim by policy (the plan's contract is the same size) and not because the weights could not be copied.
+TOKENIZER_BY_POLICY = {"input_size": {"image_size": 64}}
+#: Keys of the model the record does not carry (so no refusal before the claim), which the engine refuses after it: a width, a depth, an
+#: embedding size, and an EMA codebook (its moving averages are weights).
+TOKENIZER_UNRECORDED = {"hidden_channels": 32, "num_res_blocks": 2, "embedding_dim": 16, "use_ema": True}
+
+
+def tokenizer_pair(archives, geometry=None, model_args=None, source_args=None):
+    """``(loaded source, target)`` of the tokenizer row in the production order; the target takes ``geometry`` and ``model_args`` over the tiny
+    model's, the source is the tiny one (or ``source_args``)."""
+    return loaded_beside(TOKENIZER_FAMILY, "small", {**SOURCE[TOKENIZER], **(geometry or {})}, model_args or {}, archives,
+                         source_args=source_args)
+
+
+def test_the_tokenizer_row_takes_its_own_family_only_with_the_geometry_and_the_codebook_fixed():
+    spec = registry.MODELS[TOKENIZER_FAMILY].transfer
+    assert (spec.fixed, spec.head, dict(spec.sources), spec.pinned) == (
+        ("channels", "input_size", "patch_size", "num_embeddings"), (), {}, ())
+    assert not spec.resample and spec.grow is None and not spec.positional
+    # A fixed key the census never changes is a declaration nothing measures; a key it changes and the row does not declare is a hole.
+    assert sorted(spec.fixed) == sorted({*TOKENIZER_CHANGES, *TOKENIZER_BY_POLICY})
+    assert set(spec.fixed) <= set(GEOMETRY_NAMES)
+    # The keys the engine would take are held by POLICY and say so with a reason (W2); the keys that change a weight's shape say nothing of the sort.
+    assert set(spec.policy) == set(TOKENIZER_BY_POLICY) and all(spec.policy.values())
+
+
+@pytest.mark.parametrize("size", ["tiny", "default"])
+def test_production_order_a_tokenizer_row_copies_every_weight(size, archives):
+    args = {} if size == "tiny" else TOKENIZER_DEFAULTS
+    loaded, target = tokenizer_pair(archives, model_args=args, source_args=args)
+    got, plan, message = verdict(TOKENIZER_FAMILY, f"same, {size}, production order", loaded, target, registry.MODELS[TOKENIZER_FAMILY].transfer)
+    assert got == "PASS" and len(plan.copied) == plan.n_source == plan.n_target == len(target.weights) > 0, message
+    assert not (plan.reset or plan.dropped or plan.grown or plan.resampled)
+
+
+@pytest.mark.parametrize("key", sorted(TOKENIZER_CHANGES))
+def test_production_order_a_change_of_a_fixed_key_is_refused_at_the_weight_level(key, archives):
+    """Behind the refusal before the claim (``fixed``): the engine refuses it too, and nothing is copied."""
+    geometry, model_args = TOKENIZER_CHANGES[key]
+    loaded, target = tokenizer_pair(archives, geometry, model_args)
+    got, _, message = verdict(TOKENIZER_FAMILY, f"{key} changed, production order", loaded, target, registry.MODELS[TOKENIZER_FAMILY].transfer)
+    assert got == "REFUSE" and message.startswith("Invalid value for 'init': ") and "nothing was copied" in message, message
+
+
+def test_production_order_the_image_size_is_refused_before_the_claim_by_policy_though_every_weight_would_copy(archives):
+    """D-050: a size is a ``fixed`` key because the plan's contract is the same size, not because a weight depends on it. If this fails, a
+    size-dependent weight exists and the key is fixed by fact: say so where the row declares it."""
+    ((key, change),) = TOKENIZER_BY_POLICY.items()
+    loaded, target = tokenizer_pair(archives, change)
+    got, plan, message = verdict(TOKENIZER_FAMILY, "image_size 32 to 64, production order", loaded, target, registry.MODELS[TOKENIZER_FAMILY].transfer)
+    assert got == "PASS" and len(plan.copied) == plan.n_source == plan.n_target > 0, message
+    spec = registry.MODELS[TOKENIZER_FAMILY].transfer
+    assert key in spec.fixed and key in spec.policy, "held by policy: the refusal says so (the engine's `sizes its weights` would be false)"
+
+
+@pytest.mark.parametrize("key", sorted(TOKENIZER_UNRECORDED))
+def test_production_order_a_width_a_depth_or_an_embedding_the_record_does_not_carry_is_refused_by_the_engine(key, archives):
+    spec = registry.MODELS[TOKENIZER_FAMILY].transfer
+    loaded, target = tokenizer_pair(archives, model_args={key: TOKENIZER_UNRECORDED[key]})
+    got, _, message = verdict(TOKENIZER_FAMILY, f"{key} changed, production order", loaded, target, spec)
+    assert got == "REFUSE" and "nothing was copied" in message, message
+    assert key not in spec.fixed, "the record has no such key: the refusal before the claim cannot name it"
+
+
+def test_production_order_a_commitment_cost_has_no_weight_so_every_weight_is_copied(archives):
+    loaded, target = tokenizer_pair(archives, model_args={"commitment_cost": 0.5})
+    got, plan, message = verdict(TOKENIZER_FAMILY, "commitment_cost changed, production order", loaded, target,
+                                 registry.MODELS[TOKENIZER_FAMILY].transfer)
+    assert got == "PASS" and len(plan.copied) == plan.n_source == plan.n_target > 0, message

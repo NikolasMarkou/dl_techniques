@@ -60,8 +60,9 @@ Interface contract
     (without the model's root). Standard library only, so a row stays on the help path.
 
     :raises ValueError: for a ``resample`` rule name that ``init_from.RULES`` does not hold, a ``resample``
-        key that is not a regex (a key must match a whole weight path), or a ``positional`` entry that is
-        not a regex of one top-level path component (it holds a ``/``).
+        key that is not a regex (a key must match a whole weight path), a ``positional`` entry that is
+        not a regex of one top-level path component (it holds a ``/``), or a ``policy`` key that is not in
+        ``fixed`` or has no reason.
 
 ``load_attr(path)``
     :param path: ``"module:attr"`` or ``"module:Class.attr"``.
@@ -145,8 +146,15 @@ class TransferSpec:
     fixed: Tuple[str, ...] = ()
     sources: Mapping[Tuple[str, str], CrossTask] = field(default_factory=dict)
     positional: Tuple[str, ...] = ()
+    policy: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        stale = sorted(key for key, why in self.policy.items() if key not in self.fixed or not why)
+        if stale:
+            raise ValueError(
+                f"TransferSpec.policy holds {stale}, which must each be a key of fixed {self.fixed!r} with a reason: a key held by "
+                "policy is one the family refuses although its weights would copy, and the refusal says why"
+            )
         if self.resample:
             # Imported here: init_from imports this module, and only a row that resamples needs the rule names.
             from .init_from import RULES

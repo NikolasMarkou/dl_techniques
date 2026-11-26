@@ -277,6 +277,8 @@ Read `src/train/README.md` to use it and the
 "Front door" section of `src/train/AGENTS.md` to extend it. The two text tasks, `language_model_pretraining` and `text_classification`, with
 their default `gpt2` tokenizer, read two BPE files from a pinned directory outside the repository, `/media/arxwn/data0_4tb/datasets/tiktoken_cache`;
 the language section of `src/train/README.md` says how they are checked and restored, and `src/train/api/text_tokenizer.py` holds their hash table.
+The ninth task, `beit_tokenizer`, trains the BEiT tokenizer that a `beit_mim` run reads (`model_args.tokenizer_checkpoint=<its run>/best_model.keras`); the tokenizer the
+Phase 4h `beit_mim` rows read is lost, and the `beit_tokenizer` section of `src/train/README.md` says what that leaves standing.
 
 **Why it resolves from any working directory.** The editable install drops a `.pth` file
 into the virtualenv's `site-packages` whose sole content is the absolute path of this repo's
@@ -439,6 +441,7 @@ GUIDE files; the map's job is to route you to the right one, not to paraphrase i
 | How do I add or run a trainer? | `src/train/AGENTS.md`, then that trainer's own `README.md` |
 | How do I train, predict or export through `python -m train`? | `src/train/README.md`, then the "Front door" section of `src/train/AGENTS.md` |
 | Where is the text tasks' tokenizer pinned, and how do I restore it? | the `language_model_pretraining` section of `src/train/README.md`, then `src/train/api/text_tokenizer.py` |
+| How do I train the tokenizer a `beit_mim` run needs? | the `beit_tokenizer` section of `src/train/README.md`, then `src/train/api/tokenizer_models.py` |
 | How do the Streamlit apps split GUI from core? | `src/applications/AGENTS.md` |
 | Which loss / metric / optimizer should I use? | the `AGENTS.md` in `src/dl_techniques/losses/`, `.../metrics/`, `.../optimization/` |
 | Which callback should I use — or where is it? | *Where the callbacks actually are*, above, **first**; only then `src/dl_techniques/callbacks/AGENTS.md`, which documents that one package and not the callbacks outside it |

@@ -459,7 +459,7 @@ def test_a_refused_request_leaves_out_absent(world, tmp_path, changes, fragment)
 
 
 @pytest.mark.parametrize(
-    "fragment", ["model_args.tokenizer_checkpoint", "python -m train.beit.train_tokenizer"],
+    "fragment", ["model_args.tokenizer_checkpoint", "python -m train beit_tokenizer"],
     ids=["names the key", "names the script that makes one"],
 )
 def test_a_beit_run_without_a_tokenizer_is_refused_before_the_claim(world, tmp_path, fragment):

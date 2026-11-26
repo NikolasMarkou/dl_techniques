@@ -902,8 +902,8 @@ PRE_CLAIM_REFUSALS: List[Tuple[str, str, List[str], Tuple[str, ...]]] = [
     # A task-level refusal: a conformal set is a set of classes, and a pretrain run has none.
     ("et_mim", "cifar10", ["analysis_args.conformal_alpha=0.1"], ("analysis_args.conformal_alpha",)),
     # A BEiT run with no tokenizer has no targets; one whose path is absent or is not a .keras is refused by name too.
-    ("beit_mim", "cifar10", [], ("model_args.tokenizer_checkpoint", "python -m train.beit.train_tokenizer")),
-    ("beit_mim", "imagenette", [], ("model_args.tokenizer_checkpoint", "python -m train.beit.train_tokenizer")),
+    ("beit_mim", "cifar10", [], ("model_args.tokenizer_checkpoint", "python -m train beit_tokenizer")),
+    ("beit_mim", "imagenette", [], ("model_args.tokenizer_checkpoint", "python -m train beit_tokenizer")),
     ("beit_mim", "cifar10", ["model_args.tokenizer_checkpoint=missing.keras"], ("model_args.tokenizer_checkpoint", "missing.keras", "does not exist")),
     ("beit_mim", "cifar10", ["model_args.tokenizer_checkpoint=tokenizer.h5"], ("model_args.tokenizer_checkpoint", "tokenizer.h5", "does not end in .keras")),
 ]
