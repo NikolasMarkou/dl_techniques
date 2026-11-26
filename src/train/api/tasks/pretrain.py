@@ -154,7 +154,7 @@ TOKENIZER_KEY = TASK_KEYS[BEIT][0]
 #: The command that makes the tokenizer file (the task of :mod:`train.api.tasks.beit_tokenizer`), which every message about a missing or
 #: unusable tokenizer names.
 TOKENIZER_COMMAND = f"python -m train {BEIT_TOKENIZER}"
-#: How a refusal names what a ``beit_tokenizer`` record and this run must agree on: the record key and its words (the three that carry a
+#: How a refusal names what a ``beit_tokenizer`` record and this run must agree on: the record key and its words (the four that carry a
 #: shape or a standardization; ``channels`` is no key here, the record check pins it to the pretrain streams' 3).
 TOKENIZER_RECORD_KEYS = {
     "input_size": GEOMETRY_NAMES["input_size"], "patch_size": GEOMETRY_NAMES["patch_size"], "mean": "the input mean", "std": "the input std",
@@ -408,9 +408,9 @@ class PretrainTrainer(TaskTrainer):
         ``beit_tokenizer`` run which says another patch, size or input statistics than this run's (no model file is read)."""
         # DECISION plan-2026-11-12T015747-46e5318f/D-007
         # The path is checked BEFORE the claim, by name, because the loader's own `FileNotFoundError` arrives after the run
-        # directory exists and as a traceback. Only existence and the suffix are checked here: the file's content (a
-        # `VQVAERotationTrick`, its grid, its usage) is read at build time, which this hook must not do (no tensor before
-        # `setup_gpu`). Do NOT load the file here "to refuse earlier".
+        # directory exists and as a traceback. Only existence, the suffix and, beside a `beit_tokenizer` run's file, its sibling `task.json`
+        # (JSON only, D-052) are checked here: the file's content (a `VQVAERotationTrick`, its grid, its usage) is read at build time, which
+        # this hook must not do (no tensor before `setup_gpu`). Do NOT load the file here "to refuse earlier".
         if not path:
             raise ConfigError(self._tokenizer_required_message())
         name = f"model_args.{TOKENIZER_KEY}"

@@ -46,7 +46,7 @@ from train.common.pretrain_data import TokenizerUsage, derive_stream_seed, token
 from train.common.pretrain_run import MIN_TOKENIZER_PERPLEXITY, checked_tokenizer_usage, epoch_zero_val_loss, usage_meets_floor
 from train.common.resume_state import FIT_STATE_NAME, update_fit_state
 
-from ._tokenizer_world import CIFAR_CACHE, NO_CIFAR, constant_model
+from ._tokenizer_world import cell_index_codes, cifar, constant_model, steps_between, with_image_wide_bits  # noqa: F401  (``cifar`` is a fixture)
 
 IMAGE = 32
 BATCH = 32
@@ -94,9 +94,7 @@ def images_of(ds: tf.data.Dataset, batches: Optional[int] = None) -> np.ndarray:
 
 
 @pytest.fixture(scope="module")
-def fresh() -> td.TokenizerBatches:
-    if not CIFAR_CACHE.exists():
-        pytest.skip(NO_CIFAR)
+def fresh(cifar) -> td.TokenizerBatches:
     return build()
 
 
@@ -106,10 +104,8 @@ def by_stream_seed(fresh) -> Dict[int, td.TokenizerBatches]:
 
 
 @pytest.fixture(scope="module")
-def raw_rows():
+def raw_rows(cifar):
     """The raw CIFAR-10 arrays ``(x_train, x_test)``, uint8, read straight from the Keras cache (never through the loader under test)."""
-    if not CIFAR_CACHE.exists():
-        pytest.skip(NO_CIFAR)
     (x_train, _), (x_test, _) = keras.datasets.cifar10.load_data()
     return x_train, x_test
 
@@ -259,11 +255,6 @@ def one_pass_arrays(ds: tf.data.Dataset) -> List[np.ndarray]:
     return [np.asarray(batch[0], np.float64) for batch in ds]
 
 
-def steps_between(a: float, b: float) -> float:
-    """``|a - b|`` in float32 steps of ``b``."""
-    return abs(a - b) / float(np.spacing(np.float32(b)))
-
-
 def test_the_baseline_equals_the_evaluate_of_a_constant_model_within_the_tie_band(fresh, raw_rows):
     x_train, _ = raw_rows
     _, select_idx, _ = seeded_split_indices(len(x_train), N_TEST, SEED, DEFAULT_VALIDATION_SPLIT, CAP)
@@ -401,6 +392,7 @@ def usage_of(entropy: float, **recorded: Any) -> TokenizerUsage:
 def test_exactly_64_equally_used_codes_meet_the_floor_and_63_do_not(repeats):
     at_the_floor = tokenizer_usage(np.repeat(np.arange(64), repeats))
     assert at_the_floor.distinct == 64 and at_the_floor.n_codes == 64 * repeats
+    assert at_the_floor.perplexity < 64.0, "the control: the real calculation does come out below 64, so a bare compare of the perplexity would refuse it"
     assert usage_meets_floor(at_the_floor) is True, "exp(log(64)) is 63.99999999999998: the floor is judged on the entropy"
     assert usage_meets_floor(tokenizer_usage(np.repeat(np.arange(65), repeats))) is True
     assert usage_meets_floor(tokenizer_usage(np.repeat(np.arange(63), repeats))) is False
@@ -440,6 +432,30 @@ def test_usage_meets_floor_reads_the_modules_floor_when_it_is_called(monkeypatch
     assert usage_meets_floor(ten) is True and usage_meets_floor(seven) is False
 
 
+def test_both_floors_judge_through_the_one_comparison_so_one_tolerance_moves_both(monkeypatch):
+    # D-028 and D-079: "an entropy reaches a floor" (at least the log of it, less a rounding slack) is ONE function, `pretrain_run.entropy_reaches`, that the pooled
+    # floor and the per-cell floor both call: two copies would change for one reason (the rounding of exp(log(k))) and could drift apart.
+    pooled, per_cell = math.log(MIN_TOKENIZER_PERPLEXITY), math.log(td.MIN_PER_CELL_PERPLEXITY)
+
+    def judged(shortfall: float) -> tuple:
+        """The verdicts (pooled, per cell) of an entropy ``shortfall`` nats under each floor's log."""
+        cells = td.CellUsage(cells=64, images=100, entropy=per_cell - shortfall, perplexity=math.exp(per_cell - shortfall))
+        return usage_meets_floor(usage_of(pooled - shortfall)), td.per_cell_meets_floor(cells)
+
+    assert judged(0.0) == (True, True) and judged(0.5) == (False, False), "the control: at its floor each meets it, half a nat under neither does"
+    monkeypatch.setattr(pretrain_run, "ENTROPY_ROUNDING_TOLERANCE", 1.0)  # the one slack, read by both floors when they are called
+    assert judged(0.5) == (True, True), "the per-cell floor reads the slack of the one comparison, not a copy of it"
+    assert td.entropy_reaches is pretrain_run.entropy_reaches
+    monkeypatch.undo()
+    # and each floor CALLS it, with the floor it reads when it is called (a comparison written inline beside it would not show here)
+    asked = []
+    monkeypatch.setattr(pretrain_run, "entropy_reaches", lambda entropy, floor: asked.append(floor) or True)
+    monkeypatch.setattr(td, "entropy_reaches", pretrain_run.entropy_reaches)
+    monkeypatch.setattr(pretrain_run, "MIN_TOKENIZER_PERPLEXITY", 11.0)
+    monkeypatch.setattr(td, "MIN_PER_CELL_PERPLEXITY", 3.0)
+    assert judged(0.5) == (True, True) and asked == [11.0, 3.0], f"both floors call the one comparison with the floor they read at the call: {asked}"
+
+
 @pytest.mark.parametrize("ids", [np.repeat(np.arange(64), 3), np.repeat(np.arange(65), 3), np.arange(96) % 60, np.zeros(5, np.int64),
                                  np.repeat(np.arange(63), 3)], ids=["64", "65", "60 of 96", "one code", "63"])
 def test_the_refusal_and_the_verdict_agree(ids):
@@ -471,17 +487,6 @@ def test_checked_tokenizer_usage_raises_the_message_it_always_raised_apart_from_
 #
 # CIFAR-10 at 32 px and patch 4 has 8 x 8 = 64 cells, exactly the pooled floor: a code that is the CELL INDEX alone, ignoring the image,
 # has a pooled perplexity of exactly 64 and meets it. The per-cell perplexity, exp of the mean over the cells of H(code | cell), is 1 for it.
-
-
-def cell_index_codes(images: int, rows: int = 8, columns: int = 8) -> np.ndarray:
-    """The code grid of a tokenizer whose code is the cell index alone, whatever the image: ``(images, rows, columns)``."""
-    return np.broadcast_to(np.arange(rows * columns).reshape(1, rows, columns), (images, rows, columns)).copy()
-
-
-def with_image_wide_bits(bits: int, images: int = 64, rows: int = 8, columns: int = 8) -> np.ndarray:
-    """Cell index plus an image-wide class of ``2 ** bits`` equally used values, the same at every cell: a code of ``cells * 2 ** bits`` values."""
-    label = (np.arange(images) * 2 ** bits) // images
-    return cell_index_codes(images, rows, columns) + rows * columns * label.reshape(images, 1, 1)
 
 
 def loop_per_cell_perplexity(codes: np.ndarray) -> float:

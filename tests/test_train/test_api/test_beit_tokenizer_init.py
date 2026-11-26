@@ -43,8 +43,8 @@ from train.common import classification_run, pretrain_run
 from train.common import tokenizer_data as td
 from train.common.image_streams import stream_statistics
 
-from ._tokenizer_world import (  # noqa: F401  (``world`` is a fixture)
-    BATCH, CIFAR_CACHE, LOW_FLOOR, MAX_SAMPLES, MODEL, NO_CIFAR, TINY_MODEL_ARGS, prepared, request, world,
+from ._tokenizer_world import (  # noqa: F401  (``world`` and ``cifar`` are fixtures)
+    BATCH, LOW_FLOOR, MAX_SAMPLES, MODEL, TINY_MODEL_ARGS, cifar, prepared, request, world,
 )
 from .test_init_from_runs import (
     DRIVER, PLACEHOLDER, STILL, a_source, archive_weights, check_copied, classification_record, cut, pretrain_record, record_of, started,
@@ -203,12 +203,6 @@ def test_split_a_target_counts_the_sources_rows_as_the_oracle(world, tmp_path, c
     assert split["n_select_overlap"] == expected and split["n_test_overlap"] == 0
     assert (expected > 0) == (case in ("other_seed", "capped_source")), "the control: the oracle counts what it should"
     assert (split["relation"], flags["selection_biased"]) == (("same_split", False) if case == "same_keys" else ("overlap", True))
-
-
-@pytest.fixture(scope="module")
-def cifar():
-    if not CIFAR_CACHE.exists():
-        pytest.skip(NO_CIFAR)
 
 
 def test_split_the_oracles_cut_is_what_the_loader_reads_back(cifar):

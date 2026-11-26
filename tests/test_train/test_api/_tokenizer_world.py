@@ -8,9 +8,10 @@ bring-your-own constant decoder that is the control of every bar (a model that r
 
 Interface contract
 ------------------
-``CIFAR_CACHE`` / ``NO_CIFAR``
-    The Keras cache the real rows are read from, and the message of the skip a test makes without it. A test that reads real rows never
-    downloads anything; its skip says it is NOT a pass.
+``CIFAR_CACHE`` / ``NO_CIFAR`` / ``cifar`` (fixture, module scope)
+    The Keras cache the real rows are read from, the message of the skip a test makes without it, and the fixture that makes it: a test
+    (or a fixture) that reads real rows asks for ``cifar`` and is skipped, loudly, when the cache is missing. A test that reads real rows
+    never downloads anything; its skip says it is NOT a pass.
 
 ``request(out, **changes)``
     :return: the mapping of a tiny run (a dotted key, ``"data.max_samples"``, sets a field of a group). ``analysis_args`` is off.
@@ -31,6 +32,14 @@ Interface contract
     A ``VQVAERotationTrick`` whose code is the CELL INDEX alone: the encoder ignores the image (a fixed table, one vector per cell), the codebook
     holds exactly those vectors, so every image gets the same code grid and its pooled perplexity is the number of cells; the decoder is the
     library's own and trains as usual. The control of the per-cell floor (review pass 1, W3). Compiled as the run sequence compiles it.
+
+``steps_between(a, b)``
+    :return: ``|a - b|`` in float32 steps of ``b``: the unit the repo's tie band is counted in (``forecast_run.tie_band``).
+
+``cell_index_codes(images, rows=8, columns=8)`` / ``with_image_wide_bits(bits, images=64, rows=8, columns=8)``
+    :return: int arrays of shape ``(images, rows, columns)``, the code grids of two tokenizers that ignore the image's content: the cell
+        index alone, and the cell index plus an image-wide class of ``2 ** bits`` equally used values (the same at every cell). The controls
+        of the per-cell floor; the numbers guard of the documents builds the README's numbers from them too.
 
 ``read_json(path)`` / ``csv_column(run_dir, name)``
     The parsed JSON file, and a column of ``training_log.csv`` as floats.
@@ -67,6 +76,29 @@ BATCH, EPOCHS = 32, 2
 MAX_SAMPLES = 1600
 #: The perplexity floor a run that is meant to PASS the bar uses: a tiny model that trains for two epochs does not reach 64 effective codes.
 LOW_FLOOR = 2.0
+
+
+@pytest.fixture(scope="module")
+def cifar():
+    """Skip, with the loud text of :data:`NO_CIFAR`, when the Keras cache has no CIFAR-10."""
+    if not CIFAR_CACHE.exists():
+        pytest.skip(NO_CIFAR)
+
+
+def steps_between(a: float, b: float) -> float:
+    """``|a - b|`` in float32 steps of ``b``."""
+    return abs(a - b) / float(np.spacing(np.float32(b)))
+
+
+def cell_index_codes(images: int, rows: int = 8, columns: int = 8) -> np.ndarray:
+    """The code grid of a tokenizer whose code is the cell index alone, whatever the image: ``(images, rows, columns)``."""
+    return np.broadcast_to(np.arange(rows * columns).reshape(1, rows, columns), (images, rows, columns)).copy()
+
+
+def with_image_wide_bits(bits: int, images: int = 64, rows: int = 8, columns: int = 8) -> np.ndarray:
+    """Cell index plus an image-wide class of ``2 ** bits`` equally used values, the same at every cell: a code of ``cells * 2 ** bits`` values."""
+    label = (np.arange(images) * 2 ** bits) // images
+    return cell_index_codes(images, rows, columns) + rows * columns * label.reshape(images, 1, 1)
 
 
 def request(out: Any, **changes: Any) -> Dict[str, Any]:

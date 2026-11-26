@@ -1722,7 +1722,7 @@ result = train_beit_tokenizer(out="auto", model="vq_vae_rotation/small", data={"
   formats, 720,896 positions compared with Keras's, none differs; through the real command line 8 cells (32,768 positions) equal `predict`. The limit is the argmin's: a
   position whose two nearest codes are within float32 rounding of each other can take the other code in a file of another runtime. Exact duplicates take the lowest in every
   format; a codebook BUILT to be all pairs 1e-7 to 1e-4 apart differs from Keras at 0.01 to 12.4 percent of the positions in the SavedModel, TFLite and ONNX files (the tflite export compares
-  128 positions with Keras's and refuses a file that differs there, so it sees such a flip by chance only). No trained tokenizer showed it, and the export note says it. The `keras` file holds a layer of the `train` package (`TokenizerCodes`), so it loads only where `train` is importable.
+  128 positions with Keras's and refuses a file that differs there, so it sees such a flip by chance only). No trained tokenizer showed it, and the export note says it. The `keras` file holds a layer of the `train` package (`TokenizerCodes`), so it loads only where `train` is importable. 720,896 positions, 23,819 parameters and 12.4 percent are recorded measurements of this phase's export probe, which no test repeats (the tests hold the cells and the limit, not these counts).
 * **`init`** takes a `beit_tokenizer` run only. The row fixes the input channels, the image size, the patch and the codebook size: another one is refused before the claim,
   naming both values. A width, a depth, an embedding size or an EMA codebook that differs is no key of the record, and the engine refuses it after the claim (complete or
   raise). Every weight of the default model copies (47 of 47, none reset). **The image size is refused by policy, not by shape, and the refusal says so**: a convolutional tokenizer has no weight that
@@ -1735,13 +1735,13 @@ result = train_beit_tokenizer(out="auto", model="vq_vae_rotation/small", data={"
   `cdb578c78471b4198b502401c9c0db153f613df8816dc96b20ab66bb1bdfd3f8`, survives only in the `task.json` of those two runs. The rows of the 4h gate stay as evidence about THAT file.
   A tokenizer trained now has another sha256 (a GPU run is not bit-reproducible, and the decoder is linear now), so the 4h figures (`val_loss` 3.7778 and 3.6336, the unigram
   bar 5.8716, the perplexity 354.8) are NOT reproduced by a `beit_mim` run on it.
-* **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed) unless said:
+* **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed) unless said; a message quoted with `<run>`, `<out>` or `...` is abbreviated there, and each piece between those marks is the code's own, in that order:
 
 | Case | Message |
 |---|---|
 | a family of another task | `Invalid value for 'model': the family 'vit' trains image_classification, not 'beit_tokenizer'; the families of 'beit_tokenizer' are vq_vae_rotation` |
 | a patch that is not a power of 2 | `Invalid value for 'data.patch_size': 3 is not a power of 2: the encoder is a stack of stride-2 convolutions, so one code can only describe a cell whose side is a power of 2 (transform_args.image_size is 32); the patch must be a power of 2, at least 2, that divides the image side` |
-| a patch of 1 | `Invalid value for 'data.patch_size': 1 is below 2: the encoder is a stack of stride-2 convolutions and a patch of 1 would leave it none (its first residual block would add the 3-channel image to a hidden_channels-wide tensor), so one code describes a cell of at least 2 x 2 pixels (transform_args.image_size is 32); the patch must be a power of 2, at least 2, that divides the image side` |
+| a patch of 1 | `Invalid value for 'data.patch_size': 1 is below 2: the encoder is a stack of stride-2 convolutions, so a patch of 1 leaves it no stage, and this task asks for a code that describes a cell of at least 2 x 2 pixels, not one pixel (transform_args.image_size is 32); the patch must be a power of 2, at least 2, that divides the image side` |
 | `model_args.num_embeddings=32` | `Invalid value for 'model_args.num_embeddings': 32 is below the 64 effective codes the bar asks of a tokenizer: a codebook of 32 codes cannot reach a perplexity above 32, so the run could never meet it; expected at least 64, or set debug_args.smoke=true for a run with no bar` |
 | `model_args.kmeans_init=true` | `Invalid value for 'model_args.kmeans_init': kmeans_init is not offered by 'vq_vae_rotation' (the k-means warm start is a remedy for a collapsed codebook, and no run of this task measured it; the bar reports a collapse), got True` |
 | `model_args.hidden_channels=0` (a value the library rejects after the claim) | `Invalid value for 'model_args.hidden_channels': expected a positive int, got 0` |

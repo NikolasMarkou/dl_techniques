@@ -33,12 +33,19 @@ Interface contract
     The constant BEiT logits broadcast to ``(batch, N, V)``: 32 * 196 * 8192 * 4 bytes, about
     205 MB per evaluation batch at imagenette with the 8192-code head.
 
+``entropy_reaches(entropy, floor)``
+    :param entropy: the entropy of a code histogram, in nats. :param floor: a perplexity, in effective codes; the caller reads its floor
+        constant when it calls, so a test that patches the constant moves the verdict.
+    :return: whether ``entropy`` is at least ``log(floor)`` less ``ENTROPY_ROUNDING_TOLERANCE`` (so exactly ``floor`` equally used codes
+        reach it, though ``exp(log(floor))`` is not exactly ``floor``). The ONE comparison of both codebook floors of the tokenizer's bar:
+        ``usage_meets_floor`` below and ``train.common.tokenizer_data.per_cell_meets_floor`` call it. :raises ValueError: for a floor
+        that is not positive.
+
 ``MIN_TOKENIZER_PERPLEXITY`` and ``usage_meets_floor(usage)``
     :param usage: a :class:`train.common.pretrain_data.TokenizerUsage`.
-    :return: whether its perplexity reaches the floor ``MIN_TOKENIZER_PERPLEXITY`` (effective codes), judged as the entropy
-        at least ``log`` of it less ``ENTROPY_ROUNDING_TOLERANCE`` (so exactly the floor passes). The ONE definition of the
-        floor: ``checked_tokenizer_usage`` refuses on ``False`` and the ``beit_tokenizer`` task reports it. It reads the
-        module constant when it is called, so a test that patches ``MIN_TOKENIZER_PERPLEXITY`` moves it.
+    :return: whether its perplexity reaches the floor ``MIN_TOKENIZER_PERPLEXITY`` (effective codes), judged by :func:`entropy_reaches`
+        on its entropy. The ONE definition of the pooled floor: ``checked_tokenizer_usage`` refuses on ``False`` and the ``beit_tokenizer``
+        task reports it. It reads the module constant when it is called, so a test that patches ``MIN_TOKENIZER_PERPLEXITY`` moves it.
 
 ``checked_tokenizer_usage(code_ids, *, path)``
     :param code_ids: the masked target ids of one pass of the select stream (1-D integers).
@@ -153,14 +160,24 @@ def constant_baseline(
     return Baseline("unigram_codes", _evaluate(model, select_ds, method))
 
 
+def entropy_reaches(entropy: float, floor: float) -> bool:
+    """Whether ``entropy`` is that of at least ``floor`` equally used codes, with the rounding slack; see the module contract."""
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-079
+    # ONE definition of the comparison behind BOTH codebook floors of the tokenizer's bar (the pooled one below and the per-cell one of
+    # `tokenizer_data`): they change for one reason, the float rounding of `exp(log(k))`, and a second copy is a second place to forget it.
+    # It compares the ENTROPY with a slack, never the perplexity: `exp(log(64))` is 63.99999999999998, so `perplexity >= 64` refuses a
+    # codebook that uses exactly 64 codes equally. Do NOT write this comparison again in another module, and do NOT read a floor or the
+    # tolerance into a default argument: a caller passes the floor it reads when it is called (the toy-run tests patch the constants).
+    return entropy >= math.log(floor) - ENTROPY_ROUNDING_TOLERANCE
+
+
 def usage_meets_floor(usage: TokenizerUsage) -> bool:
     """Whether ``usage`` reaches :data:`MIN_TOKENIZER_PERPLEXITY`; see the module contract."""
     # DECISION plan-2026-11-25T124419-fa94f59c/D-028
-    # ONE definition of "meets the floor", called by the refusal below and by the `beit_tokenizer` task's verdict. It compares the
-    # ENTROPY with a slack, never the perplexity: `exp(log(64))` is 63.99999999999998, so `usage.perplexity >= 64` refuses a codebook
-    # that uses exactly 64 codes equally. Do NOT copy the comparison into a task, and do NOT read the floor into a default argument or
-    # a copy: the toy-run tests patch the module constant and this function must see the patched value.
-    return usage.entropy >= math.log(MIN_TOKENIZER_PERPLEXITY) - ENTROPY_ROUNDING_TOLERANCE
+    # ONE definition of "meets the pooled floor", called by the refusal below and by the `beit_tokenizer` task's verdict; the comparison it
+    # makes is `entropy_reaches` (D-079). Do NOT copy it into a task, and do NOT read the floor into a default argument or a copy: the
+    # toy-run tests patch the module constant and this function must see the patched value.
+    return entropy_reaches(usage.entropy, MIN_TOKENIZER_PERPLEXITY)
 
 
 def checked_tokenizer_usage(code_ids: Any, *, path: str) -> TokenizerUsage:

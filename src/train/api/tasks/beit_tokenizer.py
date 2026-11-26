@@ -38,10 +38,10 @@ Interface contract
     the grid's cells of the entropy of each cell's codes (:func:`train.common.tokenizer_data.per_cell_usage`), is at least
     :data:`train.common.tokenizer_data.MIN_PER_CELL_PERPLEXITY`; the pooled floor alone is met by a code that is the cell index and nothing
     else wherever the grid has 64 cells or more (D-067). A constant model, a collapsed codebook, a code that describes position only and a
-    tokenizer that meets only one part all miss: the run is kept, exits 1 and its summary says which part. Under ``debug_args.smoke`` no bar is applied and both parts are still
-    reported. The perplexity is counted once, after the fit, by one eager pass (:func:`train.common.tokenizer_data.code_ids_of`): no
-    per-epoch usage reaches the CSV, and the checkpoint is selected on the reconstruction alone, so ``best_model.keras`` is the file the
-    verdict describes.
+    tokenizer that meets only one part all miss: the run is kept, exits 1 and its summary says which part. Under ``debug_args.smoke`` no bar
+    is applied and both parts are still reported. The perplexity is counted once, after the fit, by one eager pass
+    (:func:`train.common.tokenizer_data.code_ids_of`): no per-epoch usage reaches the CSV, and the checkpoint is selected on the
+    reconstruction alone, so ``best_model.keras`` is the file the verdict describes.
 
     The epoch-0 check is the untrained model's reconstruction loss over the baseline's (``initial_loss_ratio``); no verdict on the
     initialization is given (``unjudged_note`` says why); a non-finite loss is refused.
@@ -79,7 +79,8 @@ Interface contract
     :raises ConfigError: for a request that cannot be honoured; see :meth:`~train.api.trainer.TaskTrainer.run`. A family that does not
         train this task, a model key the family refuses, a patch that does not cut the image into whole code cells and a codebook under the
         floor of the bar are refused before the run directory is claimed; a selection split too small to show the floor is refused by name
-        after the data is read.
+        after the data is read, and a split of fewer than :data:`train.common.tokenizer_data.MIN_PER_CELL_IMAGES` images (the per-cell number
+        reads low on it) is warned about then and not refused (D-073).
     :raises RuntimeError: for a diverged or non-finite run.
 
 Import rule
@@ -254,10 +255,10 @@ class BeitTokenizerTrainer(TaskTrainer):
             # resume tests train on six). The per-cell perplexity is at most the number of images and reads low well above that
             # (`MIN_PER_CELL_IMAGES` holds the measurement), so a run on fewer can miss its floor with good codes, and says why now.
             logger.warning(
-                f"the selection split holds {data.n_select} images, fewer than the {tokenizer_data.MIN_PER_CELL_IMAGES} the per-cell perplexity needs to read "
-                f"true: counted over {data.n_select} images it is at most {data.n_select} and reads low well above that, so this run can miss the per-cell floor "
-                f"of {tokenizer_data.MIN_PER_CELL_PERPLEXITY:g} effective codes with good codes (raise data.max_samples or data.validation_split, or set "
-                "debug_args.smoke=true for a run with no bar)"
+                f"the selection split holds {data.n_select} images, fewer than the {tokenizer_data.MIN_PER_CELL_IMAGES} the per-cell perplexity "
+                f"needs to read true: counted over {data.n_select} images it is at most {data.n_select} and reads low well above that, so this "
+                f"run can miss the per-cell floor of {tokenizer_data.MIN_PER_CELL_PERPLEXITY:g} effective codes with good codes (raise "
+                "data.max_samples or data.validation_split, or set debug_args.smoke=true for a run with no bar)"
             )
         started = time.perf_counter()
         baseline = tokenizer_data.constant_image_baseline(data.select_ds)

@@ -40,7 +40,8 @@ Interface contract
     :param patch_size, side: any values; no check of type is assumed.
     :return: why ``patch_size`` cannot cut a square side of ``side`` pixels into whole code cells (not a positive int, below 2, not a
         power of 2, or not dividing the side), as a phrase that continues "<patch> ...", or ``None`` when it can. The ONE statement of the
-        rule: the adapter and :func:`check_geometry` both read it, and a test holds it equal to a real build of the library class.
+        rule: the adapter and :func:`check_geometry` both read it, and a test holds it equal to a real build of the library class with a
+        residual block (a patch of 1 also builds with none, and the task refuses it all the same: it asks for a cell of at least 2 x 2 pixels).
 
 ``check_geometry(patch_size, image_size, num_embeddings, *, floor, smoke)``
     :param floor: the least number of codes a codebook may have, the perplexity floor of the bar
@@ -182,13 +183,16 @@ def geometry_problem(patch_size: Any, side: Any) -> Optional[str]:
         return "is not a positive int"
     # DECISION plan-2026-11-25T124419-fa94f59c/D-065
     # A patch of 1 is refused HERE, before the claim: `1 & 0 == 0`, so the power-of-2 test below passes it, and the library then fails
-    # AFTER the claim (its encoder has no stride-2 stage, so the first residual block adds the 3-channel image to a hidden_channels-wide
-    # tensor). Do NOT lean on the power-of-2 test alone, and do NOT let the library refuse it: the families test of the pre-claim rule
-    # builds the library class at every patch and side and holds this function equal to what it can build.
+    # AFTER the claim with the default model (its encoder has no stride-2 stage, so the first residual block adds the 3-channel image to a
+    # hidden_channels-wide tensor). That is NOT the reason the message gives (D-080): the library builds a patch of 1 with no residual
+    # block and with a width of 3, so the rule is the task's own, a code that describes a cell of at least 2 x 2 pixels. Do NOT lean on
+    # the power-of-2 test alone, do NOT let the library refuse it, and do NOT give a failure of the library as the reason in the message:
+    # it is false for those models. The families test of the pre-claim rule builds the library class at every patch and side with one
+    # residual block and holds this function equal to what it can build, and another builds the corners where it can.
     if patch_size < 2:
         return (
-            "is below 2: the encoder is a stack of stride-2 convolutions and a patch of 1 would leave it none (its first residual block "
-            "would add the 3-channel image to a hidden_channels-wide tensor), so one code describes a cell of at least 2 x 2 pixels"
+            "is below 2: the encoder is a stack of stride-2 convolutions, so a patch of 1 leaves it no stage, and this task asks for a "
+            "code that describes a cell of at least 2 x 2 pixels, not one pixel"
         )
     if patch_size & (patch_size - 1):
         return (

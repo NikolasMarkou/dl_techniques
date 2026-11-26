@@ -54,8 +54,8 @@ from train.common.tokenizer_data import ConstantImageBaseline
 
 from .test_cli_help_allocates_nothing import FORBIDDEN as HEAVY  # the list the help path is held to: one definition
 from ._tokenizer_world import (
-    BATCH, CIFAR_CACHE, EPOCHS, LOW_FLOOR, MAX_SAMPLES, MODEL, NO_CIFAR, TINY_MODEL_ARGS, constant_model, csv_column, positional_model,
-    prepared, read_json, request, world,  # noqa: F401  (``world`` is a fixture)
+    BATCH, EPOCHS, LOW_FLOOR, MAX_SAMPLES, MODEL, TINY_MODEL_ARGS, cifar, constant_model, csv_column, positional_model, steps_between,
+    prepared, read_json, request, world,  # noqa: F401  (``world`` and ``cifar`` are fixtures)
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -162,22 +162,15 @@ def test_the_task_row_and_the_family_row_are_registered_and_resolve(world):
 @pytest.mark.parametrize(
     "reached, perplexity, per_cell, met",
     [(0.5, 100, 100, True), (0.5, 10, 100, False), (1.5, 100, 100, False), (1.5, 10, 100, False),
-     (0.5, 64, 1, False), (0.5, 128, 2, False), (0.5, 512, 7.9, False), (0.5, 64, 8, True)],
+     (0.5, 64, 1, False), (0.5, 128, 2, False), (0.5, 512, 7.9, False), (0.5, 64, 8, True), (0.5, 63, 100, False)],
     ids=["both parts", "reconstructs, codebook under the floor", "codebook at the floor, no reconstruction", "neither",
          "the cell index alone: pooled 64, per cell 1", "cell index plus a bit: pooled 128, per cell 2", "just under the per-cell floor",
-         "exactly both floors"],
+         "exactly both floors", "one code short of the pooled floor"],
 )
 def test_the_bar_needs_both_parts(reached, perplexity, per_cell, met):  # the codebook part is two floors, pooled and per cell (D-067)
     assert pretrain_run.MIN_TOKENIZER_PERPLEXITY == 64.0, "the real floor: 100 meets it and 10 does not"
     assert td.MIN_PER_CELL_PERPLEXITY == 8.0, "the real per-cell floor: 8 meets it and 7.9 does not"
     assert bare_trainer(perplexity=perplexity, per_cell=per_cell).bar_is_met(None, reached, 1.0) is met
-
-
-def test_exactly_the_floor_meets_it_through_the_one_definition_of_the_floor():
-    # 64 equally used codes: exp(log(64)) is 63.99999999999998, so a comparison of the perplexity would refuse them (D-028).
-    assert usage_of(64).perplexity < 64.0, "the control: the real calculation does come out below 64"
-    assert bare_trainer(perplexity=64).bar_is_met(None, 0.5, 1.0) is True
-    assert bare_trainer(perplexity=63).bar_is_met(None, 0.5, 1.0) is False
 
 
 @pytest.mark.parametrize("select_batches", [1, 5, 157, 2048])
@@ -258,12 +251,6 @@ def test_the_bar_asked_before_the_codebook_is_judged_is_refused_by_name(missing)
 # ---------------------------------------------------------------------
 # The data, the baseline and the control of eight constant models
 # ---------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def cifar():
-    if not CIFAR_CACHE.exists():
-        pytest.skip(NO_CIFAR)
 
 
 def test_build_data_states_the_epoch_the_validation_and_the_baseline_of_its_own_selection_rows(world, cifar, tmp_path):
@@ -403,11 +390,6 @@ class WreckedTrainer(BeitTokenizerTrainer):
                     collapse(self.model)
 
         return [Wreck()]
-
-
-def steps_between(a: float, b: float) -> float:
-    """``|a - b|`` in float32 steps of ``b``."""
-    return abs(a - b) / float(np.spacing(np.float32(b)))
 
 
 @pytest.fixture(scope="module")

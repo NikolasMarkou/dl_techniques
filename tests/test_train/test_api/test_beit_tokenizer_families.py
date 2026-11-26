@@ -40,6 +40,8 @@ from train.api.config import AUTO
 from train.api.errors import ConfigError, ConfigValidationError, UnknownModelError
 from train.common.pretrain_run import MIN_TOKENIZER_PERPLEXITY as FLOOR
 
+from .test_pretrain_families import imagenette_records_present  # noqa: F401  (fixture: the one definition, the pretrain families file's)
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 DATASETS = pa.DATASETS
@@ -512,11 +514,6 @@ def test_the_data_config_loads_from_a_mapping_an_instance_and_a_yaml_file(tmp_pa
         ta.load_tokenizer_data_config(3)
 
 
-@pytest.fixture
-def imagenette_records_present(monkeypatch):
-    monkeypatch.setattr(data_args, "_check_imagenette_records", lambda: None)
-
-
 @pytest.mark.parametrize("dataset", DATASETS)
 def test_the_facts_are_the_datasets_geometry_and_no_classes(dataset, imagenette_records_present):
     facts = ta.tokenizer_facts(ta.TokenizerData(dataset=dataset), None)
@@ -548,10 +545,23 @@ def test_a_patch_of_one_is_refused_by_name_before_the_claim_whatever_the_image(s
     assert "below 2" in str(raised.value) and "at least 2" in str(raised.value) and "1 " in str(raised.value)
 
 
-def library_grid(patch, size):
+def test_the_sentence_that_refuses_a_patch_of_one_names_the_tasks_rule_and_no_failure_of_the_library_that_some_models_do_not_have():
+    # Verification of fix round 11.2, concern 1: the sentence said "its first residual block would add the 3-channel image to a hidden_channels-wide tensor", a cause
+    # that holds only with a residual block and a width other than 3, and is FALSE otherwise: the library BUILDS a patch-1 model at `num_res_blocks` 0 (and at a width of
+    # 3, the image's own channels), and the rule refuses it all the same, because the task asks for a code that describes a cell of at least 2 x 2 pixels. The control
+    # builds the library at those corners; the sentence names the rule's own reason and no failure of the library.
+    built = {(blocks, width): library_grid(1, 32, num_res_blocks=blocks, hidden_channels=width) == (32, 32) for blocks, width in ((0, 8), (1, 8), (2, 8), (1, 3), (2, 3))}
+    assert built == {(0, 8): True, (1, 8): False, (2, 8): False, (1, 3): True, (2, 3): True}, f"the library facts the sentence must not contradict, got {built}"
+    reason = ta.geometry_problem(1, 32)
+    assert reason is not None, "the rule refuses a patch of 1 whatever the model keys: with no block it is the task's own rule, not a build error"
+    assert "no stage" in reason and "2 x 2" in reason and "stride-2" in reason, reason
+    assert "residual" not in reason and "library" not in reason and "tensor" not in reason, f"a failure the library does not have at 0 blocks: {reason}"
+
+
+def library_grid(patch, size, **model_args):
     """The code grid the library class itself gives at this stride and size (a REAL build and forward pass), ``None`` when it cannot be built."""
     try:
-        model = VQVAERotationTrick(input_shape=(size, size, 3), downsample_factor=patch, **TINY)
+        model = VQVAERotationTrick(input_shape=(size, size, 3), downsample_factor=patch, **{**TINY, **model_args})
         return tuple(int(side) for side in model.encode_to_indices(keras.ops.zeros((1, size, size, 3))).shape[1:])
     except ValueError:
         return None

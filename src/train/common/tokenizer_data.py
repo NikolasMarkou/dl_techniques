@@ -3,9 +3,11 @@
 The BEiT stage-0 tokenizer, the library ``VQVAERotationTrick``, is trained to reconstruct the images it is given, so its data is the
 plain ``(image, label)`` stream of :func:`train.common.image_streams.load_image_streams` with no element map: the model's own
 ``train_step`` and ``test_step`` read the image and ignore the label. ``train.common.pretrain_data`` is keyed on a mask and has no use
-here. This module adds to that loader three things the task needs: the batches object the run sequence reads, with a ``with_stream``
-for a resume (the shape of ``PretrainBatches``); the constant-image baseline the reconstruction bar is cut from; and one pass of the
-tokenizer over the selection split, for its codebook usage.
+here. This module adds to that loader five things the task needs: the batches object the run sequence reads, with a ``with_stream``
+for a resume (the shape of ``PretrainBatches``); the constant-image baseline the reconstruction bar is cut from; one pass of the
+tokenizer over the selection split (``code_ids_of``), for its codebook usage; the per-cell usage, the second floor of the bar and the
+two constants that go with it (``MIN_PER_CELL_PERPLEXITY``, ``MIN_PER_CELL_IMAGES``); and ``TokenizerCodes``, the layer an exported
+tokenizer file runs.
 
 This module imports TensorFlow; ``train.api`` imports it inside functions only.
 
@@ -55,8 +57,13 @@ Interface contract
 
 ``MIN_PER_CELL_PERPLEXITY`` / ``per_cell_meets_floor(usage)``
     The second floor of the tokenizer's bar (D-067): 8 effective codes per cell. ``per_cell_meets_floor`` judges the ENTROPY against the
-    log of the constant read when it is called (as ``pretrain_run.usage_meets_floor`` does for the pooled floor, which this does not touch:
-    ``beit_mim`` re-judges a tokenizer file by that one).
+    log of the constant read when it is called, through ``pretrain_run.entropy_reaches`` (D-079), the one comparison that
+    ``pretrain_run.usage_meets_floor`` makes for the pooled floor too (which this does not touch: ``beit_mim`` re-judges a tokenizer file
+    by that one).
+
+``MIN_PER_CELL_IMAGES``
+    16 (D-073): the size of a selection split below which the per-cell number reads low enough to miss its floor with good codes. The
+    task's ``build_data`` WARNS about a split under it when the data is built (a smoke run says nothing); it never refuses.
 
 ``TokenizerCodes(model)``
     A Keras layer, the function an exported tokenizer file runs (``train.api.tokenizer_predictor.served``): ``layer(images)`` is
@@ -67,7 +74,6 @@ Interface contract
     holds it to the model's own codes in all four export formats.
 """
 
-import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Optional, Tuple
 
@@ -78,7 +84,7 @@ import tensorflow as tf
 from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
 from train.common.image_streams import load_image_streams
 from train.common.pretrain_data import derive_stream_seed, states_its_length
-from train.common.pretrain_run import ENTROPY_ROUNDING_TOLERANCE
+from train.common.pretrain_run import entropy_reaches
 
 #: The two constants the baseline tries: one number per channel, and one number per pixel and channel.
 CHANNEL_MEAN, MEAN_IMAGE = "channel_mean", "mean_image"
@@ -242,23 +248,27 @@ def code_ids_of(model: Any, select_ds: "tf.data.Dataset") -> np.ndarray:
 MIN_PER_CELL_PERPLEXITY = 8.0
 
 # DECISION plan-2026-11-25T124419-fa94f59c/D-072
-# NEITHER floor tests locality: both count how the codes vary across images and cells. MEASURED on 5,000 CIFAR-10 images (review pass 2, N1; `scratch_step11_2/
-# probe_imagewide_run.txt`): the image's k-means cluster among 128, the SAME id at every cell, has a pooled and a per-cell perplexity of 103.25 (both floors met), and a
-# decoder that outputs the cluster's centroid scores 0.4908 against the mean image's 0.9978; the cell index plus the cluster among 16 meets all three parts (0.6008, pooled
-# 975.35, per cell 15.24). The reconstruction part (strictly below the constant image) is the only evidence of local content, and a weak one (the two trained 750-step arms
-# reached 0.1440 and 0.1410). The bar is NOT changed (ruled at review pass 2): the limit is stated in the README, AGENTS and D-067 and pinned by `test_an_image_wide_code_
-# repeated_at_every_cell_meets_both_floors_so_the_floors_do_not_test_locality`. Do NOT read a met bar as proof that a code describes its own patch, and do NOT add a locality
-# part without measuring its threshold first (the in-sample image-level k-means error at the codebook size is the review's candidate).
+# NEITHER floor tests locality: both count how the codes vary across images and cells. MEASURED on 5,000 CIFAR-10 images (review pass 2, N1;
+# `scratch_step11_2/probe_imagewide_run.txt`): the image's k-means cluster among 128, the SAME id at every cell, has a pooled and a per-cell
+# perplexity of 103.25 (both floors met), and a decoder that outputs the cluster's centroid scores 0.4908 against the mean image's 0.9978; the cell
+# index plus the cluster among 16 meets all three parts (0.6008, pooled 975.35, per cell 15.24). The reconstruction part (strictly below the constant
+# image) is the only evidence of local content, and a weak one (the two trained 750-step arms reached 0.1440 and 0.1410). The bar is NOT changed
+# (ruled at review pass 2): the limit is stated in the README, AGENTS and D-067 and pinned by
+# `test_an_image_wide_code_repeated_at_every_cell_meets_both_floors_so_the_floors_do_not_test_locality`. Do NOT read a met bar as proof that a code
+# describes its own patch, and do NOT add a locality part without measuring its threshold first (the in-sample image-level k-means error at the
+# codebook size is the review's candidate).
 
 # DECISION plan-2026-11-25T124419-fa94f59c/D-073
-# The per-cell number is a plug-in entropy of the codes of ONE cell over the selection images, so it is BIASED LOW on a small split: the hard bound is the number of
-# images n (a perplexity over n images is at most n, so under 8 images no tokenizer can meet the floor at all) and it reads low well above n. MEASURED (review pass 2,
-# N3): the saved codes of the two trained 750-step arms of Step 2 (`scratch_step11/p2_codes`, 36.07 and 46.53 per cell over 5,000 images), 300 draws without replacement per
-# size (`scratch_step11_2/probe_subsample_run.txt`; the review read 6.70 and 6.91 at 8 images and 7.96 and 8.28 at 10): at 8 images every draw misses the floor of 8 (means
-# 6.69 and 6.88), at 10 images 47 and 14 percent of the draws miss, at 11 images 7 and 1 percent, and from 12 images none of the 300 draws misses. 16 is a third above that
-# first clean size and twice the floor: the smallest draw at 16 images is 9.45 and 10.55. Do NOT set it back to the floor (8: a good tokenizer on 8 to 11 images missed the
-# floor with no word said, the first round's warning), and do NOT make it a refusal (the resume tests train on six images and their data may not change).
-#: Selection images below which the per-cell number reads low enough to miss its floor with good codes: a run on fewer says so in a warning when its data is built.
+# The per-cell number is a plug-in entropy of the codes of ONE cell over the selection images, so it is BIASED LOW on a small split: the hard bound is
+# the number of images n (a perplexity over n images is at most n, so under 8 images no tokenizer can meet the floor at all) and it reads low well
+# above n. MEASURED (review pass 2, N3): the saved codes of the two trained 750-step arms of Step 2 (`scratch_step11/p2_codes`, 36.07 and 46.53 per
+# cell over 5,000 images), 300 draws without replacement per size (`scratch_step11_2/probe_subsample_run.txt`; the review read 6.70 and 6.91 at 8
+# images and 7.96 and 8.28 at 10): at 8 images every draw misses the floor of 8 (means 6.69 and 6.88), at 10 images 47 and 14 percent of the draws
+# miss, at 11 images 7 and 1 percent, and from 12 images none of the 300 draws misses. 16 is a third above that first clean size and twice the floor:
+# the smallest draw at 16 images is 9.45 and 10.55. Do NOT set it back to the floor (8: a good tokenizer on 8 to 11 images missed the floor with no
+# word said, the first round's warning), and do NOT make it a refusal (the resume tests train on six images and their data may not change).
+#: Selection images below which the per-cell number reads low enough to miss its floor with good codes: a run on fewer says so in a warning when its
+#: data is built.
 MIN_PER_CELL_IMAGES = 16
 
 
@@ -303,9 +313,9 @@ def per_cell_usage(code_ids: Any) -> CellUsage:
 
 def per_cell_meets_floor(usage: CellUsage) -> bool:
     """Whether ``usage`` reaches :data:`MIN_PER_CELL_PERPLEXITY`, judged on the entropy as the pooled floor is; see the module contract."""
-    # The constant is read HERE, at the call (a test may patch it); the comparison is on the entropy with the pooled floor's slack, because
-    # `exp(log(8))` is not exactly 8 in float64 and a code that uses exactly 8 codes per cell must meet the floor.
-    return usage.entropy >= math.log(MIN_PER_CELL_PERPLEXITY) - ENTROPY_ROUNDING_TOLERANCE
+    # The constant is read HERE, at the call (a test may patch it); the comparison is the pooled floor's own (`entropy_reaches`, D-079: the
+    # slack is one definition), because `exp(log(8))` is not exactly 8 in float64 and a code that uses exactly 8 codes per cell must meet it.
+    return entropy_reaches(usage.entropy, MIN_PER_CELL_PERPLEXITY)
 
 
 @keras.saving.register_keras_serializable(package="train_tokenizer")

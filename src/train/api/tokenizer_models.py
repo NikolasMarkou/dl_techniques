@@ -28,7 +28,8 @@ Interface contract
         ``encode_to_indices`` of an ``(N, height, width, channels)`` batch has shape ``(N, height // patch_size, width // patch_size)``:
         that grid is PROVED by running it, never read off the model's own ``downsample_factor``.
     :raises ValueError: for a non-``None`` ``num_classes``, an unknown variant, a bad shape or patch, a missing ``num_embeddings``, any key
-        :data:`REFUSED` or :data:`SUPPLIED` holds or no table knows, and a code grid that is not the image over the patch
+        :data:`REFUSED` or :data:`SUPPLIED` holds or no table knows, an offered key whose value fails :data:`VALUE_RULES` (the type its
+        constructor declares, or a value the library rejects), and a code grid that is not the image over the patch
         (:func:`train.api.recipes.build_model` turns it into a ``ConfigError``).
 
 ``resolve_tokenizer_args(context, optim_args, model_args)``
@@ -149,8 +150,8 @@ REFUSED: Dict[str, str] = {
 # DECISION plan-2026-11-25T124419-fa94f59c/D-071
 # Every offered key is ALSO held to the TYPE its constructor declares, because "what the library rejects" is the wrong boundary for a value it cannot
 # reject: `use_ema` is read by truthiness (`trainable=not self.use_ema`), so the string "False" that the command line keeps for `use_ema=False` (any
-# word that is not JSON stays text, `cli._untyped`), and "no", build the EMA codebook, the OPPOSITE model, and `config.json` then says "False" for a run
-# that trained with EMA; a bool is the int 1 or 0 for `num_res_blocks` (`true` builds one block) and `commitment_cost` (`true` trains at 1.0). The
+# word that is not JSON stays text, `cli._untyped`), and "no", build the EMA codebook, the OPPOSITE model, and `config.json` then says "False" for a
+# run that trained with EMA; a bool is the int 1 or 0 for `num_res_blocks` (`true` builds one block) and `commitment_cost` (`true` trains at 1.0). The
 # repository's sense of a type: a bool is no int and no float (`config.py`, `args.is_count`). A count under 0 builds as no block and stays accepted
 # (D-065): only the TYPE is the rule. Do NOT drop the bool tests "because the library accepts them", and do NOT accept a string for `use_ema`.
 #: ``{key: (accepts, what the message says is expected)}``.
@@ -162,7 +163,8 @@ VALUE_RULES: Dict[str, Tuple[Callable[[Any], bool], str]] = {
         lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0, "a number of at least 0, not true or false"),
     "use_ema": (
         lambda value: isinstance(value, bool),
-        "true or false, in lowercase (the command line keeps any other spelling, such as False or no, as a string, and the library reads a string as true)"),
+        "true or false, in lowercase (the command line keeps any other spelling, such as False or no, as a string, "
+        "and the library reads a string as true)"),
 }
 
 #: Keywords the task or the API passes to the adapter itself: ``{key: why}``. Naming one in ``model_args`` is refused.
@@ -397,10 +399,11 @@ def builtin_tokenizer_models() -> Tuple[ModelSpec, ...]:
             # `fixed` is what `init` refuses BEFORE the claim, naming both values. The input channels (the stem's kernel), the patch (the number of
             # stride-2 stages) and the codebook size (the quantizer's table) change a weight's shape, which the census holds at the weight level. The
             # image SIZE changes none (a convolutional tokenizer has no weight that depends on it: MEASURED, every weight copies from 32 px to 64 px)
-            # and is fixed by POLICY, the plan's contract being the same size; a test says so, and `policy` (D-066) makes the refusal say so too. The width, the depth and the embedding size are model
-            # keys the record does not carry, so the engine refuses them after the claim. Do NOT drop `num_embeddings` (another codebook would be
-            # refused after the claim, with a run directory left claimed), and do NOT pin the architecture keys to the source's (a source of another
-            # size would then be copied silently). The model has no head: the whole network is what `init` moves.
+            # and is fixed by POLICY, the plan's contract being the same size; a test says so, and `policy` (D-066) makes the refusal say so too. The
+            # width, the depth and the embedding size are model keys the record does not carry, so the engine refuses them after the claim. Do NOT
+            # drop `num_embeddings` (another codebook would be refused after the claim, with a run directory left claimed), and do NOT pin the
+            # architecture keys to the source's (a source of another size would then be copied silently). The model has no head: the whole network is
+            # what `init` moves.
             transfer=TransferSpec(
                 fixed=("channels", "input_size", "patch_size", "num_embeddings"), policy={"input_size": SIZE_POLICY}),
         ),
