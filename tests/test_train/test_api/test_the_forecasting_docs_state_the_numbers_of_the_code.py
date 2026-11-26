@@ -691,14 +691,35 @@ def test_the_repo_map_and_the_roadmaps_count_the_tasks_the_registry_has(world):
     init = " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split())
     assert f"The {ordinal} task, `{newest}`, trains the BEiT tokenizer that a `beit_mim` run reads" in repo_map
     assert f"`python -m train <task> help` of all {words[len(names)]};" in scripts and f"and `{newest}` (Phase 4j), in that order" in scripts
-    assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Code done, GPU gate NOT run" in scripts
-    assert "Phase 4j (plan fa94f59c, branch `train-api/phase-4j`: code done, GPU gate NOT run)" in init and f"`{newest}` in Phase 4j" in init
+    assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Phase 4j: the BEiT tokenizer. Code done, GPU gate run**" in scripts
+    assert ("Phase 4j (plan fa94f59c, branch `train-api/phase-4j`: code done, its GPU gate run, numbers in `src/train/README.md` under "
+            "\"Measured: the tokenizer gate\")") in init and f"`{newest}` in Phase 4j" in init
     # Review pass 2, N4: both roadmaps state what the code does: the bar's two floors, and the two entries of the family row that lift the size refusal of `init`
     from train.common import pretrain_run, tokenizer_data as td
 
     assert (f"a codebook perplexity over every selection position of at least {pretrain_run.MIN_TOKENIZER_PERPLEXITY:g} pooled and at least "
             f"{td.MIN_PER_CELL_PERPLEXITY:g} per cell") in scripts
     assert "lifting the refusal is two entries of the family row (the `fixed` tuple and the `policy` entry of `train/api/tokenizer_models.py`) and its census test" in init
+
+
+def test_no_document_says_the_tokenizer_gate_has_not_run():
+    """Plan fa94f59c step 14: the gate ran, so the five documents that said it had not (the README twice and its block, the AGENTS bullet, both roadmaps) say it has, and
+    the block that ends the section is the gate's own, not the placeholder that stood there before the night."""
+    texts = {"README": " ".join(README.read_text().split()), "AGENTS": " ".join(AGENTS.read_text().split()),
+             "scripts": " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split()),
+             "init": " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split()),
+             "repo map": " ".join((ROOT / "REPO_MAP.md").read_text().split())}
+    stale = ["its GPU gate has not run", "GPU gate NOT run", "gate block is empty", "is empty until it has", "has not been run, so this block holds no measurement",
+             "Measured: the tokenizer gate.** Not run", "Not done: the GPU gate", "the block that ends this section is empty"]
+    found = [(name, phrase) for name, text in texts.items() for phrase in stale if phrase in text]
+    assert found == [], f"a document still says the tokenizer gate has not run: {found}"
+    readme = texts["README"]
+    block = readme[readme.index("<!-- tokenizer-gate:begin -->"):readme.index("<!-- tokenizer-gate:end -->")]
+    assert block.startswith("<!-- tokenizer-gate:begin --> **Measured: the tokenizer gate** (plan fa94f59c:") and "Run on the code HEAD" in block
+    assert "`beit_tokenizer`, the ninth task, trains the tokenizer that `beit_mim` reads: it is in the code and its GPU gate has run (Phase 4j" in readme
+    assert "and **its GPU gate has run** (its numbers are in the block that ends this section)" in readme[readme.index("**`beit_tokenizer`** (plan fa94f59c"):]
+    agents = texts["AGENTS"]
+    assert "[`README.md`](README.md), which holds the numbers of its GPU gate in its own block." in agents[agents.index("**The `beit_tokenizer` task**"):]
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

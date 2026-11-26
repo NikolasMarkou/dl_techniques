@@ -932,7 +932,7 @@ classification task calls the same `train.common.classification_run` helpers as 
   layer `TokenizerCodes`, because a functional model over `encode_to_indices` builds and fails when it runs (D-045: `test_the_served_layer_returns_int32_grids_and_names_its_model_in_its_config`). `beit_mim` holds a tokenizer run's own `task.json` to its patch,
   size and statistics before the claim, reading it beside the file's resolved path (D-052, D-068: `test_beit_mim_reads_a_tokenizer_run.py`). Tests, in `tests/test_train/test_api/`:
   `test_beit_tokenizer_{task,resume,families,predictor_and_export,init}.py` and `test_common_tokenizer_data.py`, sharing `_tokenizer_world.py`. The user-facing description is in
-  [`README.md`](README.md), whose gate block is empty until the gate has run.
+  [`README.md`](README.md), which holds the numbers of its GPU gate in its own block.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `MODEL_CHECKS`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served, sample)`: the shape `export` traces, the cells it refuses, the
