@@ -27,6 +27,11 @@ Interface contract
     reconstruction loss is the constant image's, which is what ``constant_image_baseline`` computes. Compiled as the run sequence compiles
     it (no loss, no metric).
 
+``positional_model(*, size, patch, dim)``
+    A ``VQVAERotationTrick`` whose code is the CELL INDEX alone: the encoder ignores the image (a fixed table, one vector per cell), the codebook
+    holds exactly those vectors, so every image gets the same code grid and its pooled perplexity is the number of cells; the decoder is the
+    library's own and trains as usual. The control of the per-cell floor (review pass 1, W3). Compiled as the run sequence compiles it.
+
 ``read_json(path)`` / ``csv_column(run_dir, name)``
     The parsed JSON file, and a column of ``training_log.csv`` as floats.
 """
@@ -49,7 +54,7 @@ from ._resume_protocol import merge_changes
 
 CIFAR_CACHE = Path.home() / ".keras" / "datasets" / "cifar-10-batches-py-target"
 NO_CIFAR = (
-    f"CIFAR-10 is not in {CIFAR_CACHE}. This file reads the REAL rows and never downloads anything. "
+    f"CIFAR-10 is not in {CIFAR_CACHE} on this machine. This file reads the REAL rows and never downloads anything. "
     "A SKIP here is NOT a pass: the guard did not run."
 )
 
@@ -132,6 +137,24 @@ def constant_model(image: np.ndarray, *, size: int = 32, patch: int = 4, dim: in
     decoder = keras.Model(decoder_input, ConstantImage(value)(decoder_input))
     model = VQVAERotationTrick(num_embeddings=codes, embedding_dim=dim, encoder=encoder, decoder=decoder)
     model.build((None, size, size, 3))
+    model.compile(optimizer="sgd", loss=None, metrics=[])
+    return model
+
+
+def positional_model(*, size: int = 32, patch: int = 4, dim: int = 8, hidden: int = 16) -> VQVAERotationTrick:
+    """A ``VQVAERotationTrick`` whose code is the cell index alone, whatever the image; see the module contract."""
+    grid = size // patch
+    table = (np.random.default_rng(0).normal(size=(grid * grid, dim)) * 3.0).astype(np.float32)
+    encoder_input = keras.Input((size, size, 3))
+    encoder = keras.Model(encoder_input, ConstantImage(table.reshape(grid, grid, dim))(encoder_input))
+    # The decoder of an auto-built model of the same geometry: the library's own, trainable (the auto model itself is dropped).
+    auto = VQVAERotationTrick(num_embeddings=grid * grid, embedding_dim=dim, input_shape=(size, size, 3), hidden_channels=hidden,
+                              downsample_factor=patch, num_res_blocks=1)
+    model = VQVAERotationTrick(num_embeddings=grid * grid, embedding_dim=dim, encoder=encoder, decoder=auto.decoder)
+    model.build((None, size, size, 3))
+    book = np.zeros(model.quantizer.embeddings.shape, np.float32)
+    book[0] = table  # the codebook IS the table: the nearest code of cell c is c, at distance 0
+    model.quantizer.embeddings.assign(book)
     model.compile(optimizer="sgd", loss=None, metrics=[])
     return model
 

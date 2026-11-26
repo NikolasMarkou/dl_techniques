@@ -439,7 +439,12 @@ class PretrainTrainer(TaskTrainer):
         # record (another task's, not JSON, not an object) get exactly the checks they got before; a tokenizer record that fails its own
         # check is refused, since the file it describes cannot be trusted to be what it says. Do NOT load the model here (no tensor before
         # `setup_gpu`), do NOT require the record (a legacy file would stop loading), and do NOT take another task's record for a tokenizer's.
-        record_path = path.parent / TASK_FILE
+        # DECISION plan-2026-11-25T124419-fa94f59c/D-068
+        # The sibling is read from the RESOLVED path: a symlink in another directory points into the run that trained the file, and the record
+        # sits there; read from the link's own directory it is not found and the statistics are checked nowhere (review pass 1, N2). A COPY of
+        # the file has no record beside it, whatever is done: no sibling means no check, which the README says. Do NOT drop `resolve()`.
+        run_dir = path.resolve().parent
+        record_path = run_dir / TASK_FILE
         try:
             record = json.loads(record_path.read_text())
         except (OSError, ValueError):
@@ -466,7 +471,7 @@ class PretrainTrainer(TaskTrainer):
             trained = ", ".join(f"{TOKENIZER_RECORD_KEYS[key]} {record[key]}" for key in moved)
             asked = ", ".join(f"{TOKENIZER_RECORD_KEYS[key]} {ours[key]}" for key in moved)
             raise ConfigError(
-                f"Invalid value for {name!r}: {path} belongs to the {BEIT_TOKENIZER} run in {path.parent}, which was trained at {trained}, and "
+                f"Invalid value for {name!r}: {path} belongs to the {BEIT_TOKENIZER} run in {run_dir}, which was trained at {trained}, and "
                 f"this run asks for {asked}; a {BEIT} run reads the code of each patch of its own standardized images, so give a tokenizer "
                 f"trained at this run's values ({TOKENIZER_COMMAND})"
             )

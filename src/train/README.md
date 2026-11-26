@@ -709,7 +709,8 @@ directory is claimed, and so is a `model_args` key the model takes from the task
   path that does not exist or does not end in `.keras`, exits 2 before the run directory is claimed with a sentence that names `python -m train beit_tokenizer` (no model file is
   read at that point). When the file sits beside the `task.json` of a `beit_tokenizer` run, that record is read too (JSON only, before the claim) and held to this run: another
   `data.patch_size`, `transform_args.image_size`, `mean` or `std` than the tokenizer was trained at is refused naming both values and the tokenizer run, and so is a record that
-  fails its own check; a file with no sibling record (a tokenizer of the legacy `train.beit.train_tokenizer`, or a copied file) is checked as before. The grid is proved at build
+  fails its own check. The record is looked for beside the file's RESOLVED path, so a symlink to a run's `best_model.keras` is checked like the file; a file with no sibling record (a tokenizer of
+  the legacy `train.beit.train_tokenizer`, or a copy of `best_model.keras` made without its `task.json`) gets NO check of its statistics before the claim and only the checks after it (the grid proof and the usage floor): keep `task.json` beside the file. The grid is proved at build
   time, after the claim, by a real forward pass at the run's `transform_args.image_size`: the expected grid is the patches', never the tokenizer's own `downsample_factor`, so a
   tokenizer built at another size or another down-sample is refused naming the file and the size, and a `.keras` file that is not a `VQVAERotationTrick` is refused by name. The
   grid must be the patches': `cifar10` is 32 px at patch 4 and `imagenette` 224 px at patch 16, which is what `beit_tokenizer` trains by default.
@@ -1661,7 +1662,8 @@ result = train_beit_tokenizer(out="auto", model="vq_vae_rotation/small", data={"
   own `train_step` and `test_step`: the task adds no step and compiles with no loss and no metric, because the file it saves must be the `VQVAERotationTrick` that `beit_mim`
   loads. Six `model_args` are offered (`num_embeddings`, `embedding_dim`, `hidden_channels`, `num_res_blocks`, `commitment_cost`, `use_ema`), 4 are given by the task and 15
   more are refused by name before the claim, each with its reason (`kmeans_init` and `dead_code_threshold`, the remedies for a collapsed codebook, because no run measured
-  them through this task; `encoder` and `decoder`, which the task builds); a census holds the three tables equal to the constructor's signature. The recipe is the legacy
+  them through this task; `encoder` and `decoder`, which the task builds); a census holds the three tables equal to the constructor's signature. A value the library would
+  reject after the claim is refused before it (a width or an embedding size that is not a positive int, a count of residual blocks that is not an int, a negative commitment cost). The recipe is the legacy
   trainer's, held equal by a test that reads its `TrainingConfig`: AdamW at 5e-4, weight decay 0.05, 2 warmup epochs, cosine decay over the whole run to 0.01 of the peak, a
   global gradient clip of 1.0, batch 32, 50 epochs, patience 15; the command above passes `epochs=5`, as the lost tokenizer below had. The geometry follows the dataset: `cifar10` is 32 px at patch 4 (grid 8 x 8,
   512 codes) and `imagenette` is 224 px at patch 16 (grid 14 x 14, 8,192 codes). The `cifar10` row is the pairing every `beit_mim` gate used, not the legacy command line's (a
@@ -1676,7 +1678,7 @@ result = train_beit_tokenizer(out="auto", model="vq_vae_rotation/small", data={"
 | `data.format` | `"builtin"` | `TokenizerData`; the only value |
 | `data.validation_split` | `null` | `BeitTokenizerTrainer.build_data`, then `tokenizer_data.load_tokenizer_batches`; null is the loader's 0.1 |
 | `data.max_samples` | `null` | the same path (the test split is never capped); `debug_args.smoke` sets 512 when null |
-| `data.patch_size` | `"auto"` | `TokenizerData.resolve_auto`, `check_geometry` (a power of 2 that divides `transform_args.image_size`, before the claim), `BeitTokenizerTrainer.build_model`; auto is 4 for cifar10 and 16 for imagenette |
+| `data.patch_size` | `"auto"` | `TokenizerData.resolve_auto`, `check_geometry` (a power of 2, at least 2, that divides `transform_args.image_size`, before the claim), `BeitTokenizerTrainer.build_model`; auto is 4 for cifar10 and 16 for imagenette |
 | `transform_args.image_size` | `"auto"` | `BeitTokenizerTrainer.describe_data`, `BeitTokenizerTrainer.build_data`; auto is 32 for cifar10 and 224 for imagenette |
 | `transform_args.augment` | `true` | `BeitTokenizerTrainer.build_data`: flip and pad-crop of the TRAIN stream only |
 | `metric_args.watch_metric` | `"auto"` | `TokenizerMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`; auto is `val_reconstruction_loss`, the only value accepted (`val_loss` carries the quantizer's terms, which a constant image's score has none of) |
@@ -1690,11 +1692,17 @@ result = train_beit_tokenizer(out="auto", model="vq_vae_rotation/small", data={"
   constant image's score and the untrained model's (`epoch_zero`, read from the fit sidecar), in float32 and beyond `forecast_run.tie_band` steps (64 at the 157 selection
   batches of CIFAR-10 at the defaults): a compiled constant model scores a few float32 steps either side of its analytic score, so a bare `<` or `<=` would call one a success.
   The baseline is the lower of the best per-channel constant and the in-sample mean image of the selection images, in the metric's own mean over batches: 1.0049 and 0.9874 on
-  the CIFAR-10 selection split (5,000 rows of seed 42), so the baseline is the mean image's. (2) The perplexity of the codes the BEST weights give to every position of every selection
-  image (5,000 images x 64 cells = 320,000 positions), counted once after `fit` by one eager pass, is at least the floor of 64 effective codes: the one definition `beit_mim`
-  refuses by (`pretrain_run.usage_meets_floor`, "The usage floor" above). A constant model, a collapsed codebook and a tokenizer that meets one part only each miss: exit 1, the
-  run kept, and `results_summary.json` says which (`reconstruction` with `beats_bar`, `codebook_usage` with `meets_floor`, beside `baseline`, `epoch_zero` and `selection`). A
-  selection split whose positions are fewer than the floor cannot show it, and is refused by name after the data is read (raise `data.max_samples`).
+  the CIFAR-10 selection split (5,000 rows of seed 42), so the baseline is the mean image's. (2) The codes the BEST weights give to every position of every selection image (5,000 images x 64 cells = 320,000 positions), counted once after `fit` by one eager pass, meet
+  TWO floors. The pooled perplexity is at least the floor of 64 effective codes: the one definition `beit_mim` refuses by (`pretrain_run.usage_meets_floor`, "The usage floor"
+  above). At 32 px and patch 4 the grid has 64 cells, so a code that is the cell index and nothing else, whatever the image, has a pooled perplexity of exactly 64 and meets it.
+  The PER-CELL perplexity, exp of the mean over the grid's cells of the entropy of each cell's codes (`tokenizer_data.per_cell_usage`), is at least 8 (`tokenizer_data.MIN_PER_CELL_PERPLEXITY`):
+  that code is worth 1 per cell, the cell index plus one image-wide bit 2 and two bits 4, and the two 750-step linear-head arms of the probe that chose the decoder were worth
+  36.07 and 46.53 per cell (39.04 and 51.73 pooled; the lost 4h tokenizer's per-cell number died with its file, at least 5.5 by the entropy bound on its pooled 354.8 over 64 cells). 8 is the power of 2 nearest the geometric
+  mean of 2 and 36.07: 4 times above the best code that carries one bit and 4.5 times under the trained arms. A constant model, a collapsed codebook, a code that describes position
+  only and a tokenizer that meets one part only each miss: exit 1, the run kept, and `results_summary.json` says which (`reconstruction` with `beats_bar`, `codebook_usage` with
+  `meets_floor` and `per_cell_meets_floor`, the two perplexities beside `baseline`, `epoch_zero` and `selection`). A selection split of fewer positions than the pooled floor cannot show it
+  and is refused by name after the data is read (raise `data.max_samples`); one of fewer images than the per-cell floor cannot show that one (the per-cell perplexity is at most the
+  number of images), so the run says so in a warning when its data is built and reports the miss.
 * **`best_model.keras` is the file `beit_mim` takes.** The checkpoint is selected on `val_reconstruction_loss` alone, so `best_model.keras` holds the epoch the verdict judged:
   the bar and `codebook_usage` are its weights'. `final_model.keras` is written too and is the last epoch's, which the verdict does not describe (the 4h gate read a
   `final_model.keras`); `beit_mim` loads either, so give it `best_model.keras`. A later epoch that spreads the codes more but reconstructs worse is not the one judged.
@@ -1714,9 +1722,9 @@ result = train_beit_tokenizer(out="auto", model="vq_vae_rotation/small", data={"
   128 positions with Keras's and refuses a file that differs there, so it sees such a flip by chance only). No trained tokenizer showed it, and the export note says it. The `keras` file holds a layer of the `train` package (`TokenizerCodes`), so it loads only where `train` is importable.
 * **`init`** takes a `beit_tokenizer` run only. The row fixes the input channels, the image size, the patch and the codebook size: another one is refused before the claim,
   naming both values. A width, a depth, an embedding size or an EMA codebook that differs is no key of the record, and the engine refuses it after the claim (complete or
-  raise). Every weight of the default model copies (47 of 47, none reset). **The image size is refused by policy, not by shape**: a convolutional tokenizer has no weight that
-  depends on it, 47 of 47 copy into a 64 px model too (measured), so the engine's sentence "sizes its weights by `transform_args.image_size`" says more than the weights do; the
-  refusal is the task's contract (the code grid is `image_size / data.patch_size`), and lifting it is one line of the family row and its census test. Epoch zero is the
+  raise). Every weight of the default model copies (47 of 47, none reset). **The image size is refused by policy, not by shape, and the refusal says so**: a convolutional tokenizer has no weight that
+  depends on it, 47 of 47 copy into a 64 px model too (measured), so the sentence is the family row's own (`policy`, below) and not the engine's "sizes its weights by", which would
+  be false here; a different size is a different code grid, which `beit_mim` reads, and lifting the refusal is one entry of the family row and its census test. Epoch zero is the
   LOADED weights' `val_reconstruction_loss` and the threshold `min(baseline, loaded)`, still strictly below: a fine-tune that moves no weight misses on the reconstruction part.
   A `beit_mim` run is no `init` source of a tokenizer, and a tokenizer is none of `beit_mim`'s (it takes `model_args.tokenizer_checkpoint`).
 * **The tokenizer of the Phase 4h gate is lost.** The `beit_source` and `beit_mim_from_beit_mim` arms of the 4h gate read `results/p4d_tokenizer_cifar10_e5/final_model.keras`, made by
@@ -1729,10 +1737,12 @@ result = train_beit_tokenizer(out="auto", model="vq_vae_rotation/small", data={"
 | Case | Message |
 |---|---|
 | a family of another task | `Invalid value for 'model': the family 'vit' trains image_classification, not 'beit_tokenizer'; the families of 'beit_tokenizer' are vq_vae_rotation` |
-| a patch that is not a power of 2 | `Invalid value for 'data.patch_size': 3 is not a power of 2: the encoder is a stack of stride-2 convolutions, so one code can only describe a cell whose side is a power of 2 (transform_args.image_size is 32); the patch must be a power of 2 that divides the image side` |
+| a patch that is not a power of 2 | `Invalid value for 'data.patch_size': 3 is not a power of 2: the encoder is a stack of stride-2 convolutions, so one code can only describe a cell whose side is a power of 2 (transform_args.image_size is 32); the patch must be a power of 2, at least 2, that divides the image side` |
+| a patch of 1 | `Invalid value for 'data.patch_size': 1 is below 2: the encoder is a stack of stride-2 convolutions and a patch of 1 would leave it none (its first residual block would add the 3-channel image to a hidden_channels-wide tensor), so one code describes a cell of at least 2 x 2 pixels (transform_args.image_size is 32); the patch must be a power of 2, at least 2, that divides the image side` |
 | `model_args.num_embeddings=32` | `Invalid value for 'model_args.num_embeddings': 32 is below the 64 effective codes the bar asks of a tokenizer: a codebook of 32 codes cannot reach a perplexity above 32, so the run could never meet it; expected at least 64, or set debug_args.smoke=true for a run with no bar` |
 | `model_args.kmeans_init=true` | `Invalid value for 'model_args.kmeans_init': kmeans_init is not offered by 'vq_vae_rotation' (the k-means warm start is a remedy for a collapsed codebook, and no run of this task measured it; the bar reports a collapse), got True` |
-| `init` from another patch, size or codebook | `Invalid value for 'init': vq_vae_rotation sizes its weights by data.patch_size; the source trained at 4, this run asks for 8` (the size: `... by transform_args.image_size; the source trained at [32, 32], this run asks for [64, 64]`, the codebook: `... by the codebook size (model_args.num_embeddings); the source trained at 512, this run asks for 256`) |
+| `model_args.hidden_channels=0` (a value the library rejects after the claim) | `Invalid value for 'model_args.hidden_channels': expected a positive int, got 0` |
+| `init` from another patch, size or codebook | `Invalid value for 'init': vq_vae_rotation sizes its weights by data.patch_size; the source trained at 4, this run asks for 8` (the codebook: `... by the codebook size (model_args.num_embeddings); the source trained at 512, this run asks for 256`; the size, which the weights would copy, is the row's own sentence: `Invalid value for 'init': beit_tokenizer holds transform_args.image_size to the source's by policy, not because a weight depends on it: the source trained at [32, 32], this run asks for [64, 64]; a different size is a different code grid (the image size over data.patch_size), which is what a beit_mim run reads, and every weight of this convolutional tokenizer would copy, so this is the task's choice and not a limit of the weights: it is the policy entry of the family row in train/api/tokenizer_models.py`) |
 | `init` from a `beit_mim` run | `Invalid value for 'init': beit_mim (pretrain) cannot seed vq_vae_rotation (beit_tokenizer); vq_vae_rotation takes weights from vq_vae_rotation (beit_tokenizer)` |
 | a `beit_mim` run at another patch than its tokenizer run's | `Invalid value for 'model_args.tokenizer_checkpoint': <run>/best_model.keras belongs to the beit_tokenizer run in <run>, which was trained at data.patch_size 4, and this run asks for data.patch_size 8; a beit_mim run reads the code of each patch of its own standardized images, so give a tokenizer trained at this run's values ...` |
 | after the claim: `init` from a source of another width | `Invalid argument for the init transfer: Invalid value for 'init': 44 of 47 weights of vq_vae_rotation/small have no source weight of their shape and no declared rule: enc_down_0/enc_down_0_conv1/kernel: target (4, 4, 3, 64) float32, source (4, 4, 3, 128) float32; ... nothing was copied (paths without the model's root). The run directory <out> was claimed before this failed, ...` |
@@ -1875,11 +1885,12 @@ two is refused after the claim unless the segmenter is given `model_args.strides
 `final_output`; `tirex/tiny` from lookback 168 to 336 copies 47 of 47; `depth_anything/vit_s` at another size copies 235 of 235
 (the DINOv2 table is resampled inside the model at call time); `gpt2_lm/tiny` (64 wide, 2 blocks) from windows of 32 tokens to 64 copies
 30 of 30 and resets none (no weight depends on the window), and into `gpt2/tiny` of the same sizes, a classifier, copies the same 30 and resets
-the 8 weights of `task_head`, dropping none (an `lm_head` an untied source holds is dropped, not refused); `vq_vae_rotation/small` from a run of its own family copies 47 of 47
-and resets none, at its own size and at 64 px. Those four, the two pretrain pairs
+the 8 weights of `task_head`, dropping none (an `lm_head` an untied source holds is dropped, not refused). Those four, the two pretrain pairs
 below and that language-model pair are the seven declared cross-task pairs (the ConvUNext pair counts once each way); any other pair, and a
 width change (`convnext_v2` atto to femto: 139 of 140 weights differ), are refused, `bert` has no cross-task source (an encoder cannot start
-from a causal decoder), and a language-model run into it is refused by the declared-sources sentence (the table of the `text_classification` section).
+from a causal decoder), and a language-model run into it is refused by the declared-sources sentence (the table of the `text_classification` section). A `beit_tokenizer` run takes an
+earlier run of its own task only, so it is no pair: `vq_vae_rotation/small` copies 47 of 47 and resets none at its own size, and the engine would copy all 47 into a 64 px model too,
+which `init` refuses by policy (see `beit_tokenizer`).
 
 **Pretrain and its two classifiers** (plan 5c6cc105). `beit_mim` (pretrain) seeds `beit` and `et_mim` seeds `energy_transformer`
 (image_classification): the trunk (`beit_backbone`, `et_backbone`) is copied, the decoder is dropped (`decoder_norm` and

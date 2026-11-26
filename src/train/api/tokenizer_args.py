@@ -38,9 +38,9 @@ Interface contract
 
 ``geometry_problem(patch_size, side)``
     :param patch_size, side: any values; no check of type is assumed.
-    :return: why ``patch_size`` cannot cut a square side of ``side`` pixels into whole code cells (not a positive int, not a power of 2,
-        or not dividing the side), as a phrase that continues "<patch> ...", or ``None`` when it can. The ONE statement of the rule: the
-        adapter and :func:`check_geometry` both read it.
+    :return: why ``patch_size`` cannot cut a square side of ``side`` pixels into whole code cells (not a positive int, below 2, not a
+        power of 2, or not dividing the side), as a phrase that continues "<patch> ...", or ``None`` when it can. The ONE statement of the
+        rule: the adapter and :func:`check_geometry` both read it, and a test holds it equal to a real build of the library class.
 
 ``check_geometry(patch_size, image_size, num_embeddings, *, floor, smoke)``
     :param floor: the least number of codes a codebook may have, the perplexity floor of the bar
@@ -116,8 +116,8 @@ class TokenizerData(StrictConfig):
     patch_size: Auto[int] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "side of the square cell of the image that ONE code describes, the encoder's total stride: a power of 2 that "
-            "divides transform_args.image_size. The code grid is image_size / patch_size on a side, and a beit_mim run reads it only "
+            "help": "side of the square cell of the image that ONE code describes, the encoder's total stride: a power of 2, at least 2, "
+            "that divides transform_args.image_size. The code grid is image_size / patch_size on a side, and a beit_mim run reads it only "
             f"with its own data.patch_size equal to this; auto is {_geometry_words()}"
         },
     )
@@ -180,6 +180,16 @@ def geometry_problem(patch_size: Any, side: Any) -> Optional[str]:
     """Return why ``patch_size`` cannot cut a side of ``side`` pixels into whole code cells, ``None`` when it can."""
     if not is_count(patch_size):
         return "is not a positive int"
+    # DECISION plan-2026-11-25T124419-fa94f59c/D-065
+    # A patch of 1 is refused HERE, before the claim: `1 & 0 == 0`, so the power-of-2 test below passes it, and the library then fails
+    # AFTER the claim (its encoder has no stride-2 stage, so the first residual block adds the 3-channel image to a hidden_channels-wide
+    # tensor). Do NOT lean on the power-of-2 test alone, and do NOT let the library refuse it: the families test of the pre-claim rule
+    # builds the library class at every patch and side and holds this function equal to what it can build.
+    if patch_size < 2:
+        return (
+            "is below 2: the encoder is a stack of stride-2 convolutions and a patch of 1 would leave it none (its first residual block "
+            "would add the 3-channel image to a hidden_channels-wide tensor), so one code describes a cell of at least 2 x 2 pixels"
+        )
     if patch_size & (patch_size - 1):
         return (
             "is not a power of 2: the encoder is a stack of stride-2 convolutions, so one code can only describe a cell "
@@ -201,7 +211,7 @@ def check_geometry(patch_size: Any, image_size: Any, num_embeddings: Any, *, flo
     if reason is not None:
         raise ConfigError(
             f"Invalid value for 'data.patch_size': {patch_size!r} {reason} (transform_args.image_size is {image_size!r}); the "
-            "patch must be a power of 2 that divides the image side"
+            "patch must be a power of 2, at least 2, that divides the image side"
         )
     if not is_count(num_embeddings):
         raise ConfigError(

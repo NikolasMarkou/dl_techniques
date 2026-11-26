@@ -374,8 +374,17 @@ def test_the_classification_section_and_the_init_pairs_state_the_numbers_of_the_
     keys = text[text.index("<!-- keys-of: text_classification -->"):][:2500]  # the section's own table and its next paragraphs
     assert f"`debug_args.smoke` sets {SMOKE_MAX_SAMPLES} when null" in keys and text_args.CLASS_NAMES == ("neg", "pos")
     pairs = sum(len(spec.transfer.sources) for spec in registry.MODELS.values() if spec.transfer)
-    words = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    words = {1: "one", 2: "two", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
     assert f"are the {words[pairs]} declared cross-task pairs" in text, "the init section counts the pairs the families declare"
+    # Review pass 1, N1: "Those four, the two pretrain pairs below and that language-model pair" counts the declared pairs by the task of their SOURCE, derived here;
+    # the tokenizer takes no cross-task pair (an earlier run of its own task only), so its sentence comes after the count and is no part of it.
+    by_source = [task for spec in registry.MODELS.values() if spec.transfer for (task, _family) in spec.transfer.sources]
+    earlier = [task for task in by_source if task not in ("pretrain", "language_model_pretraining")]
+    assert f"Those {words[len(earlier)]}, the {words[by_source.count('pretrain')]} pretrain pairs below and that language-model pair are the {words[pairs]} declared" in text
+    assert by_source.count("language_model_pretraining") == 1 and len(earlier) + by_source.count("pretrain") + 1 == pairs
+    assert registry.MODELS["vq_vae_rotation"].transfer.sources == {}, "a tokenizer run takes no cross-task source"
+    assert text.index(f"are the {words[pairs]} declared cross-task pairs") < text.index("which `init` refuses by policy (see `beit_tokenizer`)")
+    assert "at its own size and at 64 px" not in text, "the 64 px copy is the engine's census with the refusal bypassed, not something `init` does"
     # review pass 2, concern 6: the recipe sentence says what the notice says the bar is, the guesser percentages are the exact binomial's
     # (IMDB: 1,256 of 2,498 selection rows, the bar and the bare share) in the README and in text_run, and both keys rows name the fallback
     from scipy.stats import binom
@@ -400,8 +409,10 @@ def test_the_tokenizer_section_states_the_numbers_of_the_code(world):
     from train.api import recipes, tokenizer_args, tokenizer_models as tm
     from train.api.errors import ConfigError
     from train.api.pretrain_args import GEOMETRY
-    from train.common import pretrain_run
+    from train.common import pretrain_run, tokenizer_data as td
     from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
+
+    from .test_common_tokenizer_data import cell_index_codes, with_image_wide_bits
 
     text = " ".join(README.read_text().split())
     start = text.index("**`beit_tokenizer`** (plan fa94f59c")
@@ -423,17 +434,30 @@ def test_the_tokenizer_section_states_the_numbers_of_the_code(world):
     selection = round(DEFAULT_VALIDATION_SPLIT * get_spec("cifar10").train_size)
     batches = -(-selection // tm.BATCH_SIZE)
     assert f"is at least the floor of {floor:g} effective codes" in section
+    # Review pass 1, W3: the second floor and the three controls that show why the pooled one is not enough (derived from the function, never typed)
+    alone, one, two = (td.per_cell_usage(codes).perplexity for codes in (cell_index_codes(64), with_image_wide_bits(1), with_image_wide_bits(2)))
+    assert f"is at least {td.MIN_PER_CELL_PERPLEXITY:g} (`tokenizer_data.MIN_PER_CELL_PERPLEXITY`)" in section
+    assert f"worth {alone:g} per cell, the cell index plus one image-wide bit {one:g} and two bits {two:g}" in section
+    assert f"a code that is the cell index and nothing else, whatever the image, has a pooled perplexity of exactly {cells} and meets it" in section
     assert f"({forecast_run.tie_band(batches)} at the {batches} selection batches of CIFAR-10 at the defaults)" in section
     assert f"({selection:,} rows of seed 42)" in section and f"({selection:,} images x {cells} cells = {selection * cells:,} positions)" in section
     refusals = []
     for call in (lambda: registry.parse_model_name("vit/vit_pico", task=tm.TASK),
                  lambda: tokenizer_args.check_geometry(3, side, codes, floor=floor, smoke=False),
+                 lambda: tokenizer_args.check_geometry(1, side, codes, floor=floor, smoke=False),
                  lambda: tokenizer_args.check_geometry(patch, side, 32, floor=floor, smoke=False)):
         with pytest.raises(ConfigError) as caught:
             call()
         refusals.append(str(caught.value))
-    refusals.append(tm.problems_of({"kmeans_init": True})[0])
-    assert len(refusals) == 4 and all(f"`{message}`" in section for message in refusals), refusals
+    refusals += [tm.problems_of({"kmeans_init": True})[0], tm.problems_of({"hidden_channels": 0})[0]]
+    assert len(refusals) == 6 and all(f"`{message}`" in section for message in refusals), refusals
+    # Review pass 1, W2: the `init` refusal of another image size is the row's own sentence (the weights would copy), quoted whole
+    from train.api import init_from
+
+    source = {"channels": 3, "input_size": [side, side], "patch_size": patch, "num_embeddings": codes}
+    with pytest.raises(ConfigError) as caught:
+        init_from._check_identity(tm.FAMILY, tm.TASK, registry.MODELS[tm.FAMILY].transfer, source, {**source, "input_size": [2 * side, 2 * side]})
+    assert f"`{caught.value}`" in section and "sizes its weights by transform_args.image_size" not in section
     # the file `beit_mim` takes is best_model.keras: the checkpoint is selected on the reconstruction alone, so it holds the epoch the verdict judged (D-006)
     assert "**`best_model.keras` is the file `beit_mim` takes.**" in section and "so give it `best_model.keras`" in section and "the last epoch's" in section
 

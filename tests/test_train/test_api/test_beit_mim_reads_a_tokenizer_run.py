@@ -117,6 +117,23 @@ def test_every_difference_is_named_at_once(world, tmp_path):
     assert "the input mean" not in message, "only what differs is named"
 
 
+def test_a_file_named_through_a_symlink_is_checked_against_the_record_of_the_run_it_points_into(world, tmp_path, monkeypatch):
+    # Review pass 1, N2: the sibling was read from the directory of the path AS GIVEN, so a symlink in another directory found no record and the
+    # statistics of the tokenizer were checked nowhere. The sibling is read from the RESOLVED path. The copy has no record to find: no check.
+    real = stand_in(tmp_path / "tok", **{"data.patch_size": 8})
+    (tmp_path / "elsewhere").mkdir()
+    link = tmp_path / "elsewhere" / "link.keras"
+    link.symlink_to(real)
+    message = refusal(tmp_path / "run", str(link))
+    assert str(link) in message and str(Path(real).parent) in message, "the file as given and the tokenizer run it points into are named"
+    assert "data.patch_size 8" in message and "data.patch_size 4" in message
+    named_directly = refusal(tmp_path / "direct", real)
+    assert "data.patch_size 8" in named_directly, "the control: the same file named directly is refused"
+    copy = tmp_path / "elsewhere" / "copy.keras"
+    copy.write_bytes(Path(real).read_bytes())
+    reaches_the_claim(monkeypatch, tmp_path / "copied", str(copy))  # a copy has no sibling: the README says no sibling means no check
+
+
 def test_the_command_line_exits_2_and_claims_nothing(world, tmp_path, capsys):
     path = stand_in(tmp_path / "tok", **{"data.patch_size": 8})
     out = tmp_path / "run"

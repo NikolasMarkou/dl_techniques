@@ -466,6 +466,97 @@ def test_checked_tokenizer_usage_raises_the_message_it_always_raised_apart_from_
 
 
 # ---------------------------------------------------------------------
+# 4b. the per-cell floor: what a pooled perplexity cannot tell (review pass 1, W3)
+# ---------------------------------------------------------------------
+#
+# CIFAR-10 at 32 px and patch 4 has 8 x 8 = 64 cells, exactly the pooled floor: a code that is the CELL INDEX alone, ignoring the image,
+# has a pooled perplexity of exactly 64 and meets it. The per-cell perplexity, exp of the mean over the cells of H(code | cell), is 1 for it.
+
+
+def cell_index_codes(images: int, rows: int = 8, columns: int = 8) -> np.ndarray:
+    """The code grid of a tokenizer whose code is the cell index alone, whatever the image: ``(images, rows, columns)``."""
+    return np.broadcast_to(np.arange(rows * columns).reshape(1, rows, columns), (images, rows, columns)).copy()
+
+
+def with_image_wide_bits(bits: int, images: int = 64, rows: int = 8, columns: int = 8) -> np.ndarray:
+    """Cell index plus an image-wide class of ``2 ** bits`` equally used values, the same at every cell: a code of ``cells * 2 ** bits`` values."""
+    label = (np.arange(images) * 2 ** bits) // images
+    return cell_index_codes(images, rows, columns) + rows * columns * label.reshape(images, 1, 1)
+
+
+def loop_per_cell_perplexity(codes: np.ndarray) -> float:
+    """exp of the mean over cells of H(code | cell), written with a loop and a dict per cell (no code shared with the module)."""
+    images, rows, columns = codes.shape
+    entropies = []
+    for row in range(rows):
+        for column in range(columns):
+            counts: Dict[int, int] = {}
+            for code in codes[:, row, column]:
+                counts[int(code)] = counts.get(int(code), 0) + 1
+            entropies.append(-sum(k / images * math.log(k / images) for k in counts.values()))
+    return math.exp(sum(entropies) / len(entropies))
+
+
+def test_a_code_that_is_the_cell_index_alone_meets_the_pooled_floor_and_is_worth_one_code_per_cell():
+    codes = cell_index_codes(40)
+    pooled = tokenizer_usage(codes)
+    assert pooled.distinct == 64 and usage_meets_floor(pooled) is True, "the control: the pooled floor calls this code a 64-code tokenizer"
+    usage = td.per_cell_usage(codes)
+    assert (usage.cells, usage.images) == (64, 40) and usage.entropy == 0.0 and usage.perplexity == 1.0
+    assert td.per_cell_meets_floor(usage) is False
+
+
+@pytest.mark.parametrize("bits, meets", [(0, False), (1, False), (2, False), (3, True), (4, True)])
+def test_position_plus_image_wide_bits_is_worth_two_to_the_bits_per_cell_and_the_floor_wants_three(bits, meets):
+    codes = with_image_wide_bits(bits)
+    pooled, usage = tokenizer_usage(codes), td.per_cell_usage(codes)
+    assert usage_meets_floor(pooled) is True, f"{bits} bits: a pooled perplexity of {pooled.perplexity:.1f} meets the pooled floor whatever the bits are"
+    assert usage.perplexity == pytest.approx(2.0 ** bits, rel=1e-12) and pooled.perplexity == pytest.approx(64 * 2.0 ** bits, rel=1e-12)
+    assert td.per_cell_meets_floor(usage) is meets
+
+
+def test_codes_that_describe_content_are_worth_the_same_pooled_and_per_cell():
+    # Every cell sees each of 16 codes four times, whatever the cell: nothing about the code is positional.
+    images, rows, columns = 64, 3, 5
+    codes = (np.arange(images).reshape(images, 1, 1) + 3 * np.arange(rows).reshape(1, rows, 1) + 5 * np.arange(columns).reshape(1, 1, columns)) % 16
+    assert td.per_cell_usage(codes).perplexity == pytest.approx(16.0, rel=1e-12) == pytest.approx(tokenizer_usage(codes).perplexity, rel=1e-12)
+
+
+def test_the_per_cell_usage_equals_a_loop_over_the_cells_on_random_codes():
+    codes = np.random.default_rng(0).integers(0, 7, size=(50, 3, 4))
+    usage = td.per_cell_usage(codes)
+    assert usage.perplexity == pytest.approx(loop_per_cell_perplexity(codes), rel=1e-12) and math.exp(usage.entropy) == usage.perplexity
+    assert usage.perplexity < tokenizer_usage(codes).perplexity < 7.0 + 1e-9, "per cell is below the pooled perplexity, which is below the codebook"
+    assert usage.as_dict() == {"cells": 12, "images": 50, "entropy": usage.entropy, "perplexity": usage.perplexity}
+
+
+@pytest.mark.parametrize("bad", [np.zeros((4, 8)), np.zeros((0, 8, 8), np.int64), np.zeros((4, 8, 8)), -np.ones((4, 2, 2), np.int64)],
+                         ids=["not a grid", "no image", "floats", "a negative id"])
+def test_a_per_cell_usage_of_something_that_is_not_a_grid_of_code_ids_is_refused(bad):
+    with pytest.raises(ValueError):
+        td.per_cell_usage(bad)
+
+
+def test_the_per_cell_floor_is_eight_and_is_read_when_it_is_called(monkeypatch):
+    assert td.MIN_PER_CELL_PERPLEXITY == 8.0, "D-067: derived from the measured arms and the positional controls, not typed twice"
+
+    def label_only(classes: int) -> "td.CellUsage":  # an image-wide label of `classes` equally used values at every cell, nothing positional
+        label = (np.arange(8 * classes) * classes) // (8 * classes)
+        return td.per_cell_usage(np.broadcast_to(label.reshape(-1, 1, 1), (8 * classes, 8, 8)).copy())
+
+    seven, eight = label_only(7), label_only(8)
+    assert (seven.perplexity, eight.perplexity) == (pytest.approx(7.0, rel=1e-12), pytest.approx(8.0, rel=1e-12))
+    assert td.per_cell_meets_floor(eight) is True, "exactly the floor meets it (judged on the entropy, as the pooled floor is)"
+    assert td.per_cell_meets_floor(seven) is False
+    one_bit = td.per_cell_usage(with_image_wide_bits(1))
+    monkeypatch.setattr(td, "MIN_PER_CELL_PERPLEXITY", 2.0)  # what a toy-run test may do
+    assert td.per_cell_meets_floor(one_bit) is True and td.per_cell_meets_floor(seven) is True
+    monkeypatch.setattr(td, "MIN_PER_CELL_PERPLEXITY", 16.0)
+    assert td.per_cell_meets_floor(eight) is False
+    assert usage_meets_floor(tokenizer_usage(with_image_wide_bits(0))) is True, "the pooled floor is untouched by it"
+
+
+# ---------------------------------------------------------------------
 # 5. the epoch-zero key
 # ---------------------------------------------------------------------
 

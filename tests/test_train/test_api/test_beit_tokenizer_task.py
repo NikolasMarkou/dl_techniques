@@ -11,6 +11,8 @@ model, a collapsed codebook or a tokenizer that meets one part could meet is vac
   have called some of them a success, which the test counts.
 * **A codebook of one live code** (an encoder that cannot tell two images apart) misses on the perplexity although its reconstruction
   clears the bar it is given.
+* **A code that is the cell index alone** (an encoder that ignores the image) has the floor's POOLED perplexity exactly at the default
+  geometry (8 x 8 cells, 64 codes) and misses on the PER-CELL one (review pass 1, W3).
 * **A tokenizer that reconstructs but whose perplexity is under the real floor** misses, and the SAME training meets the bar under a floor
   patched to what a toy can reach (the patch is made only where a run is meant to pass).
 * **The usage is the best weights'**: a run whose best epoch is not its last, the last being sabotaged into one code, reports the usage
@@ -23,6 +25,8 @@ the reload of the best checkpoint within ``WEIGHT_MISMATCH_TOLERANCE``, the file
 """
 
 import json
+import logging
+import math
 import os
 import subprocess
 import sys
@@ -50,8 +54,8 @@ from train.common.tokenizer_data import ConstantImageBaseline
 
 from .test_cli_help_allocates_nothing import FORBIDDEN as HEAVY  # the list the help path is held to: one definition
 from ._tokenizer_world import (
-    BATCH, CIFAR_CACHE, EPOCHS, LOW_FLOOR, MAX_SAMPLES, MODEL, NO_CIFAR, TINY_MODEL_ARGS, constant_model, csv_column, prepared,
-    read_json, request, world,  # noqa: F401  (``world`` is a fixture)
+    BATCH, CIFAR_CACHE, EPOCHS, LOW_FLOOR, MAX_SAMPLES, MODEL, NO_CIFAR, TINY_MODEL_ARGS, constant_model, csv_column, positional_model,
+    prepared, read_json, request, world,  # noqa: F401  (``world`` is a fixture)
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -66,11 +70,16 @@ def usage_of(codes: int) -> TokenizerUsage:
     return tokenizer_usage(np.repeat(np.arange(codes), 4))
 
 
-def bare_trainer(*, select_batches: int = 5, perplexity: int = 100) -> BeitTokenizerTrainer:
+def cell_usage_of(perplexity: float) -> "td.CellUsage":
+    """A per-cell usage worth ``perplexity`` effective codes per cell (the entropy is its log: the floor is judged on the entropy)."""
+    return td.CellUsage(cells=POSITIONS_PER_IMAGE, images=100, entropy=math.log(perplexity), perplexity=perplexity)
+
+
+def bare_trainer(*, select_batches: int = 5, perplexity: int = 100, per_cell: float = 100.0) -> BeitTokenizerTrainer:
     """A trainer with no config and the state ``evaluate_and_report`` leaves (``object.__new__``: the constructor needs a config)."""
     trainer = object.__new__(BeitTokenizerTrainer)
     trainer.config = None
-    trainer._select_batches, trainer._usage = select_batches, usage_of(perplexity)
+    trainer._select_batches, trainer._usage, trainer._cell_usage = select_batches, usage_of(perplexity), cell_usage_of(per_cell)
     return trainer
 
 
@@ -151,13 +160,17 @@ def test_the_task_row_and_the_family_row_are_registered_and_resolve(world):
 
 
 @pytest.mark.parametrize(
-    "reached, perplexity, met",
-    [(0.5, 100, True), (0.5, 10, False), (1.5, 100, False), (1.5, 10, False)],
-    ids=["both parts", "reconstructs, codebook under the floor", "codebook at the floor, no reconstruction", "neither"],
+    "reached, perplexity, per_cell, met",
+    [(0.5, 100, 100, True), (0.5, 10, 100, False), (1.5, 100, 100, False), (1.5, 10, 100, False),
+     (0.5, 64, 1, False), (0.5, 128, 2, False), (0.5, 512, 7.9, False), (0.5, 64, 8, True)],
+    ids=["both parts", "reconstructs, codebook under the floor", "codebook at the floor, no reconstruction", "neither",
+         "the cell index alone: pooled 64, per cell 1", "cell index plus a bit: pooled 128, per cell 2", "just under the per-cell floor",
+         "exactly both floors"],
 )
-def test_the_bar_needs_both_parts(reached, perplexity, met):
+def test_the_bar_needs_both_parts(reached, perplexity, per_cell, met):  # the codebook part is two floors, pooled and per cell (D-067)
     assert pretrain_run.MIN_TOKENIZER_PERPLEXITY == 64.0, "the real floor: 100 meets it and 10 does not"
-    assert bare_trainer(perplexity=perplexity).bar_is_met(None, reached, 1.0) is met
+    assert td.MIN_PER_CELL_PERPLEXITY == 8.0, "the real per-cell floor: 8 meets it and 7.9 does not"
+    assert bare_trainer(perplexity=perplexity, per_cell=per_cell).bar_is_met(None, reached, 1.0) is met
 
 
 def test_exactly_the_floor_meets_it_through_the_one_definition_of_the_floor():
@@ -198,6 +211,17 @@ def test_the_value_is_the_minimum_of_the_reconstruction_loss_of_the_window_and_n
     assert trainer.success_value({"val_reconstruction_loss": [0.9, 0.8, 0.2]}) == 0.2, "the minimum, wherever it falls"
 
 
+def test_a_nan_epoch_is_never_a_success_and_a_later_nan_does_not_move_the_minimum():
+    # Review pass 1 (blind spot): Python's `min` keeps a LEADING NaN, so a first epoch whose val_reconstruction_loss is NaN gives a NaN value and the run misses
+    # even if a later epoch is good; that is the safe direction (a comparison with NaN is False, so a NaN is never beaten and never beats the bar). A NaN LATER
+    # in the window does not move the minimum. The sequence refuses a non-finite initial loss and names a non-finite monitor in the summary, so this is the
+    # verdict's own behaviour and not the only guard.
+    trainer = bare_trainer()
+    assert math.isnan(trainer.success_value({"val_reconstruction_loss": [float("nan"), 0.3, 0.2]}))
+    assert trainer.success_value({"val_reconstruction_loss": [0.3, float("nan"), 0.2]}) == 0.2
+    assert trainer.bar_is_met(None, float("nan"), 1.0) is False and trainer.bar_is_met(None, 0.2, float("nan")) is False
+
+
 def test_the_value_ignores_the_epochs_before_the_selection_start():
     class Windowed(BeitTokenizerTrainer):
         def selection_start_epoch(self, config):
@@ -223,9 +247,10 @@ def test_the_threshold_is_the_smaller_of_the_baseline_and_the_epoch_zero_loss_an
         trainer.success_threshold(None)
 
 
-def test_the_bar_asked_before_the_codebook_is_judged_is_refused_by_name():
+@pytest.mark.parametrize("missing", ["_usage", "_cell_usage"])
+def test_the_bar_asked_before_the_codebook_is_judged_is_refused_by_name(missing):
     trainer = bare_trainer()
-    trainer._usage = None
+    setattr(trainer, missing, None)
     with pytest.raises(RuntimeError, match="codebook"):
         trainer.bar_is_met(None, 0.5, 1.0)
 
@@ -270,6 +295,21 @@ def test_a_selection_split_too_small_to_show_the_floor_is_refused_by_name_after_
     # a smoke run applies no bar, so the same small split is not refused
     trainer, resolved, context = prepared(tmp_path / "smoke", epochs="auto", **changes, **{"debug_args.smoke": True})
     assert trainer.build_data(resolved, context).n_select == data.n_select
+
+
+def test_a_selection_split_with_fewer_images_than_the_per_cell_floor_is_named_in_a_warning_and_the_run_goes_on(world, cifar, tmp_path, caplog):
+    # 70 rows select 7 images: 7 x 64 = 448 positions pass the pooled check, but a perplexity counted PER CELL over 7 images is at most 7, under the
+    # per-cell floor of 8, so the run can only miss (review pass 1, W3). It is a WARNING and not a refusal: the resume tests train on six images and
+    # their data may not change. A smoke run applies no bar and says nothing.
+    caplog.set_level(logging.WARNING, logger="dl")
+    trainer, resolved, context = prepared(tmp_path / "run", **{"data": {"dataset": "cifar10", "max_samples": 70}})
+    assert trainer.build_data(resolved, context).n_select == 7
+    said = [record.getMessage() for record in caplog.records if "per-cell floor" in record.getMessage()]
+    assert len(said) == 1 and "7 images" in said[0] and "at most 7" in said[0] and "cannot meet the bar" in said[0] and "data.max_samples" in said[0], said
+    caplog.clear()
+    trainer, resolved, context = prepared(tmp_path / "smoke", **{"data": {"dataset": "cifar10", "max_samples": 70}, "debug_args.smoke": True})
+    assert trainer.build_data(resolved, context).n_select == 7
+    assert not [record for record in caplog.records if "per-cell floor" in record.getMessage()], "a smoke run applies no bar"
 
 
 def test_eight_compiled_constant_models_are_not_called_a_success_though_a_bare_compare_would_call_some(world, cifar, capsys):
@@ -339,6 +379,13 @@ class OneCodeTrainer(BeitTokenizerTrainer):
         return model
 
 
+class PositionalTrainer(BeitTokenizerTrainer):
+    """The real task whose code is the cell index alone, the image ignored: at 8 x 8 cells its pooled perplexity is exactly the floor's 64."""
+
+    def build_model(self, config, context, data):
+        return positional_model(size=data.input_shape[0], patch=config.data.patch_size, dim=config.model_args["embedding_dim"])
+
+
 class WreckedTrainer(BeitTokenizerTrainer):
     """The real task whose LAST epoch is wrecked (the codebook collapses to one code at its start): the best epoch is not the last."""
 
@@ -360,7 +407,8 @@ def steps_between(a: float, b: float) -> float:
 
 @pytest.fixture(scope="module")
 def runs(world, cifar, tmp_path_factory):
-    """Six real tiny runs: the command line twice (the floor patched, and not), a constant model, one live code, a wrecked last epoch, a smoke run."""
+    """Seven real tiny runs: the command line twice (the floor patched, and not), a constant model, one live code, a code that is the cell
+    index alone, a wrecked last epoch, a smoke run."""
     from train.api import cli
 
     root = tmp_path_factory.mktemp("tokenizer_runs")
@@ -385,6 +433,11 @@ def runs(world, cifar, tmp_path_factory):
         patch.setattr(td, "constant_image_baseline", lambda ds: ConstantImageBaseline(td.MEAN_IMAGE, HUGE, HUGE, HUGE))
         done["one_code"] = OneCodeTrainer(config_of(root / "one_code")).run()
     with pytest.MonkeyPatch.context() as patch:
+        # As the one-live-code run: the image part is given a threshold it clears, so only the codebook can miss. NO floor is patched: the real
+        # pooled floor of 64 is exactly this code's pooled perplexity (64 cells, 64 codes), and the real per-cell floor is what must refuse it.
+        patch.setattr(td, "constant_image_baseline", lambda ds: ConstantImageBaseline(td.MEAN_IMAGE, HUGE, HUGE, HUGE))
+        done["positional"] = PositionalTrainer(config_of(root / "positional")).run()
+    with pytest.MonkeyPatch.context() as patch:
         patch.setattr(pretrain_run, "MIN_TOKENIZER_PERPLEXITY", LOW_FLOOR)
         done["wrecked"] = WreckedTrainer(config_of(root / "wrecked", epochs=3)).run()
     done["smoke"] = train_beit_tokenizer(
@@ -405,11 +458,17 @@ def usage_of_file(path: Path, request_mapping: Dict[str, Any]) -> Dict[str, floa
     selection = td.load_tokenizer_batches(
         dataset=data["dataset"], image_size=32, batch_size=request_mapping["batch_size"], seed=request_mapping.get("seed", 42),
         stream_seed=None, validation_split=None, max_samples=data["max_samples"], augment=False)
-    ids = np.concatenate([np.asarray(model.encode_to_indices(batch[0])) for batch in selection.select_ds]).reshape(-1)
+    grid = np.concatenate([np.asarray(model.encode_to_indices(batch[0])) for batch in selection.select_ds])
+    ids = grid.reshape(-1)
     share = np.bincount(ids) / ids.size
     share = share[share > 0]
+    cell_entropies = []
+    for column in grid.reshape(len(grid), -1).T:  # one cell at a time: the codes it gives to every selection image
+        cell_share = np.bincount(column) / len(column)
+        cell_share = cell_share[cell_share > 0]
+        cell_entropies.append(-(cell_share * np.log(cell_share)).sum())
     return {"positions": int(ids.size), "distinct": int(len(share)), "perplexity": float(np.exp(-(share * np.log(share)).sum())),
-            "top1_share": float(share.max())}
+            "top1_share": float(share.max()), "per_cell_perplexity": float(np.exp(np.mean(cell_entropies)))}
 
 
 def test_a_tiny_run_through_the_command_line_meets_both_parts_and_exits_zero(runs):
@@ -419,6 +478,10 @@ def test_a_tiny_run_through_the_command_line_meets_both_parts_and_exits_zero(run
     assert summary["codebook_usage"]["meets_floor"] is True and summary["codebook_usage"]["floor"] == LOW_FLOOR
     assert summary["success_value"] < summary["success_threshold"], "the reconstruction part: strictly below"
     assert summary["codebook_usage"]["perplexity"] >= summary["codebook_usage"]["floor"], "the codebook part"
+    # The per-cell floor is the REAL one here (nothing patches it): the toy's codes reach it (15.6 per cell against 8), reported beside the pooled one.
+    usage = summary["codebook_usage"]
+    assert usage["per_cell_floor"] == td.MIN_PER_CELL_PERPLEXITY == 8.0 and usage["per_cell_meets_floor"] is True
+    assert usage["per_cell_perplexity"] >= usage["per_cell_floor"] and usage["per_cell_perplexity"] <= usage["perplexity"] + 1e-9
     assert summary["epochs_run"] == EPOCHS and summary["steps_per_epoch"] == 45 and summary["n_val"] == MAX_SAMPLES // 10
 
 
@@ -449,7 +512,8 @@ def test_the_summary_names_both_parts_the_baseline_the_epoch_zero_term_and_the_w
     assert summary["reconstruction"] == {
         "success_value": summary["success_value"], "success_threshold": summary["success_threshold"],
         "tie_band_float32_steps": tie_band(MAX_SAMPLES // 10 // BATCH), "beats_bar": True}
-    assert summary["success"] is bool(summary["reconstruction"]["beats_bar"] and summary["codebook_usage"]["meets_floor"])
+    usage = summary["codebook_usage"]
+    assert summary["success"] is bool(summary["reconstruction"]["beats_bar"] and usage["meets_floor"] and usage["per_cell_meets_floor"])
     assert any("both parts" in note for note in summary["notes"]), "the notes say the bar has two parts"
 
 
@@ -461,6 +525,8 @@ def test_the_codebook_usage_is_the_best_weights_over_every_selection_position_re
     assert block["distinct"] == independent["distinct"] and block["num_embeddings"] == TINY_MODEL_ARGS["num_embeddings"]
     assert block["perplexity"] == pytest.approx(independent["perplexity"], rel=1e-5)
     assert block["top1_share"] == pytest.approx(independent["top1_share"], rel=1e-5) and 1.0 < block["perplexity"] <= block["num_embeddings"]
+    assert block["per_cell_perplexity"] == pytest.approx(independent["per_cell_perplexity"], rel=1e-5), "the per-cell number, cell by cell, from the file"
+    assert block["per_cell_entropy"] == pytest.approx(math.log(block["per_cell_perplexity"]), rel=1e-9)
 
 
 def test_the_best_checkpoint_reloads_within_the_tolerance_and_the_files_beit_mim_reads_are_written(runs):
@@ -501,6 +567,25 @@ def test_a_codebook_of_one_live_code_misses_on_the_perplexity_though_its_reconst
     assert usage["meets_floor"] is False and usage["floor"] == 64.0 and usage["positions"] == (MAX_SAMPLES // 10) * POSITIONS_PER_IMAGE
 
 
+def test_a_tokenizer_whose_code_is_the_cell_index_alone_misses_though_its_pooled_perplexity_meets_the_floor(runs):
+    # Review pass 1, W3: at 32 px and patch 4 there are 8 x 8 = 64 cells, so a code that ignores the image has a pooled perplexity of exactly the
+    # floor (64) and the pooled floor called it a tokenizer; part 1 asks only for the constant image, which the threshold below is made to clear.
+    summary = summary_of(runs, "positional")
+    usage = summary["codebook_usage"]
+    assert usage["distinct"] == 64 and usage["perplexity"] == pytest.approx(64.0, abs=1e-9) and usage["floor"] == 64.0
+    assert usage["meets_floor"] is True, "the control: the pooled floor of the real recipe is met by this code, to the digit"
+    assert summary["reconstruction"]["beats_bar"] is True, "the image part is given a threshold it clears: only the codebook can miss"
+    assert runs.positional.success is False and summary["success"] is False, "the bar called a code that is the cell index alone a tokenizer"
+    assert usage["per_cell_perplexity"] == pytest.approx(1.0, abs=1e-9) and usage["per_cell_meets_floor"] is False
+    assert usage["per_cell_floor"] == td.MIN_PER_CELL_PERPLEXITY == 8.0
+    # The control is what it says: the codes of the saved best weights are the cell index at every cell of every selection image.
+    model = keras.models.load_model(str(runs.root / "positional" / "best_model.keras"))
+    codes = td.code_ids_of(model, td.load_tokenizer_batches(
+        dataset="cifar10", image_size=32, batch_size=BATCH, seed=42, stream_seed=None, validation_split=None, max_samples=MAX_SAMPLES,
+        augment=False).select_ds)
+    assert (codes == np.arange(POSITIONS_PER_IMAGE).reshape(1, GRID, GRID)).all()
+
+
 def test_a_best_epoch_that_is_not_the_last_reports_the_best_weights_usage_and_not_the_last_ones(runs):
     summary = summary_of(runs, "wrecked")
     assert summary["selection"]["final_is_best"] is False and summary["best_epoch"] < summary["epochs_run"] == 3
@@ -534,11 +619,13 @@ CHEAP = {"data.max_samples": "64", "epochs": "1", "batch_size": "8", "analysis_a
 REFUSALS = [
     (["data.patch_size=5"], "data.patch_size", "power of 2"),
     (["data.patch_size=3"], "data.patch_size", "power of 2"),
+    (["data.patch_size=1"], "data.patch_size", "below 2"),
     (["data.patch_size=64"], "data.patch_size", "does not divide"),
     (["transform_args.image_size=34"], "data.patch_size", "does not divide"),
     (['model_args={"bogus":1}'], "model_args.bogus", "Unknown key"),
     (['model_args={"kmeans_init":true}'], "model_args.kmeans_init", "not offered"),
     (['model_args={"num_embeddings":32}'], "model_args.num_embeddings", "64"),
+    (['model_args={"hidden_channels":0}'], "model_args.hidden_channels", "positive int"),
     (['model_args={"downsample_factor":2}'], "model_args.downsample_factor", "data.patch_size"),
     (["precision=mixed_float16"], "precision", "float32"),
     (["metric_args.watch_metric=val_loss"], "metric_args.watch_metric", "val_reconstruction_loss"),

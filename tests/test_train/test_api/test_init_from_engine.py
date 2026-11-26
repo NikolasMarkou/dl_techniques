@@ -400,6 +400,15 @@ def test_a_positional_component_is_one_top_level_name():
         TransferSpec(positional=("cell/rnn",))
 
 
+def test_a_key_held_by_policy_is_a_fixed_key_with_a_reason():
+    # Review pass 1, W2: a fixed key whose refusal is the task's choice (the weights would copy) carries its own reason; one that is not fixed,
+    # or has no reason, is a row that says nothing the engine can use.
+    assert TransferSpec(fixed=("input_size",), policy={"input_size": "the grid"}).policy == {"input_size": "the grid"}
+    for policy in ({"input_size": "the grid"}, {"channels": ""}):
+        with pytest.raises(ValueError, match="policy"):
+            TransferSpec(fixed=("channels",), policy=policy)
+
+
 # --- resample ------------------------------------------------------------------------------------
 
 

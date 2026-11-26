@@ -39,7 +39,8 @@ Interface contract
         ``kernel_regularizer``.
 
 ``problems_of(model_args)``
-    :return: one line per refusal of ``model_args`` (``[]`` for none). Pure.
+    :return: one line per refusal of ``model_args`` (``[]`` for none): a key that is not offered, and a value of an offered key that the
+        library constructor would reject after the claim (:data:`VALUE_RULES`). Pure.
 
 ``factory_signatures()`` / ``signature_census(signatures=None)``
     The denoising pattern: the census returns ``{"unclassified": [...], "stale": [...]}``, the parameters of the constructor in
@@ -74,7 +75,7 @@ Import rule
 Module scope imports the standard library and ``train.api`` only.
 """
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import recipes
 from .args import AutoContext, OptimArgs, is_count
@@ -138,6 +139,20 @@ REFUSED: Dict[str, str] = {
     "norm_type": f"{_UNMEASURED} with another normalization (the library's is the start the recipe was run with)",
 }
 
+# DECISION plan-2026-11-25T124419-fa94f59c/D-065
+# The VALUES of the keys offered above are checked before the claim too: the library constructor rejects a width, an embedding size or a
+# commitment cost it cannot build (`positive_int`, a non-negative cost) and a non-int count of blocks, and without these rules the request
+# claimed `out` and then failed as "Invalid argument for the model factory". The rules are what the library rejects and no more (a count of
+# 0 blocks and a cost of 0 build, so they pass); `families` builds the library with every rejected value as the control. The codebook
+# size is `tokenizer_args.check_geometry`'s: it also holds the floor of the bar. Do NOT add a rule the library would accept.
+#: ``{key: (accepts, what the message says is expected)}``.
+VALUE_RULES: Dict[str, Tuple[Callable[[Any], bool], str]] = {
+    "hidden_channels": (is_count, "a positive int"),
+    "embedding_dim": (is_count, "a positive int"),
+    "num_res_blocks": (lambda value: isinstance(value, int), "an int"),
+    "commitment_cost": (lambda value: isinstance(value, (int, float)) and value >= 0, "a number of at least 0"),
+}
+
 #: Keywords the task or the API passes to the adapter itself: ``{key: why}``. Naming one in ``model_args`` is refused.
 SUPPLIED: Dict[str, str] = {
     "variant": f"model={FAMILY}/<variant> chooses it",
@@ -160,6 +175,9 @@ def problems_of(model_args: Mapping[str, Any]) -> List[str]:
     for key, value in model_args.items():
         name = f"model_args.{key}"
         if key in ALLOWED:
+            accepts, expected = VALUE_RULES.get(key, (None, ""))
+            if accepts is not None and not accepts(value):
+                lines.append(f"Invalid value for {name!r}: expected {expected}, got {value!r}")
             continue
         if key in SUPPLIED:
             lines.append(f"Invalid value for {name!r}: {key} is set by the task ({SUPPLIED[key]}), got {value!r}")
@@ -338,6 +356,15 @@ def recipe_notices_of(dataset: str) -> List[Tuple[str, str]]:
     return notices
 
 
+#: Why `init` holds the image size to the source's although every weight would copy (the refusal's own sentence ends with it): a census test
+#: measures the claim that the weights copy. It names the one place that lifts the refusal.
+SIZE_POLICY = (
+    "a different size is a different code grid (the image size over data.patch_size), which is what a beit_mim run reads, and every weight of "
+    "this convolutional tokenizer would copy, so this is the task's choice and not a limit of the weights: it is the policy entry of the "
+    "family row in train/api/tokenizer_models.py"
+)
+
+
 def builtin_tokenizer_models() -> Tuple[ModelSpec, ...]:
     """Return the one tokenizer family spec, freshly built; see the module contract."""
     # DECISION plan-2026-11-25T124419-fa94f59c/D-031
@@ -358,10 +385,11 @@ def builtin_tokenizer_models() -> Tuple[ModelSpec, ...]:
             # `fixed` is what `init` refuses BEFORE the claim, naming both values. The input channels (the stem's kernel), the patch (the number of
             # stride-2 stages) and the codebook size (the quantizer's table) change a weight's shape, which the census holds at the weight level. The
             # image SIZE changes none (a convolutional tokenizer has no weight that depends on it: MEASURED, every weight copies from 32 px to 64 px)
-            # and is fixed by POLICY, the plan's contract being the same size; a test says so. The width, the depth and the embedding size are model
+            # and is fixed by POLICY, the plan's contract being the same size; a test says so, and `policy` (D-066) makes the refusal say so too. The width, the depth and the embedding size are model
             # keys the record does not carry, so the engine refuses them after the claim. Do NOT drop `num_embeddings` (another codebook would be
             # refused after the claim, with a run directory left claimed), and do NOT pin the architecture keys to the source's (a source of another
             # size would then be copied silently). The model has no head: the whole network is what `init` moves.
-            transfer=TransferSpec(fixed=("channels", "input_size", "patch_size", "num_embeddings")),
+            transfer=TransferSpec(
+                fixed=("channels", "input_size", "patch_size", "num_embeddings"), policy={"input_size": SIZE_POLICY}),
         ),
     )

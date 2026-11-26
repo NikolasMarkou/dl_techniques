@@ -744,7 +744,8 @@ classification task calls the same `train.common.classification_run` helpers as 
     deeper variant adds), `pinned` (factory arguments the target takes from the source's `used.model_args`, or from a source of
     another task the keys its record holds, plan 5c6cc105 D-036), `fixed` (`channels`, `lookback`, `horizon`, `input_size`,
     `patch_size`, `vocab_size`, `tokenizer`, `num_embeddings`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask` of a target
-    prefix and the dropped source head) and `positional` (top-level components whose weights pair by order, xlstm only, D-031).
+    prefix and the dropped source head), `positional` (top-level components whose weights pair by order, xlstm only, D-031) and `policy` (`{key: reason}` for the keys of `fixed` a
+    family holds although every weight would copy, the tokenizer's image size: the refusal then says "holds <key> to the source's by policy" and gives the reason, plan fa94f59c D-066).
     `transfer_reason` is gone (plan 5c6cc105 D-011), and a `None` spec, left
     to test fixtures, gets one generic refusal. `ModelSpec` does not enforce the declaration (Adapter rules above)
     (D-033): `tests/test_train/test_api/test_init_from_families.py` does, and builds each row's smallest variant (its `VARIANT`
@@ -917,13 +918,17 @@ classification task calls the same `train.common.classification_run` helpers as 
   (`TokenizerData`, `TokenizerMetricArgs`) and the geometry check; `common/tokenizer_data.py` the batches, the constant-image baseline and `TokenizerCodes`. Rules a change must
   keep: the task adds no `train_step`, no loss and no metric, because the file it saves is the `VQVAERotationTrick` that `beit_mim` loads (D-003, D-037:
   `test_the_task_compiles_no_loss_and_no_metric`, `test_the_task_adds_no_train_step_no_figure_and_no_callback`); `bar_is_met` reads both parts of the bar, each through the repo's
-  one definition (`forecast_run.beats_bar`, `pretrain_run.usage_meets_floor`), never a bare compare (D-038: `test_the_bar_needs_both_parts`,
-  `test_eight_compiled_constant_models_are_not_called_a_success_though_a_bare_compare_would_call_some`); the usage is counted once, after `fit`, on the BEST weights and before
+  one definition (`forecast_run.beats_bar`, `pretrain_run.usage_meets_floor`), never a bare compare, and the codebook part is TWO floors: the pooled one is met by a code that is the
+  cell index alone wherever the grid has 64 cells, so `tokenizer_data.per_cell_meets_floor` judges what one cell carries (D-067: `test_a_tokenizer_whose_code_is_the_cell_index_alone_misses_though_its_pooled_perplexity_meets_the_floor`;
+  D-038: `test_the_bar_needs_both_parts`,
+  `test_eight_compiled_constant_models_are_not_called_a_success_though_a_bare_compare_would_call_some`); the geometry rule checked before the claim is held equal to a real build of the
+  library class at every patch and side (D-065: `test_the_pre_claim_geometry_rule_is_exactly_what_the_library_can_build`); the usage is counted once, after `fit`, on the BEST weights and before
   `report_data_free_run` swaps the last epoch's in (D-039: `test_a_best_epoch_that_is_not_the_last_reports_the_best_weights_usage_and_not_the_last_ones`); `resume_stream` is
   the batches object's `with_stream(completed_steps)` and `resume_stream_exact` stays false (D-040: `test_resume_stream_returns_a_stream_that_is_not_the_fresh_one_and_keeps_what_the_sequence_checks`); the row's `fixed` holds the codebook size and the image size, the second by POLICY, since every
-  weight copies across sizes (D-050: `test_production_order_the_image_size_is_refused_before_the_claim_by_policy_though_every_weight_would_copy`); `served` is the registered
+  weight copies across sizes (D-050: `test_production_order_the_image_size_is_refused_before_the_claim_by_policy_though_every_weight_would_copy`), and its refusal is the row's own `policy` sentence, never the engine's "sizes its weights by"
+  (D-066: `test_a_key_held_by_policy_is_a_fixed_key_with_a_reason`); `served` is the registered
   layer `TokenizerCodes`, because a functional model over `encode_to_indices` builds and fails when it runs (D-045: `test_the_served_layer_returns_int32_grids_and_names_its_model_in_its_config`). `beit_mim` holds a tokenizer run's own `task.json` to its patch,
-  size and statistics before the claim (D-052: `test_beit_mim_reads_a_tokenizer_run.py`). Tests, in `tests/test_train/test_api/`:
+  size and statistics before the claim, reading it beside the file's resolved path (D-052, D-068: `test_beit_mim_reads_a_tokenizer_run.py`). Tests, in `tests/test_train/test_api/`:
   `test_beit_tokenizer_{task,resume,families,predictor_and_export,init}.py` and `test_common_tokenizer_data.py`, sharing `_tokenizer_world.py`. The user-facing description is in
   [`README.md`](README.md), whose gate block is empty until the gate has run.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task

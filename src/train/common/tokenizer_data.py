@@ -45,6 +45,19 @@ Interface contract
     :return: the integer code ids of EVERY image of one pass of ``select_ds``, in row order, shape ``(n, grid_h, grid_w)``.
     :raises TypeError: for a model with no ``encode_to_indices``. :raises ValueError: for an empty or an endless stream.
 
+``per_cell_usage(code_ids)``
+    :param code_ids: an integer array of shape ``(images, grid_h, grid_w)``, the output of :func:`code_ids_of` (non-negative ids).
+    :return: a :class:`CellUsage`: ``entropy``, the mean over the grid's cells of the entropy (nats) of the codes that cell gave to the
+        images, and ``perplexity``, its exp: the number of equally used codes a cell is worth on average, H(code | cell) in effective
+        codes. A code that is the cell index alone is worth exactly 1 however many cells there are, where its POOLED perplexity
+        (:func:`train.common.pretrain_data.tokenizer_usage`) is the number of cells.
+    :raises ValueError: for an array that is not a non-empty 3-D array of non-negative integers.
+
+``MIN_PER_CELL_PERPLEXITY`` / ``per_cell_meets_floor(usage)``
+    The second floor of the tokenizer's bar (D-067): 8 effective codes per cell. ``per_cell_meets_floor`` judges the ENTROPY against the
+    log of the constant read when it is called (as ``pretrain_run.usage_meets_floor`` does for the pooled floor, which this does not touch:
+    ``beit_mim`` re-judges a tokenizer file by that one).
+
 ``TokenizerCodes(model)``
     A Keras layer, the function an exported tokenizer file runs (``train.api.tokenizer_predictor.served``): ``layer(images)`` is
     ``model.encode_to_indices(images)``, the int32 code grid ``(batch, height // patch, width // patch)`` of float32 images
@@ -54,6 +67,7 @@ Interface contract
     holds it to the model's own codes in all four export formats.
 """
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Optional, Tuple
 
@@ -64,6 +78,7 @@ import tensorflow as tf
 from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
 from train.common.image_streams import load_image_streams
 from train.common.pretrain_data import derive_stream_seed, states_its_length
+from train.common.pretrain_run import ENTROPY_ROUNDING_TOLERANCE
 
 #: The two constants the baseline tries: one number per channel, and one number per pixel and channel.
 CHANNEL_MEAN, MEAN_IMAGE = "channel_mean", "mean_image"
@@ -211,6 +226,66 @@ def code_ids_of(model: Any, select_ds: "tf.data.Dataset") -> np.ndarray:
     if not parts:
         raise ValueError("the selection stream is empty: there are no images to encode")
     return np.concatenate(parts)
+
+
+# DECISION plan-2026-11-25T124419-fa94f59c/D-067
+# The codebook part of the bar has a SECOND floor, per cell, because the pooled one (`pretrain_run.MIN_TOKENIZER_PERPLEXITY`, 64) cannot tell
+# codes that describe content from codes that describe position: CIFAR-10 at 32 px and patch 4 has 8 x 8 = 64 cells, so a code that is the
+# cell index alone has a pooled perplexity of exactly 64 and meets it. MEASURED (scratch_step11): the cell index alone is worth 1.0 per
+# cell, plus one balanced image-wide bit 2.0, two bits 4.0, three bits 8.0 (2 ** bits); the trained arms of Step 2 (750 steps, 5,000
+# selection images) 36.07 and 46.53 per cell (92 and 90 percent of their pooled 39.04 and 51.73), the 2-epoch tiny run 15.6. 8 is the
+# power of two nearest the geometric mean of 2.0 (the cheapest code the review named) and 36.07 (the lowest trained value): 4x above
+# that code, 2x above two image-wide bits, 4.5x under the trained arms. Do NOT lower it to 2 (position plus one bit then meets it), do NOT
+# make it a share of the pooled perplexity or of the codebook (the number is about what one cell carries, not about the book), and do NOT
+# touch the pooled floor: `beit_mim` re-judges a tokenizer by it, and it rests on two lost tokenizers.
+#: Effective codes a cell must use, on average over the cells, for the codebook part of the bar.
+MIN_PER_CELL_PERPLEXITY = 8.0
+
+
+@dataclass(frozen=True)
+class CellUsage:
+    """How a tokenizer's codes are used WITHIN a cell, averaged over the cells of the code grid.
+
+    :param cells: positions of the grid (``grid_h * grid_w``). :param images: images counted.
+    :param entropy: nats; the mean over the cells of the entropy of that cell's code histogram. :param perplexity: ``exp(entropy)``.
+    """
+
+    cells: int
+    images: int
+    entropy: float
+    perplexity: float
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Plain numbers, for ``results_summary.json``."""
+        return asdict(self)
+
+
+def per_cell_usage(code_ids: Any) -> CellUsage:
+    """The :class:`CellUsage` of a grid of code ids ``(images, grid_h, grid_w)``; see the module contract."""
+    ids = np.asarray(code_ids)
+    if ids.ndim != 3 or ids.size == 0:
+        raise ValueError(f"code ids must be a non-empty (images, grid_h, grid_w) array, got shape {ids.shape}")
+    if ids.dtype.kind not in "iu":
+        raise ValueError(f"code ids must be integers, got dtype {ids.dtype}")
+    if ids.min() < 0:
+        raise ValueError(f"code ids must be non-negative, got a minimum of {int(ids.min())}")
+    images = ids.shape[0]
+    flat = ids.reshape(images, -1).astype(np.int64)  # (images, cells)
+    cells, book = flat.shape[1], int(flat.max()) + 1
+    # One bincount over (cell, code) pairs: the histogram of every cell at once.
+    counts = np.bincount((np.arange(cells, dtype=np.int64) * book + flat).reshape(-1), minlength=cells * book).reshape(cells, book)
+    share = counts / images
+    with np.errstate(divide="ignore", invalid="ignore"):
+        terms = np.where(share > 0, share * np.log(share), 0.0)
+    entropy = float(-terms.sum(axis=1).mean())
+    return CellUsage(cells=cells, images=images, entropy=entropy, perplexity=float(np.exp(entropy)))
+
+
+def per_cell_meets_floor(usage: CellUsage) -> bool:
+    """Whether ``usage`` reaches :data:`MIN_PER_CELL_PERPLEXITY`, judged on the entropy as the pooled floor is; see the module contract."""
+    # The constant is read HERE, at the call (a test may patch it); the comparison is on the entropy with the pooled floor's slack, because
+    # `exp(log(8))` is not exactly 8 in float64 and a code that uses exactly 8 codes per cell must meet the floor.
+    return usage.entropy >= math.log(MIN_PER_CELL_PERPLEXITY) - ENTROPY_ROUNDING_TOLERANCE
 
 
 @keras.saving.register_keras_serializable(package="train_tokenizer")

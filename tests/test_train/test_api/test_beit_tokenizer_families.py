@@ -233,7 +233,7 @@ def test_a_malformed_input_shape_is_refused(shape):
         build(shape=shape)
 
 
-@pytest.mark.parametrize("patch", [0, -4, 3, 5, 6, 4.0, True, 64])
+@pytest.mark.parametrize("patch", [0, -4, 1, 3, 5, 6, 4.0, True, 64])
 def test_a_patch_that_cannot_cut_the_image_into_code_cells_is_refused_by_name(patch):
     with pytest.raises(ValueError, match="patch_size"):
         build(patch=patch)
@@ -350,13 +350,37 @@ def test_an_unknown_key_is_refused_with_a_suggestion_and_every_refusal_is_named_
 #: Requests that must NOT be refused (the control of the rows above: a resolver that refused everything would pass them).
 ACCEPTED = [
     {}, {"num_embeddings": 64}, {"embedding_dim": 16}, {"hidden_channels": 64, "num_res_blocks": 1}, {"commitment_cost": 0.5},
-    {"use_ema": True},
+    {"use_ema": True}, {"num_res_blocks": 0}, {"commitment_cost": 0},
 ]
 
 
 @pytest.mark.parametrize("model_args", ACCEPTED, ids=["-".join(sorted(a)) or "recipe" for a in ACCEPTED])
 def test_the_keys_the_family_offers_are_not_refused(model_args):
     assert resolve(model_args=model_args) == {"num_embeddings": 512, **model_args}
+
+
+#: Values of an offered key that the library constructor rejects when it builds (W1: they were refused only AFTER the claim, by the
+#: library, as "Invalid argument for the model factory"). Each is refused before the claim, naming the key, and the library's own call is the control.
+LIBRARY_REJECTS = [
+    ("hidden_channels", 0), ("hidden_channels", -4), ("hidden_channels", 2.5), ("hidden_channels", True),
+    ("embedding_dim", 0), ("embedding_dim", 2.5), ("num_res_blocks", 2.5), ("commitment_cost", -1.0),
+]
+
+
+@pytest.mark.parametrize("key, value", LIBRARY_REJECTS, ids=[f"{key}={value!r}" for key, value in LIBRARY_REJECTS])
+def test_a_value_the_library_rejects_when_it_builds_is_refused_before_the_claim(key, value):
+    with pytest.raises((ValueError, TypeError)):
+        VQVAERotationTrick(input_shape=(32, 32, 3), downsample_factor=4, **{**TINY, key: value})
+    with pytest.raises(ConfigValidationError) as raised:
+        resolve(model_args={key: value})
+    text = str(raised.value)
+    assert f"'model_args.{key}'" in text and "expected" in text and repr(value) in text, text
+
+
+@pytest.mark.parametrize("model_args", [{"num_res_blocks": 0}, {"commitment_cost": 0}], ids=["no residual block", "no commitment"])
+def test_the_boundary_values_the_resolver_accepts_build(model_args):
+    assert resolve(model_args=model_args) == {"num_embeddings": 512, **model_args}
+    assert build(**model_args) is not None
 
 
 def test_the_resolver_returns_the_recipes_codebook_per_dataset_then_the_callers_keys():
@@ -467,10 +491,41 @@ def test_imagenette_without_its_records_is_refused_before_any_data_is_read(monke
     assert ta.tokenizer_facts(ta.TokenizerData(dataset="cifar10"), None).image_size == 32, "cifar10 has no records to look for"
 
 
-@pytest.mark.parametrize("patch, size", [(4, 32), (8, 32), (2, 32), (16, 224), (1, 32), (32, 32)])
+@pytest.mark.parametrize("patch, size", [(4, 32), (8, 32), (2, 32), (16, 224), (2, 2), (32, 32)])
 def test_a_patch_that_is_a_power_of_two_dividing_the_image_is_accepted(patch, size):
     assert ta.geometry_problem(patch, size) is None
     check(patch, size)
+
+
+@pytest.mark.parametrize("size", [2, 8, 32, 224])
+def test_a_patch_of_one_is_refused_by_name_before_the_claim_whatever_the_image(size):
+    # Review pass 1, W1: 1 & 0 == 0 made 1 a power of 2, so it passed here and failed AFTER the claim, in the library's first residual add (the
+    # 3-channel image onto a hidden_channels-wide tensor: a patch of 1 leaves the encoder no stride-2 stage).
+    reason = ta.geometry_problem(1, size)
+    assert reason is not None and "below 2" in reason and "stride-2" in reason
+    with pytest.raises(ConfigError, match="data.patch_size") as raised:
+        check(1, size)
+    assert "below 2" in str(raised.value) and "at least 2" in str(raised.value) and "1 " in str(raised.value)
+
+
+def library_grid(patch, size):
+    """The code grid the library class itself gives at this stride and size (a REAL build and forward pass), ``None`` when it cannot be built."""
+    try:
+        model = VQVAERotationTrick(input_shape=(size, size, 3), downsample_factor=patch, **TINY)
+        return tuple(int(side) for side in model.encode_to_indices(keras.ops.zeros((1, size, size, 3))).shape[1:])
+    except ValueError:
+        return None
+
+
+@pytest.mark.parametrize("size", [8, 16, 32])
+@pytest.mark.parametrize("patch", [1, 2, 3, 4, 8, 16, 32, 64])
+def test_the_pre_claim_geometry_rule_is_exactly_what_the_library_can_build(patch, size):
+    # The rule is checked before the claim and the build after it, so a patch that passes the first and fails the second claims `out` and
+    # leaves it used (W1). Over every power of 2 up to 64, a 3 and three sides: the rule accepts a cell exactly when the library builds it and
+    # gives the grid `size // patch`.
+    grid = library_grid(patch, size)
+    builds = grid == (size // patch, size // patch)
+    assert (ta.geometry_problem(patch, size) is None) is builds, (patch, size, grid)
 
 
 @pytest.mark.parametrize("patch", [3, 5, 6, 12, 24])

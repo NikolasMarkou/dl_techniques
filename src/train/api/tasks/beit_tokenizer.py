@@ -32,10 +32,13 @@ Interface contract
     (:func:`train.common.forecast_run.beats_bar`). The baseline is the constant-image baseline of the selection images
     (:func:`train.common.tokenizer_data.constant_image_baseline`: the lower of the best per-channel constant and the in-sample mean image,
     in the metric's own reduction), measured in ``build_data``; the epoch-zero value is read from the fit sidecar in
-    ``evaluate_and_report``, never from an attribute, because a resume never evaluates the untrained model. (2) The codebook: the
-    perplexity of the codes the BEST weights give to every position of every selection image is at least the floor of
-    :func:`train.common.pretrain_run.usage_meets_floor`. A constant model, a collapsed codebook and a tokenizer that meets only one part all
-    miss: the run is kept, exits 1 and its summary says which part. Under ``debug_args.smoke`` no bar is applied and both parts are still
+    ``evaluate_and_report``, never from an attribute, because a resume never evaluates the untrained model. (2) The codebook, TWO
+    floors on the codes the BEST weights give to every position of every selection image: the POOLED perplexity is at least the floor of
+    :func:`train.common.pretrain_run.usage_meets_floor` (the one ``beit_mim`` refuses by), AND the PER-CELL perplexity, exp of the mean over
+    the grid's cells of the entropy of each cell's codes (:func:`train.common.tokenizer_data.per_cell_usage`), is at least
+    :data:`train.common.tokenizer_data.MIN_PER_CELL_PERPLEXITY`; the pooled floor alone is met by a code that is the cell index and nothing
+    else wherever the grid has 64 cells or more (D-067). A constant model, a collapsed codebook, a code that describes position only and a
+    tokenizer that meets only one part all miss: the run is kept, exits 1 and its summary says which part. Under ``debug_args.smoke`` no bar is applied and both parts are still
     reported. The perplexity is counted once, after the fit, by one eager pass (:func:`train.common.tokenizer_data.code_ids_of`): no
     per-epoch usage reaches the CSV, and the checkpoint is selected on the reconstruction alone, so ``best_model.keras`` is the file the
     verdict describes.
@@ -60,7 +63,8 @@ Interface contract
     Reporting. ``evaluate_and_report`` follows the pretrain order: the best checkpoint reloaded and scored on the TEST split, the usage of
     the best weights, the data-free analysis (``run_analysis``: the weights and spectral analyses; the stock analysis reads class
     probabilities, which an image is not), the last epoch's weights scored, saved and reloaded. ``Evaluation.extras`` carries ``baseline``,
-    ``epoch_zero``, ``selection``, ``reconstruction`` (the first part of the bar with its numbers) and ``codebook_usage`` (the second).
+    ``epoch_zero``, ``selection``, ``reconstruction`` (the first part of the bar with its numbers) and ``codebook_usage`` (the second: the
+    pooled ``perplexity`` with ``floor`` and ``meets_floor``, and ``per_cell_perplexity`` with ``per_cell_floor`` and ``per_cell_meets_floor``).
 
 ``train_beit_tokenizer(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -214,8 +218,9 @@ class BeitTokenizerTrainer(TaskTrainer):
         #: The epoch-zero ``val_reconstruction_loss`` (the untrained model's), read from the fit sidecar by ``evaluate_and_report`` and by
         #: nothing else.
         self._epoch_zero: Optional[float] = None
-        #: The codebook usage of the best weights over every selection position, set by ``evaluate_and_report``.
+        #: The codebook usage of the best weights over every selection position, pooled and per cell, set by ``evaluate_and_report``.
         self._usage: Optional[Any] = None
+        self._cell_usage: Optional[Any] = None
 
     # -- data and model -------------------------------------------------
 
@@ -243,6 +248,14 @@ class BeitTokenizerTrainer(TaskTrainer):
                 f"the selection split holds {data.n_select} images, {positions} positions of a {side} x {side} code grid, and a "
                 f"perplexity counted over {positions} positions cannot reach the floor of {floor:g} effective codes: the bar could never be "
                 "met (raise data.max_samples or data.validation_split, or set debug_args.smoke=true for a run with no bar)"
+            )
+        if not config.debug_args.smoke and data.n_select < tokenizer_data.MIN_PER_CELL_PERPLEXITY:
+            # A WARNING and not a refusal (unlike the pooled floor above): a run on a handful of images is still a run worth its files (the
+            # resume tests train on six), but its per-cell perplexity is at most the number of images, so it can only miss, and says why now.
+            logger.warning(
+                f"the selection split holds {data.n_select} images, and a perplexity counted per cell over {data.n_select} images is at most "
+                f"{data.n_select}, under the per-cell floor of {tokenizer_data.MIN_PER_CELL_PERPLEXITY:g} effective codes: this run cannot meet "
+                "the bar (raise data.max_samples or data.validation_split, or set debug_args.smoke=true for a run with no bar)"
             )
         started = time.perf_counter()
         baseline = tokenizer_data.constant_image_baseline(data.select_ds)
@@ -421,20 +434,25 @@ class BeitTokenizerTrainer(TaskTrainer):
         return forecast_run.beats_bar(reached, threshold, self._select_batches or 1)
 
     def bar_is_met(self, config: BeitTokenizerConfig, reached: float, threshold: float) -> bool:
-        from train.common import pretrain_run
+        from train.common import pretrain_run, tokenizer_data
 
         # DECISION plan-2026-11-25T124419-fa94f59c/D-038
         # BOTH parts, each by the repo's one definition: the reconstruction STRICTLY below the threshold in float32 and beyond the tie band
         # (`forecast_run.beats_bar`: a constant model scores one or two float32 steps either side of its baseline, MEASURED, so a bare `<`
         # or a `<=` calls it a success), AND the codebook of the best weights at the floor (`pretrain_run.usage_meets_floor`, the same
         # definition `beit_mim` refuses by). Do NOT drop one part: a constant model meets the second and a collapsed codebook the first.
-        # Do NOT compare the Python floats, do NOT copy the floor, and do NOT read the usage of the last epoch's weights.
-        if self._usage is None:
+        # Do NOT compare the Python floats, do NOT copy the floor, and do NOT read the usage of the last epoch's weights. The codebook part is
+        # itself TWO floors (D-067): the pooled one is met by a code that is the cell index alone at 64 cells or more, so the per-cell one
+        # (`tokenizer_data.per_cell_meets_floor`) judges what one cell carries. Do NOT drop it, and do NOT fold it into the pooled floor.
+        if self._usage is None or self._cell_usage is None:
             raise RuntimeError(
-                "bar_is_met needs the codebook usage of the best weights, which evaluate_and_report works out; it was asked for before "
-                "the reporting"
+                "bar_is_met needs the codebook usage of the best weights, pooled and per cell, which evaluate_and_report works out; it was "
+                "asked for before the reporting"
             )
-        return bool(self._beats_bar(reached, threshold) and pretrain_run.usage_meets_floor(self._usage))
+        return bool(
+            self._beats_bar(reached, threshold) and pretrain_run.usage_meets_floor(self._usage)
+            and tokenizer_data.per_cell_meets_floor(self._cell_usage)
+        )
 
     # -- the log and the summary ---------------------------------------
 
@@ -454,7 +472,7 @@ class BeitTokenizerTrainer(TaskTrainer):
 
     def task_notes(self, config: BeitTokenizerConfig, baseline: Dict[str, float], ratio: float, data: Any) -> List[str]:
         """Return the tokenizer lines of ``results_summary.json``'s ``notes``."""
-        from train.common import classification_run, pretrain_run
+        from train.common import classification_run, pretrain_run, tokenizer_data
 
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
@@ -476,8 +494,11 @@ class BeitTokenizerTrainer(TaskTrainer):
             f"float32 and beyond `train.common.forecast_run.tie_band` float32 steps (`reconstruction.beats_bar`); the baseline is the "
             f"better of the best per-channel constant and the in-sample mean image of the selection images and {zero} value is read from "
             "the fit sidecar; (2) the codebook usage of the best weights over every position of every selection image has a perplexity "
-            f"of at least {pretrain_run.MIN_TOKENIZER_PERPLEXITY:g} effective codes (`codebook_usage.meets_floor`); a constant model and a "
-            "collapsed codebook each miss one part",
+            f"of at least {pretrain_run.MIN_TOKENIZER_PERPLEXITY:g} effective codes pooled over the positions (`codebook_usage.meets_floor`) "
+            f"AND of at least {tokenizer_data.MIN_PER_CELL_PERPLEXITY:g} effective codes per cell, exp of the mean over the code grid's cells of "
+            "the entropy of each cell's codes (`codebook_usage.per_cell_meets_floor`: a code that is the cell index alone has the pooled "
+            "perplexity of the number of cells and a per-cell one of 1); a constant model, a collapsed codebook and a code that describes "
+            "position only each miss one part",
             "`codebook_usage` counts the codes of the best weights (best_model.keras, the file `beit_mim` takes), once, after the fit; "
             "`test_metrics_best` is the reloaded best_model.keras and `test_metrics_final` the last epoch's weights, on the test split, "
             "which never influenced selection",
@@ -545,6 +566,7 @@ class BeitTokenizerTrainer(TaskTrainer):
         # the first batch.
         codes = tokenizer_data.code_ids_of(fit.model, data.select_ds)
         self._usage = pretrain_data.tokenizer_usage(codes)
+        self._cell_usage = tokenizer_data.per_cell_usage(codes)
         image, label = next(iter(data.select_ds))
         analysis, test_final, load_check, load_detail = run_summary.report_data_free_run(
             fit.model,
@@ -584,6 +606,9 @@ class BeitTokenizerTrainer(TaskTrainer):
                 "distinct": self._usage.distinct, "perplexity": self._usage.perplexity, "top1_share": self._usage.top1_share,
                 "entropy": self._usage.entropy,
                 "floor": pretrain_run.MIN_TOKENIZER_PERPLEXITY, "meets_floor": pretrain_run.usage_meets_floor(self._usage),
+                "per_cell_perplexity": self._cell_usage.perplexity, "per_cell_entropy": self._cell_usage.entropy,
+                "per_cell_floor": tokenizer_data.MIN_PER_CELL_PERPLEXITY,
+                "per_cell_meets_floor": tokenizer_data.per_cell_meets_floor(self._cell_usage),
             },
         }
         # DECISION plan-2026-11-19T081214-5c6cc105/D-012

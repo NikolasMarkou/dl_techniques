@@ -21,6 +21,7 @@ The runs read the REAL CIFAR-10 rows (a loud skip without the Keras cache); test
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.utils.logger import logger
-from train.api import init_from, predictor, registry
+from train.api import init_from, predictor, registry, tokenizer_models
 from train.api.config import validate
 from train.api.errors import ConfigError
 from train.api.tasks.beit_tokenizer import BeitTokenizerConfig, BeitTokenizerTrainer, train_beit_tokenizer
@@ -73,6 +74,8 @@ def beit_mim_request(out: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------
 
 DECLARED = r"vq_vae_rotation takes weights from vq_vae_rotation \(beit_tokenizer\)$"
+#: The reason of the size refusal is the row's own (`tokenizer_models.SIZE_POLICY`), ending the message.
+SIZE_REASON = re.escape(tokenizer_models.SIZE_POLICY) + "$"
 #: ``name: (the source record, the task function, its request, the message pattern)``.
 REFUSALS = {
     "another_patch": (
@@ -80,15 +83,17 @@ REFUSALS = {
         r"vq_vae_rotation sizes its weights by data\.patch_size; the source trained at 8, this run asks for 4$"),
     "another_size": (
         lambda: tokenizer_record(input_size=(64, 64)), train_beit_tokenizer, request,
-        r"vq_vae_rotation sizes its weights by transform_args\.image_size; the source trained at \[64, 64\], this run asks for \[32, 32\]$"),
+        r"beit_tokenizer holds transform_args\.image_size to the source's by policy, not because a weight depends on it: the source trained "
+        r"at \[64, 64\], this run asks for \[32, 32\]; " + SIZE_REASON),
     "another_codebook": (
         lambda: tokenizer_record(num_embeddings=128), train_beit_tokenizer, request,
         r"vq_vae_rotation sizes its weights by the codebook size \(model_args\.num_embeddings\); the source trained at 128, this run asks "
         r"for 64$"),
     "every_difference_at_once": (
         lambda: tokenizer_record(input_size=(64, 64), patch_size=8, num_embeddings=128), train_beit_tokenizer, request,
-        r"vq_vae_rotation sizes its weights by transform_args\.image_size and data\.patch_size and the codebook size "
-        r"\(model_args\.num_embeddings\); the source trained at \[64, 64\] and 8 and 128, this run asks for \[32, 32\] and 4 and 64$"),
+        r"vq_vae_rotation sizes its weights by data\.patch_size and the codebook size \(model_args\.num_embeddings\); the source trained at 8 "
+        r"and 128, this run asks for 4 and 64; beit_tokenizer holds transform_args\.image_size to the source's by policy, not because a weight "
+        r"depends on it: the source trained at \[64, 64\], this run asks for \[32, 32\]; " + SIZE_REASON),
     "a_beit_mim_run": (
         lambda: pretrain_record("beit_mim/beit_tiny"), train_beit_tokenizer, request,
         r"beit_mim \(pretrain\) cannot seed vq_vae_rotation \(beit_tokenizer\); " + DECLARED),

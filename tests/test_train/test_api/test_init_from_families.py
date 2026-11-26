@@ -676,6 +676,8 @@ def test_the_tokenizer_row_takes_its_own_family_only_with_the_geometry_and_the_c
     # A fixed key the census never changes is a declaration nothing measures; a key it changes and the row does not declare is a hole.
     assert sorted(spec.fixed) == sorted({*TOKENIZER_CHANGES, *TOKENIZER_BY_POLICY})
     assert set(spec.fixed) <= set(GEOMETRY_NAMES)
+    # The keys the engine would take are held by POLICY and say so with a reason (W2); the keys that change a weight's shape say nothing of the sort.
+    assert set(spec.policy) == set(TOKENIZER_BY_POLICY) and all(spec.policy.values())
 
 
 @pytest.mark.parametrize("size", ["tiny", "default"])
@@ -703,7 +705,8 @@ def test_production_order_the_image_size_is_refused_before_the_claim_by_policy_t
     loaded, target = tokenizer_pair(archives, change)
     got, plan, message = verdict(TOKENIZER_FAMILY, "image_size 32 to 64, production order", loaded, target, registry.MODELS[TOKENIZER_FAMILY].transfer)
     assert got == "PASS" and len(plan.copied) == plan.n_source == plan.n_target > 0, message
-    assert key in registry.MODELS[TOKENIZER_FAMILY].transfer.fixed
+    spec = registry.MODELS[TOKENIZER_FAMILY].transfer
+    assert key in spec.fixed and key in spec.policy, "held by policy: the refusal says so (the engine's `sizes its weights` would be false)"
 
 
 @pytest.mark.parametrize("key", sorted(TOKENIZER_UNRECORDED))
