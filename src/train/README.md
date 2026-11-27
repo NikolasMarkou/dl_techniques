@@ -1880,7 +1880,9 @@ result = train_dino(out="auto", model="dino_v1/tiny", data={"dataset": "imagenet
   Refused before the claim, each by name: `analysis_args.conformal_alpha` (a conformal set is a set of classes), a `precision` other than `float32`, a constant schedule and
   `checkpoint_args.backup_every_steps` (table below); `optim_args.optimizer=sgd` with a positive `optim_args.weight_decay` is refused, because the adapter builds no L2 penalty; and a
   `model_args.ema_warmup_epochs` that is not below the run's `epochs` (the teacher would never start moving and stay at its initial weights for the whole run), for a fresh run and a resume alike,
-  except under `debug_args.smoke`: that run is one epoch with no bar, so the recipe's one-epoch warmup leaves its teacher frozen.
+  except under `debug_args.smoke`: that run is one epoch with no bar, so the recipe's one-epoch warmup leaves its teacher frozen. A warmup below the epochs can still round to every step of the run
+  (`ema_warmup_epochs=59.999` at 60 epochs of 266 steps is 15,960 warmup steps of 15,960): that is refused too, once the data has loaded (the epoch's length is known only then) and before the model is
+  built, as the sequence's own exit-2 refusal that names the claimed directory; a smoke run is exempt from it as well.
 * **The bar has two parts, and both are required.** (1) `success_value` is the best `dino_knn_top1_k20` of the selection window (the checkpoint's epoch, not the mean of the last
   three the legacy record used) and it is STRICTLY above `success_threshold`, `max(baseline, epoch zero) + margin`, in k-NN accuracy units, where `baseline` is the accuracy of
   constant features against the real labels (0.0909 to 0.1110 over six seeds on Imagenette's ten classes) and epoch zero is the untrained model's probe (0.2780 to 0.3055). No float32
@@ -1892,7 +1894,8 @@ result = train_dino(out="auto", model="dino_v1/tiny", data={"dataset": "imagenet
   (2) At every epoch of the selection window `dino_collapse_flag` is 0 and `dino_teacher_entropy_is_centered` is 1 (a NaN is an offence: the flag misses exactly-zero features and
   never trips on a NaN entropy). A random-init model, a constant-feature model, a collapsed teacher and a run that meets one part only each miss: exit 1, the run kept, and
   `results_summary.json` says which (`bar.part1` and `bar.part2`, with the first offending epoch and its reason, beside `baseline`, `epoch_zero`, `margin`, `best`, `last3_mean`,
-  `collapse_max` and `selection`). A `baseline` or `epoch zero` term that is not a finite number (a hand-edited or damaged `fit_state.json`) has no threshold: the report is refused before any
+  `collapse_max` and `selection`). An `epoch zero` term that is not a finite number (it is read from `fit_state.json`: a hand-edited or damaged file) or a `baseline` term that is not (it is computed from the real labels of the
+  bank and the queries and never read from a file, so only the probe's own arithmetic could make it so) has no threshold: the report is refused before any
   scoring naming the term and the training is kept, and the verdict function itself calls it a miss of part 1 and never drops the term.
 * **No validation data, and why `evaluate` is never called.** `DINOLoss` moves its centre inside `call`, and Keras calls the loss in `evaluate` and on validation batches, so one
   validation pass would move the centre with a finite loss and a clean exit. The task passes no `validation_data` (the one hook this phase added to the shared sequence,
@@ -1939,7 +1942,7 @@ result = train_dino(out="auto", model="dino_v1/tiny", data={"dataset": "imagenet
 
 * **Limits.** **Not gate-measured:** `cifar10` (its recipe row, patch 4 at 32 px, is a configuration and its margin of 0.085 comes from a random-init null alone: no cifar10 DINO run has been trained) and the `small` variant; the gate trains
   Imagenette with `tiny`. The improved arm's numbers in the record (the 0.1426 and 0.1693 above) were measured at the legacy data protocol and its 295 EMA steps; this code's recipe at the data protocol of
-  this repository is measured by the gate below only, and the first run at it is no repeat of the record's. A run shortened below the record's length can miss a margin it nearly meets (the record: 8 epochs of
+  this repository is measured by the gate below only, and the first run at it is no repeat of the record's. The margin and the ranges of the bar's two terms were measured on the probe bank's first construction (the first pass of a shuffled stream); the shipped bank is the first rows of the split's seeded order, another uniform draw of the same rows, and a 30-draw random-init control on it agrees within noise (the plan's record holds it), but the 60-draw null was not repeated on it. A run shortened below the record's length can miss a margin it nearly meets (the record: 8 epochs of
   EMA warmup alone gained 0.017). The best of up to 60 probes is optimistic by the best-of-N bias the margin already contains, and `last3_mean` is reported beside it. The bar judges
   features a k-NN reads; it says nothing about a linear probe or a fine-tune. No `train_step`, no `validation_data` and no `evaluate` touch a DINO model, and the legacy trainer (`train/dino/train_dino.py`) is unchanged: the one change to its probe (`train/dino/knn_eval.py`) is an opt-in switch that is off by default.
 

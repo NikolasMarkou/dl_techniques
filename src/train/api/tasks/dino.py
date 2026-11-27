@@ -103,7 +103,8 @@ from ..dino_args import (
     load_dino_data_config,
     read_dino_data_file,
 )
-from ..dino_models import backup_problems, precision_problems, recipe_notices_of, schedule_problems, warmup_problems
+from ..dino_models import (
+    backup_problems, precision_problems, recipe_notices_of, schedule_problems, warmup_problems, warmup_steps_problems)
 from ..errors import ConfigError, ConfigValidationError
 from ..predictor import build_dino_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
@@ -310,6 +311,8 @@ class DinoTrainer(TaskTrainer):
         #: ``{teacher_temp, teacher_temp_final, ema_warmup_epochs}`` as the request resolves them, set by ``build_model``.
         self._values: Optional[Dict[str, Any]] = None
         self._out_dim: Optional[int] = None
+        #: The resolved ``ema_warmup_epochs``, set by ``check_model_args`` (before the claim) for ``fit_kwargs``, which has no context to resolve it.
+        self._warmup_epochs: Optional[float] = None
         #: The constant-feature k-NN accuracy and the epoch-zero probe value (the sidecar's), and the window's flags: set by ``evaluate_and_report``.
         self._baseline: Optional[float] = None
         self._epoch_zero: Optional[float] = None
@@ -385,6 +388,7 @@ class DinoTrainer(TaskTrainer):
         # The family's own refusals first (every refused key at once), then the geometry of the views.
         self._model_kwargs(config, context)
         values = self._task_values(config, context)
+        self._warmup_epochs = values["ema_warmup_epochs"]
         lines = warmup_problems(values["ema_warmup_epochs"], config.epochs, smoke=config.debug_args.smoke)
         if lines:
             raise ConfigValidationError(lines)
@@ -441,6 +445,15 @@ class DinoTrainer(TaskTrainer):
 
     def fit_kwargs(self, config: DinoConfig, data: Any) -> Dict[str, Any]:
         # The train stream is INFINITE, so an epoch is `steps_per_epoch` batches by this keyword. No `validation_steps`: there is no validation.
+        # DECISION plan-2026-11-26T224507-e3381378/D-109
+        # The first hook after the data loads (before the model is built), fresh run and resume alike: a warmup that ROUNDS to every step of the run is
+        # refused here, as a ValueError the sequence turns into the exit-2 refusal that names the claimed directory (the epochs of the same refusal
+        # are checked before the claim, `check_model_args`). Do NOT move this to `_callbacks`: it runs after the model is built and compiled.
+        if self._warmup_epochs is None:
+            raise RuntimeError("fit_kwargs needs the warmup `check_model_args` resolves; it was asked for before the request was resolved")
+        lines = warmup_steps_problems(self._warmup_epochs, config.epochs, data.steps_per_epoch, smoke=config.debug_args.smoke)
+        if lines:
+            raise ValueError("; ".join(lines))
         return {"steps_per_epoch": data.steps_per_epoch}
 
     def validation_stream(self, config: DinoConfig, data: Any) -> Optional[Any]:

@@ -137,9 +137,12 @@ def test_the_threshold_is_cut_from_the_larger_term_and_the_dataset_margin_and_th
 
 
 def test_the_task_validates_on_nothing_and_a_run_has_no_validation_steps():
-    trainer = bare_trainer()
+    from types import SimpleNamespace
+
+    trainer = bare_trainer(_warmup_epochs=1.0)
     assert trainer.validation_stream(None, object()) is None, "a validation stream would run the loss, which advances the centre (M35)"
-    assert trainer.fit_kwargs(None, types_namespace_data(28)) == {"steps_per_epoch": 28}
+    config = SimpleNamespace(epochs=60, debug_args=SimpleNamespace(smoke=False))
+    assert trainer.fit_kwargs(config, types_namespace_data(28)) == {"steps_per_epoch": 28}
 
 
 def types_namespace_data(steps: int) -> Any:
@@ -373,8 +376,9 @@ def test_the_real_margin_is_not_reachable_by_a_toy_and_the_run_misses_with_exit_
 
 
 def test_a_smoke_run_applies_no_bar_and_still_reports_the_numbers(runs):
+    assert runs["smoke_code"] == 0, "a smoke run keeps the recipe's one-epoch warmup: both warmup refusals (D-100, D-109) exempt it"
     summary = summary_of(runs, "smoke")
-    assert runs["smoke_code"] == 0 and summary["success"] is None and summary["success_threshold"] is None
+    assert summary["success"] is None and summary["success_threshold"] is None
     assert summary["epochs_run"] == 1 and summary["success_value"] == summary["best"]
     assert summary["bar"]["applied"] is False, "the numbers are reported and the summary says no bar was applied"
 

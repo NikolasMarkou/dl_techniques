@@ -825,8 +825,18 @@ def test_the_dino_section_states_the_numbers_of_the_code(world):
             and "for a fresh run and a resume alike" in section)
     assert "the bank is the first fit rows in the split's seeded order and not a shuffle" in section and "does not reach it" in section
     assert dino_task.non_finite_terms(0.1, float("nan")) == ["epoch zero nan"] and dino_task.non_finite_terms(float("inf"), 0.1) == ["baseline inf"]
-    assert ("A `baseline` or `epoch zero` term that is not a finite number" in section and "the report is refused before any scoring" in section
-            and "a miss of part 1" in section)
+    assert ("An `epoch zero` term that is not a finite number (it is read from `fit_state.json`" in section and "a `baseline` term that is not (it is computed from the real labels" in section
+            and "the report is refused before any scoring" in section and "a miss of part 1" in section and "damaged `fit_state.json`) or a `baseline`" not in section)
+    # fix round 11.2: the warmup that rounds to every step, the smoke exemption in both documents and the Imagenette flag AGENTS says is refused with `augment`
+    assert dm.warmup_steps_problems(59.999, 60, 266) and dm.warmup_steps_problems(59.999, 60, 266, smoke=True) == [] and "is 15,960 warmup steps of 15,960" in section
+    agents = " ".join(AGENTS.read_text().split())
+    assert "one that rounds to every step of the run after the data loads and before the model is built" in agents and "a `debug_args.smoke` run exempt from both" in agents
+    from dl_techniques.datasets.vision.imagenette import ImagenetteConfig, imagenette_examples
+
+    with pytest.raises(ValueError, match="shuffle=False needs augment=False"):
+        imagenette_examples("train", ImagenetteConfig(shuffle=False, augment=True))
+    assert "refused with `augment`; `ImagenetteConfig.shuffle` likewise" in agents
+    assert "the 60-draw null was not repeated on it" in section and "measured on the probe bank's first construction" in section
     assert "A diverged student is caught by its loss, not by the probe" in section and "ends the run as `diverged`, exit 1, with no bar applied" in section
     assert "The centre file carries no epoch stamp" in section and "A resume that only reports (training had finished) restores the centre from the file before it scores the test split" in section
     assert ", ".join(f"`{name}`" for name in CLAIM_LEAVES[:-1]) + f" and `{CLAIM_LEAVES[-1]}` only" in section and "`vit/vit_small` after `dino_v1/tiny`" in section

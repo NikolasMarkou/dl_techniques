@@ -24,7 +24,7 @@ from dl_techniques.datasets.vision.imagenette import (
     load_imagenette,
     read_imagenette_records,
 )
-from dl_techniques.datasets.vision.splits import seeded_test_rows
+from dl_techniques.datasets.vision.splits import seeded_split_indices, seeded_test_rows
 from tests.classification_fakes import (
     IMAGENETTE_FAKE_TEST,
     IMAGENETTE_FAKE_TRAIN,
@@ -154,10 +154,18 @@ def test_normalization_imagenet_is_the_unit_image_standardized() -> None:
     (dict(validation_split=0.0), "strictly inside"),
     (dict(validation_split=1.0), "strictly inside"),
     (dict(validation_split=0.001, max_images=30), "holds out 0 of 30"),
+    (dict(shuffle=False, augment=True), "shuffle=False needs augment=False"),
 ])
 def test_a_bad_setting_is_refused_naming_it(kwargs, message) -> None:
     with pytest.raises(ValueError, match=message):
         load_imagenette("train", _config(**kwargs))
+
+
+def test_an_unshuffled_train_split_is_the_seeded_order_of_its_rows_and_the_shuffled_one_is_not() -> None:
+    config = _config(shuffle=False)
+    train_rows, _, _ = seeded_split_indices(N_TRAIN, 1, config.seed, config.validation_split)
+    np.testing.assert_array_equal(_ids("train", config), train_rows)
+    assert list(_ids("train", _config())) != list(train_rows), "the control: the default stream is shuffled"
 
 
 def test_an_unknown_split_is_refused() -> None:

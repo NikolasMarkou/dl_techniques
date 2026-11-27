@@ -32,6 +32,7 @@ from train.api import cli, registry
 from train.api.config import validate
 from train.api.tasks import dino as task
 from train.api.tasks.dino import CENTRE_FILE, DinoConfig, DinoTrainer, judge
+from train.common.resume_state import FIT_STATE_NAME
 from train.common.seed import set_seeds
 
 from ._dino_world import (  # noqa: F401  (``identity_world`` is a fixture)
@@ -50,14 +51,19 @@ def resume_point(start: int) -> Any:
     return ResumePoint(start=start, best=0.2, wait=0, best_epoch=0, rows=rows, state={})
 
 
-def prepare(tmp_path: Path, resume: Any = None, **changes: Any) -> SimpleNamespace:
-    """A trainer taken as far as ``_callbacks``: resolved, its data built, its model and loss compiled for, its callbacks listed."""
-    config = validate(DinoConfig, task_request(tmp_path / "out", batch_size=BATCH, epochs=EPOCHS, **changes))
+def with_data(tmp_path: Path, **changes: Any) -> Any:
+    """``(trainer, resolved config, context, data)``: a request of ``BATCH`` and ``EPOCHS`` (``changes`` override) resolved and its data built."""
+    config = validate(DinoConfig, task_request(tmp_path / "out", **{"batch_size": BATCH, "epochs": EPOCHS, **changes}))
     trainer = DinoTrainer(config)
     family, variant = registry.parse_model_name(config.model, task=trainer.task)
     resolved, context = trainer._resolve(trainer.describe_data(config), family, variant)
     set_seeds(resolved.seed)
-    data = trainer.build_data(resolved, context)
+    return trainer, resolved, context, trainer.build_data(resolved, context)
+
+
+def prepare(tmp_path: Path, resume: Any = None, **changes: Any) -> SimpleNamespace:
+    """A trainer taken as far as ``_callbacks``: resolved, its data built, its model and loss compiled for, its callbacks listed."""
+    trainer, resolved, context, data = with_data(tmp_path, **changes)
     with pytest.MonkeyPatch.context() as patch:
         shallow_backbone(patch)
         trainer.build_model(resolved, context, data)
@@ -243,6 +249,38 @@ def test_the_recipes_own_warmup_is_refused_for_a_one_epoch_run_and_a_smaller_one
     assert warmup_problems(1.0, 1) and warmup_problems(1.5, 1.5) and warmup_problems(math.nan, 2) == [], "NaN is the resolver's refusal, not this one's"
 
 
+@pytest.mark.parametrize("warmup, epochs, steps, refused", [
+    (59.999, 60, 266, True), (59.99, 60, 266, False), (1.999, 2, 28, True), (1.98, 2, 28, False), (0.92, 1, 6, True), (0.91, 1, 6, False), (0.0, 1, 1, False)])
+def test_a_warmup_that_rounds_to_every_step_of_the_run_is_refused_though_its_epochs_are_below_the_run(warmup, epochs, steps, refused):
+    from train.api.dino_models import ema_warmup_steps, warmup_problems, warmup_steps_problems
+
+    assert warmup_problems(warmup, epochs) == [], "the epochs compare below the run's: the epoch rule lets every row through"
+    lines = warmup_steps_problems(warmup, epochs, steps)
+    assert bool(lines) is refused and (ema_warmup_steps(warmup, steps) >= steps * epochs) is refused
+    if refused:
+        assert "model_args.ema_warmup_epochs" in lines[0] and f"warmup of {steps * epochs} steps, which is all {steps * epochs} steps" in lines[0]
+    assert warmup_steps_problems(warmup, epochs, steps, smoke=True) == []
+
+
+@pytest.mark.parametrize("epochs, warmup, refused", [(1, 0.92, True), (1, 0.91, False), (4, 3.99, True), (4, 3.9, False)])
+def test_the_data_stage_refuses_that_warmup_before_the_model_is_built_and_accepts_the_one_below_it(identity_world, tmp_path, epochs, warmup, refused):
+    trainer, resolved, _, data = with_data(tmp_path, epochs=epochs, model_args={"dino_out_dim": OUT_DIM, "ema_warmup_epochs": warmup})
+    assert data.steps_per_epoch == 6
+    if refused:
+        with pytest.raises(ValueError, match=rf"rounds to a warmup of {6 * epochs} steps, which is all {6 * epochs} steps of the run"):
+            trainer.fit_kwargs(resolved, data)
+    else:
+        assert trainer.fit_kwargs(resolved, data) == {"steps_per_epoch": 6}
+
+
+def test_that_refusal_exits_2_through_the_command_line_after_the_claim_naming_the_value_and_trains_nothing(identity_world, tmp_path, capfd):
+    out = tmp_path / "rounded"
+    code = run_cli(out, epochs=1, batch_size=BATCH, model_args={"dino_out_dim": OUT_DIM, "ema_warmup_epochs": 0.92})
+    error = capfd.readouterr().err
+    assert code == 2 and "Invalid argument for the fit options" in error and "rounds to a warmup of 6 steps" in error and "'out' is now used" in error
+    assert not (out / "training_log.csv").exists() and not (out / "best_model.keras").exists(), "the refusal came before any training"
+
+
 # ---------------------------------------------------------------------
 # real tiny runs: a NaN student and a resume that only reports
 # ---------------------------------------------------------------------
@@ -310,6 +348,18 @@ def test_a_resume_that_only_reports_scores_the_test_split_against_the_centre_of_
     monkeypatch.setattr(DinoTrainer, "evaluate_and_report", original)
     saved = np.load(out / "checkpoints" / CENTRE_FILE)
     assert np.abs(saved).max() > 0.0, "the control: the last epoch's centre is not zero"
+    # The k10 term of the sidecar is moved far from its k20, so a reporting resume that read the wrong column would move the bar's threshold.
+    sidecar = out / "checkpoints" / FIT_STATE_NAME
+    state = json.loads(sidecar.read_text())
+    zero = state["initial"]["metrics"][WATCH]
+    state["initial"]["metrics"]["dino_knn_top1_k10"] = zero + 0.5
+    sidecar.write_text(json.dumps(state))
+    # A centre file that is gone after two finished epochs is REFUSED (a zero centre would be the silent wrong answer), not warned about.
+    kept = (out / "checkpoints" / CENTRE_FILE).read_bytes()
+    (out / "checkpoints" / CENTRE_FILE).unlink()
+    with pytest.raises(FileNotFoundError, match="is missing, but this run has finished 2 epochs"):
+        run_with(out, epochs=2, resume_interrupted="true")
+    (out / "checkpoints" / CENTRE_FILE).write_bytes(kept)
     seen: List[np.ndarray] = []
     real = dino_run.knn_of
 
@@ -324,3 +374,6 @@ def test_a_resume_that_only_reports_scores_the_test_split_against_the_centre_of_
     for centre in seen:
         np.testing.assert_array_equal(centre, saved, err_msg="the test split was scored against another centre than the last epoch's")
     assert summary["bar"]["part2"]["epochs_checked"] == 2, "the bar's own columns come from the history, never from the centre"
+    # The bar's part 1 of the reporting resume: the threshold is the sidecar's k20 (or the baseline) plus the margin the run patched, never the k10 column.
+    assert summary["bar"]["part1"]["success_threshold"] == pytest.approx(max(summary["baseline"][WATCH], zero) - 0.5)
+    assert summary["epoch_zero"][WATCH] == zero and summary["epoch_zero"]["dino_knn_top1_k10"] == zero + 0.5, "the summary reports the sidecar as it is"

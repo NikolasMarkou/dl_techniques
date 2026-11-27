@@ -20,6 +20,7 @@ per fit), 32 px, 64 outputs, fake CIFAR-10 rows (``_dino_world``). The tests wri
 """
 
 import hashlib
+import json
 import os
 import signal
 import subprocess
@@ -259,28 +260,39 @@ def test_the_centre_is_written_at_each_epoch_end_and_the_file_holds_the_loss_cen
 
 
 def test_a_failing_weights_write_after_the_centre_write_stops_the_run_so_the_file_is_at_most_one_epoch_ahead_and_a_resume_restores_it_as_it_is(
-        tmp_path, fake_rows):
+        tmp_path, fake_rows, monkeypatch):
     """D-104: the file carries no epoch stamp, and the bound that makes it unnecessary is the callback order: the centre is written BEFORE the weights backup,
-    and a backup write that fails raises, which ends ``fit``, so no later epoch writes a newer centre over weights that were never saved."""
-    path = tmp_path / "centre.npy"
+    and a backup write that fails raises, which ends ``fit``, so no later epoch writes a newer centre over weights that were never saved. The backup is Keras'
+    own ``BackupAndRestore(double_checkpoint=True)`` and the failure is injected into the ``save_weights`` call it makes (round 11.2: exercised, not argued)."""
+    path, backup_dir = tmp_path / "centre.npy", tmp_path / "backup"
     loss, model = make_loss(), make_model()
     compile_model(model, loss)
     ends: List[np.ndarray] = []
+    writes: List[int] = []
+    save = model.save_weights
 
-    class BackupThatFails(keras.callbacks.Callback):
-        """Stands for the weights backup: it runs after ``CentreFile`` at each epoch end and fails at the second one (the first one 'succeeds')."""
+    def failing_save(*args: Any, **kwargs: Any):
+        writes.append(1)
+        if len(writes) == 2:
+            raise OSError("the weights backup could not be written")
+        return save(*args, **kwargs)
+
+    monkeypatch.setattr(model, "save_weights", failing_save)
+
+    class Record(keras.callbacks.Callback):
+        """Runs after ``CentreFile`` and before the weights backup: the centre the file was just given."""
 
         def on_epoch_end(self, epoch, logs=None):
             ends.append(centre_of(loss))
-            if epoch == 1:
-                raise OSError("the weights backup could not be written")
 
     x, y = views_and_labels(2)
+    backup = keras.callbacks.BackupAndRestore(str(backup_dir), double_checkpoint=True, delete_checkpoint=False)
     with pytest.raises(OSError, match="weights backup"):
-        model.fit(x, y, batch_size=BATCH, epochs=4, shuffle=False, verbose=0, callbacks=[dino_run.CentreFile(loss, path, completed_epochs=None), BackupThatFails()])
-    assert len(ends) == 2, "no third epoch ran: a failed backup ends the run"
+        model.fit(x, y, batch_size=BATCH, epochs=4, shuffle=False, verbose=0, callbacks=[dino_run.CentreFile(loss, path, completed_epochs=None), Record(), backup])
+    assert len(ends) == 2 and len(writes) == 2, "no third epoch ran: a failed backup ends the run"
     assert not np.array_equal(ends[0], ends[1]), "the control: the centre moved between the two epoch ends"
     np.testing.assert_array_equal(np.load(path), ends[1], err_msg="the file holds the LATEST epoch end's centre, one epoch ahead of the last backup")
+    assert json.loads((backup_dir / "training_metadata.json").read_text())["epoch"] == 1, "the backup that settled holds ONE finished epoch, the file two"
     # The backup that settled is the one of epoch 0 (one finished epoch): the resume restores the file's centre whatever epoch it is from.
     resumed = make_loss()
     assert dino_run.CentreFile(resumed, path, completed_epochs=1).restore() is True

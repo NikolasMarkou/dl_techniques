@@ -53,6 +53,11 @@ Interface contract
     :return: the line that refuses an ``ema_warmup_epochs`` that is not below the run's resolved ``epochs`` (a teacher frozen for the whole run);
         ``[]`` for a smaller warmup and for a smoke run (one epoch, no bar). The task calls it from ``check_model_args``, which sees the resolved epochs.
 
+``warmup_steps_problems(ema_warmup_epochs, epochs, steps_per_epoch, smoke=False)``
+    :return: the line that refuses an ``ema_warmup_epochs`` whose warmup IN STEPS (``ema_warmup_steps``, rounded) reaches ``steps_per_epoch * epochs``
+        although the epochs compare below (59.999 at 60 epochs and 266 steps rounds to every step of the run); ``[]`` otherwise and for a smoke
+        run. The data's length is known only after the claim, so the task calls it from ``fit_kwargs`` (right after the data loads, before the model).
+
 ``ema_warmup_steps(ema_warmup_epochs, steps_per_epoch)``
     :return: the teacher EMA's warmup in optimizer steps, ``round(epochs * steps_per_epoch)``: the recipe is denominated in EPOCHS, so it moves
         with the dataset and the batch (a test holds it equal to the legacy trainer's ``resolve_ema_warmup_steps``).
@@ -305,6 +310,27 @@ def warmup_problems(ema_warmup_epochs: Any, epochs: Any, smoke: bool = False) ->
         f"Invalid value for 'model_args.ema_warmup_epochs': {ema_warmup_epochs!r} is not below the run's {epochs!r} epochs, so the teacher's EMA "
         f"would never start and the teacher would stay at its initial weights for the whole run, a configuration no run measured; use a value "
         f"below {epochs!r} (the recipe's is {RECIPE['model_args']['ema_warmup_epochs']!r}) or train more epochs"
+    ]
+
+
+def warmup_steps_problems(ema_warmup_epochs: Any, epochs: Any, steps_per_epoch: int, smoke: bool = False) -> List[str]:
+    """Return the line that refuses a teacher EMA warmup that rounds to every step of the run; see the module contract."""
+    # DECISION plan-2026-11-26T224507-e3381378/D-109
+    # The warmup is rounded to STEPS (`ema_warmup_steps`) and `CompiledTeacherEMA` updates only after step `warmup_steps`, so a warmup of
+    # `steps_per_epoch * epochs` steps or more gives no update at all: 59.999 at 60 epochs and 266 steps is 15,960 of 15,960, and `warmup_problems`
+    # (epochs against epochs) lets it through. The steps need the data, which is loaded after the claim, so this runs from `fit_kwargs`, the first hook
+    # that sees the data, and still before the model is built. Do NOT move it into `check_model_args` (no data there: it would need a guess of the
+    # epoch's length, and a guess refuses a good run), and do NOT replace `warmup_problems` with it (that one refuses before the claim).
+    if smoke or not _real(ema_warmup_epochs) or not _real(epochs):
+        return []
+    steps = ema_warmup_steps(ema_warmup_epochs, steps_per_epoch)
+    if steps < steps_per_epoch * epochs:
+        return []
+    return [
+        f"Invalid value for 'model_args.ema_warmup_epochs': {ema_warmup_epochs!r} epochs of {steps_per_epoch} steps rounds to a warmup of {steps} "
+        f"steps, which is all {steps_per_epoch * epochs} steps of the run, so the teacher's EMA would never update and the teacher would stay at its "
+        f"initial weights for the whole run, a configuration no run measured; use a smaller value (the recipe's is "
+        f"{RECIPE['model_args']['ema_warmup_epochs']!r}) or train more epochs"
     ]
 
 
