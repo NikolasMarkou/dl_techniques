@@ -816,8 +816,8 @@ python -m train beit_tokenizer out=results/beit_tok_c10 model=vq_vae_rotation/sm
   off after one step and 0.56 after 12, with built-in and with select operators alike, and a classifier's built-in file is written
   with no numeric check, so it would be wrong without a word (0.53 of the scale on et_tiny); choose keras, saved_model or onnx`.
 * **Limits of the task.**
-  * No DINO: it has no `validation_data` (its centering is state that an evaluate pass mutates), a k-NN probe as its validation and EMA
-    callbacks, so it needs a sequence variant of its own. Imagenette and CIFAR-10 only (`data.format` has the one value `builtin`).
+  * No DINO here: it has no `validation_data` (its centering is state that an evaluate pass mutates), a k-NN probe as its validation and EMA
+    callbacks, so it is a task of its own, `dino` (Phase 4k, its section below). Imagenette and CIFAR-10 only (`data.format` has the one value `builtin`).
   * The rename has no alias (plan 5c6cc105, D-002), and the runs made before it pay for it. `python -m train pretrain
     model=energy_transformer/et_tiny` exits 2 before the claim with `Invalid value for 'model': the family 'energy_transformer'
     trains image_classification, not 'pretrain'; the families of 'pretrain' are beit_mim, et_mim` (`beit/beit_tiny` the same with
@@ -866,7 +866,8 @@ python -m train beit_tokenizer out=results/beit_tok_c10 model=vq_vae_rotation/sm
   `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code and their GPU gate has run (Phase 4h,
   plan 5c6cc105, with the gate under "Measured: the Phase 4h gate" below). `language_model_pretraining` and `text_classification`, the
   two language tasks, are in the code and their GPU gate has run (Phase 4i, with the gate under "Measured: the language gate" below). `beit_tokenizer`, the ninth task, trains
-  the tokenizer that `beit_mim` reads: it is in the code and its GPU gate has run (Phase 4j, plan fa94f59c, with the gate under "Measured: the tokenizer gate" below). Named and not started: DINO. `load_model`, `export`, `list_models` and
+  the tokenizer that `beit_mim` reads: it is in the code and its GPU gate has run (Phase 4j, plan fa94f59c, with the gate under "Measured: the tokenizer gate" below). `dino`, the tenth task, trains the DINOv1 self-supervised ViT and seeds a `vit` classifier: it is in the code and its GPU gate is not yet run (Phase 4k, plan e3381378, its section below; the block
+  "Measured: the dino gate" holds no measurement yet). `load_model`, `export`, `list_models` and
   `list_tasks` were built in the earlier phases and stay on `train.api` (since plan 98c9aac5 `list_tasks` and `list_models` register the
   built-in tasks and families themselves, so they answer in a fresh process), and the repo map entry is `REPO_MAP.md`, section "Entry points".
 
@@ -1830,6 +1831,118 @@ position, and so does each of the four exported files. The gate added only `p4j_
 `results/`, and nothing was removed: it held 29 entries before and 35 after.
 <!-- tokenizer-gate:end -->
 
+**`dino`** (plan e3381378, Phase 4k): trains a DINOv1 self-supervised ViT, the library `DINOTrainingModel` (a student, an EMA teacher, two projection heads and
+multi-crop views) against the library `DINOLoss` (which keeps its centre inside), on the images of CIFAR-10 or Imagenette, and judges it by a k-NN probe of its features. A
+label is read by the probe alone. `out`, `model` and `data.dataset` are required. It is built and tested on a CPU, and **its GPU gate is not yet run** (the block that ends this
+section holds no measurement).
+
+```bash
+python -m train list_models task=dino
+python -m train dino                      # every key of the task, its type and default
+python -m train dino out=results/dino_smoke model=dino_v1/tiny data.dataset=cifar10 debug_args.smoke=true
+python -m train dino out=results/dino_inette model=dino_v1/tiny data.dataset=imagenette
+# the student of that run starts a classifier of its own width and depth (the `init` pair below)
+python -m train image_classification out=results/vit_from_dino model=vit/vit_tiny data.dataset=imagenette init=results/dino_inette
+```
+
+```python
+from train.api import train_dino
+result = train_dino(out="auto", model="dino_v1/tiny", data={"dataset": "imagenette"})
+```
+
+* **Family and recipe** (`train/api/dino_models.py`). `dino_v1` trains this task only: a family of another task given here exits 2 naming the families of this one, and the other
+  nine tasks refuse `dino_v1` the same way. The library's `DINOv1.MODEL_VARIANTS` has five rows and the API offers two: `tiny` (192 wide, 12 blocks, 3 heads)
+  and `small` (384 wide, 12 blocks, 6 heads). The default model (`tiny`, 96 px, patch 16, 4 local crops, a 4,096-wide head) has 23,316,864 parameters in 314 weights, the student's 157
+  and the teacher's 157. Four `model_args` are offered (`dino_out_dim`, `teacher_temp`, `teacher_temp_final`, `ema_warmup_epochs`), 8 are given by the task and 31 more are refused by
+  name before the claim, each with its reason (a knob is offered only where the measurement record names a value for it; `ema_warmup_steps` is a constant of one scale, so the
+  warmup is in epochs); a census holds the three tables equal to the constructors' signatures. The recipe is the legacy trainer's, held equal at the shared fields by a test that
+  reads its `TrainingConfig` (the epochs, the patience, the crop size, the head's width and the probe's sizes are the differences it lists): AdamW at 5e-4, weight decay 0.04, 10 warmup epochs, cosine decay over the whole run to 0.01 of the peak, a
+  global gradient clip of 3.0, batch 32, 60 epochs, patience 70, a 4,096-wide head, 4 local crops, the teacher temperature held at 0.04 and the teacher's EMA warmed up over 1 epoch.
+  That is the improved arm of the measurement record (`research/2026_dino_ssl_measurements.md`) with its warmup counted in epochs: its 295 steps were one epoch of one dataset and
+  batch, and an epoch of Imagenette is 266 steps at the data protocol of this code. The geometry follows the dataset: `cifar10` is 32 px at patch 4 (grid 8 x 8) and `imagenette` is 96 px
+  at patch 16 (grid 6 x 6), the record's scale (the legacy trainer's 224 px was never run). Every view, the local crops too, is rendered at `transform_args.image_size`.
+* **Keys of the task** (`python -m train dino` lists all, with their help; the shared groups and top-level keys mean what they mean for the other tasks). `data.dataset` is required
+  (`cifar10` or `imagenette`); `transform_args` holds the one key `image_size` (there is no `augment` key: the multi-crop map applies the DINO augmentations itself); there is no `loss_args` group.
+
+<!-- keys-of: dino -->
+| Key | Default | Read at |
+|---|---|---|
+| `data.format` | `"builtin"` | `DinoData`; the only value |
+| `data.validation_split` | `null` | `DinoTrainer.build_data`, then `train.common.dino_data.load_dino_batches`; null is the loader's 0.1 |
+| `data.max_samples` | `null` | the same path (the test split is never capped); `debug_args.smoke` sets 512 when null |
+| `data.patch_size` | `"auto"` | `DinoData.resolve_auto`, `train.api.dino_args.check_geometry` (a power of 2 that divides `transform_args.image_size` and leaves at least 5 tokens per view, before the claim); auto is 4 for cifar10 and 16 for imagenette |
+| `data.n_local_crops` | `"auto"` | `DinoData.resolve_auto`, `DinoTrainer.build_model`; at least 1; auto is 4 |
+| `transform_args.image_size` | `"auto"` | `DinoTrainer.describe_data`, `DinoTrainer.build_data`; auto is 32 for cifar10 and 96 for imagenette |
+| `metric_args.watch_metric` | `"auto"` | `DinoMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`; auto is `dino_knn_top1_k20`, the only value accepted (a run has no `val_loss`) |
+| `metric_args.watch_mode` | `"auto"` | the same path; auto is `max`, the only value accepted |
+
+  `debug_args.smoke` runs one epoch on at most 512 train samples and applies no bar (`success` and `success_threshold` are null; both parts of the bar are still reported).
+  Refused before the claim, each by name: `analysis_args.conformal_alpha` (a conformal set is a set of classes), a `precision` other than `float32`, a constant schedule and
+  `checkpoint_args.backup_every_steps` (table below); `optim_args.optimizer=sgd` with a positive `optim_args.weight_decay` is refused, because the adapter builds no L2 penalty.
+* **The bar has two parts, and both are required.** (1) `success_value` is the best `dino_knn_top1_k20` of the selection window (the checkpoint's epoch, not the mean of the last
+  three the legacy record used) and it is STRICTLY above `success_threshold`, `max(baseline, epoch zero) + margin`, in k-NN accuracy units, where `baseline` is the accuracy of
+  constant features against the real labels (0.0909 to 0.1110 over six seeds on Imagenette's ten classes) and epoch zero is the untrained model's probe (0.2780 to 0.3055). No float32
+  tie band applies: an accuracy moves in steps of 1 over the queries (1/946 on Imagenette). The margin is 0.050 for Imagenette and 0.085 for cifar10, and it is a function of two
+  measured spreads of a random-init model's probe (`margin_of` in `train/api/tasks/dino.py`, so a constant cannot move without its arithmetic): three times the square root of
+  two times the standard deviation over six seeds (0.0103 on Imagenette, 0.0198 on cifar10, which is 0.0437 and 0.0840), and the 99th percentile of the best of 60 random-init
+  draws above the epoch-zero value (0.0487 and 0.0416; the bias of a best-of-60 is 0.0206 on average on Imagenette), rounded up to 0.005. On Imagenette the second binds, and the first
+  margin, 0.045, was raised to 0.050 for it; the record's two trained runs gained 0.1426 and 0.1693 on this probe over their zero-step control, about three times the margin.
+  (2) At every epoch of the selection window `dino_collapse_flag` is 0 and `dino_teacher_entropy_is_centered` is 1 (a NaN is an offence: the flag misses exactly-zero features and
+  never trips on a NaN entropy). A random-init model, a constant-feature model, a collapsed teacher and a run that meets one part only each miss: exit 1, the run kept, and
+  `results_summary.json` says which (`bar.part1` and `bar.part2`, with the first offending epoch and its reason, beside `baseline`, `epoch_zero`, `margin`, `best`, `last3_mean`,
+  `collapse_max` and `selection`).
+* **No validation data, and why `evaluate` is never called.** `DINOLoss` moves its centre inside `call`, and Keras calls the loss in `evaluate` and on validation batches, so one
+  validation pass would move the centre with a finite loss and a clean exit. The task passes no `validation_data` (the one hook this phase added to the shared sequence,
+  `validation_stream`, returns the selection stream for every other task and nothing here), never calls `model.evaluate` or `test_on_batch`, and a spy test counts that the loss's centre moves
+  exactly the steps of an epoch. **Epoch zero** is therefore the untrained model's probe computed on the frozen networks directly, with the loss of ONE multi-crop batch through a
+  throwaway loss with a zero centre: the run's centre, weights, optimizer step and random state are untouched. `init_scale_warning` is null (a DINO loss at random initialisation is no
+  scale test); a non-finite loss is refused.
+* **The probe.** Every epoch, at 64 bank batches and up to 32 query batches (2,048 bank rows and 946 query rows, 30 batches, on Imagenette), the student's CLS features of the first
+  bank batches of the fit rows vote on the first selection batches, k = 10 and 20, through one compiled feature extractor (3.4 times faster than the eager one with the same votes). It writes seven keys
+  into every epoch's logs, so into `training_log.csv`: `dino_knn_top1_k10`, `dino_knn_top1_k20`, `dino_feat_mean_cos`, `dino_teacher_entropy`, `dino_teacher_entropy_norm`,
+  `dino_teacher_entropy_is_centered` and `dino_collapse_flag`. The monitor is finite every epoch (NaN marks a diverged run), so the cadence is not a knob, and the bank is never cut to
+  save time (the margin was derived at this estimator). The bank and the queries are cached once: epoch zero, every epoch, the reload check of `best_model.keras` and the test split (read
+  once after `fit`, by the best and the last weights) use the same extractor and the same rows. The split is a function of `seed` alone; the training shuffle and crops follow a stream seed.
+* **`best_model.keras` is the whole training model.** The checkpoint is selected on `dino_knn_top1_k20`, so the file is the epoch the verdict judged: the student, the teacher and both
+  heads, with the loss's centre in its compile config. `final_model.keras` is the last epoch's. `predict` and `export` DERIVE the feature model from it at every load: the student's post-final-norm
+  CLS token (never the head's output), image in, embedding out. `predict model=<run> data=<image or directory> out=<new directory>` writes one float32 `.npy` of shape `(192,)` per image for
+  `tiny` and LAST `index.json`. `export` writes the feature model at the trained size only, in `keras`, `saved_model`, `tflite` and `onnx`; all four convert, and through the real command on a real
+  default-size run the worst difference from Keras was 3.2e-6 against an allowed 4.1e-4 (a recorded measurement: the tests hold the cells and the tolerance, not that figure). The `keras` file holds library layers only, so
+  it loads where `train` cannot be imported; a SavedModel (and the directory beside a tflite file) also carries the training model's weights, the teacher's and the heads', so it is 117 MB against 22 MB for the other files.
+  The record is the tenth record kind: a run writes `task.json` (schema version 2, the tenth record kind) before its first epoch: `input_size`, `channels`, `normalize`, `mean`, `std`,
+  `patch_size`, `n_local_crops`, `dino_out_dim`, `embedding_dim` and `output` (`cls_embeddings`); a resume compares the seven from `input_size` to `n_local_crops`.
+* **Resume.** `resume_interrupted=true` with the same `out` and request continues a killed run. The loss's centre, which no weights file carries, is restored from `dino_centre.npy` in
+  `checkpoints/`, written atomically at every epoch end; the teacher's EMA position is read from the optimizer's step, so it survives; the training stream continues on a fresh
+  stream derived from the seed and the steps completed, never epoch 0's order, and the selection, test and probe streams stay fixed. `checkpoint_args.backup_every_steps` is refused by
+  name: a mid-epoch copy would pair the weights of a step with the centre of the last epoch end. A resume is NOT the unkilled run's trajectory (`resume_stream_exact` stays false), and a kill
+  between the weights copy and the centre file leaves the centre one epoch off (ahead of the weights, stated here).
+* **`init`.** A `dino` run seeds a `vit` classification run by its student: `transformer_block_N` renamed `transformer_layer_N` (any number of digits), the projection head dropped, the
+  classification head fresh, the patch taken from the source's record. `vit/vit_tiny` after `dino_v1/tiny` at 96 px and patch 16 copies 150, resets 2 (the classification head) and drops 7 (the projection head); a `vit` of another width is refused after the claim by the weight check. **A `dino` run is no `init` target**, for any source, refused before the claim with the reason named: its model holds a student and a
+  teacher at the same weight paths, so a copy would need a teacher re-sync this task does not do, and epoch zero under `init` would call `model.evaluate`. A resume never reads the source.
+* **What is refused, and the message.** Before the run directory is claimed (exit 2, nothing claimed); a message quoted with `<run>`, `<out>` or `...` is abbreviated there, and each piece between those marks is the code's own, in that order:
+
+| Case | Message |
+|---|---|
+| a family of another task | `Invalid value for 'model': the family 'vit' trains image_classification, not 'dino'; the families of 'dino' are dino_v1` |
+| `data.patch_size=3` | `Invalid value for 'data.patch_size': 3 is not a power of 2: the offered patches (16 at 96 px, 4 at 32 px) are, and no run used another (transform_args.image_size is 96); the patch must be a power of 2 that divides the image side and leaves at least 5 tokens per view` |
+| `model_args.student_temp=0.2` | `Invalid value for 'model_args.student_temp': student_temp is not offered by 'dino_v1' (the measurement record names no value for it, and no run of this task varies it (the task uses 0.1)), got 0.2` |
+| `model_args.teacher_temp_final=0.03` below `model_args.teacher_temp` | `Invalid value for 'model_args.teacher_temp_final': 0.03 is below teacher_temp 0.04: it is the END of a warmup that starts at teacher_temp (the record ran 0.04 to 0.04 and the paper 0.04 to 0.07, neither falls), and no run measured a falling schedule` |
+| `precision=mixed_float16` | `Invalid value for 'precision': expected float32 for dino (the loss's centre update and the teacher's EMA were never measured in a mixed precision), got 'mixed_float16'` |
+| `optim_args.schedule=constant` | `Invalid value for 'optim_args.schedule': 'constant' adds a ReduceLROnPlateau(monitor='val_loss') to the run, and a dino run has no validation data, so it would warn at the end of every epoch and never act; use 'cosine_decay', the recipe's` |
+| `checkpoint_args.backup_every_steps=100` | `Invalid value for 'checkpoint_args.backup_every_steps': 100; a copy in the middle of an epoch would pair the weights of that step with the loss's centre of the last epoch end (the centre is not in the weights file and moves with every batch), so a resume from it would train on a centre the weights never had; leave it null: a run is backed up at every epoch end` |
+| any `init` into a `dino` run (a `dino`, a `beit_mim`, a `vit`) | `` Invalid value for 'init': a dino run is no `init` target: its model holds a student and a teacher at the same weight paths, so a copy would need a teacher re-sync that this task does not do, and epoch zero under `init` would call `model.evaluate`, which advances the loss's centre; a dino run can seed a `vit` classification run of its own width and depth instead (model=vit/vit_tiny after dino_v1/tiny) `` |
+| `init` from a `dino` run into another classifier, for example `model=resnet/resnet18` | `Invalid value for 'init': dino_v1 (dino) cannot seed resnet (image_classification); resnet takes weights from resnet (image_classification)` |
+
+* **Limits.** **Not gate-measured:** `cifar10` (its recipe row, patch 4 at 32 px, is a configuration and its margin of 0.085 comes from a random-init null alone: no cifar10 DINO run has been trained) and the `small` variant; the gate trains
+  Imagenette with `tiny`. The improved arm's numbers in the record (the 0.1426 and 0.1693 above) were measured at the legacy data protocol and its 295 EMA steps; this code's recipe at the data protocol of
+  this repository is measured by the gate below only, and the first run at it is no repeat of the record's. A run shortened below the record's length can miss a margin it nearly meets (the record: 8 epochs of
+  EMA warmup alone gained 0.017). The best of up to 60 probes is optimistic by the best-of-N bias the margin already contains, and `last3_mean` is reported beside it. The bar judges
+  features a k-NN reads; it says nothing about a linear probe or a fine-tune. No `train_step`, no `validation_data` and no `evaluate` touch a DINO model, and the legacy trainer (`train/dino/train_dino.py`) is unchanged: the one change to its probe (`train/dino/knn_eval.py`) is an opt-in switch that is off by default.
+
+<!-- dino-gate:begin -->
+**Measured: the dino gate.** Not run. The GPU gate of `dino` (the Imagenette run of the tiny variant at the recipe, its controls, and a `vit` classifier from it and from scratch), run once at night on the final code of this phase, is not yet run, so this block holds no measurement: it is filled from the gate's own files by script when it has.
+<!-- dino-gate:end -->
+
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
 the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). A list is JSON with every text
@@ -1895,8 +2008,8 @@ spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or 
 
 **Starting from an earlier run: `init`** (plan 0fd54b91, `train/api/init_from.py`; the design and its decisions are in
 `research/roadmap/20261117_train_api_init_from.md`; pretrain and its two classifiers are plan 5c6cc105, below). `init=<run directory>`
-names an earlier `python -m train` run whose weights start this one, for every task (`pretrain`, `language_model_pretraining` and `beit_tokenizer` from a run of the same family
-only, `text_classification` from a run of the same family or, for `gpt2`, of `gpt2_lm`). A relative path starts at the repo root, as `out` does, and `train_<task>(init=...)`
+names an earlier `python -m train` run whose weights start this one, for every task but one (`pretrain`, `language_model_pretraining` and `beit_tokenizer` from a run of the same family
+only, `text_classification` from a run of the same family or, for `gpt2`, of `gpt2_lm`, and `image_classification` for `vit` also from a `dino` run); `dino` takes none (it is only a source). A relative path starts at the repo root, as `out` does, and `train_<task>(init=...)`
 takes a str or a `Path`. It replaced `checkpoint`, which is gone with no alias: `checkpoint=` on the command line, in a
 `config=` file or in a YAML mapping is refused by name, and a Python call with `checkpoint=` is a `TypeError`. The run builds its
 own model from its own config, then, before `compile`, copies the source's `best_model.keras` into it one weight at a time,
@@ -1937,6 +2050,9 @@ python -m train depth_estimation out=results/depth_364 model=depth_anything/vit_
 python -m train language_model_pretraining out=results/lm_synthetic_64 model=gpt2_lm/tiny data.dataset=synthetic data.tokenizer=ascii95 \
     data.seq_len=64 data.max_samples=200 epochs=3 batch_size=16 optim_args.lr=3e-3 \
     model_args.embed_dim=64 model_args.depth=2 model_args.num_heads=2 init=results/lm_synthetic
+# a dino run's student into a classifier of its own width and depth (the patch comes from the source's record)
+python -m train dino out=results/dino_inette model=dino_v1/tiny data.dataset=imagenette
+python -m train image_classification out=results/vit_from_dino model=vit/vit_tiny data.dataset=imagenette init=results/dino_inette
 # a language model into a classifier of the same decoder: the trunk copied path for path, the head fresh (the model sizes must agree)
 python -m train text_classification out=results/cls_gpt2_from_lm model=gpt2/tiny data.dataset=synthetic data.tokenizer=ascii95 \
     data.seq_len=32 data.max_samples=200 epochs=3 batch_size=16 optim_args.lr=3e-3 \
@@ -1956,10 +2072,12 @@ two is refused after the claim unless the segmenter is given `model_args.strides
 `final_output`; `tirex/tiny` from lookback 168 to 336 copies 47 of 47; `depth_anything/vit_s` at another size copies 235 of 235
 (the DINOv2 table is resampled inside the model at call time); `gpt2_lm/tiny` (64 wide, 2 blocks) from windows of 32 tokens to 64 copies
 30 of 30 and resets none (no weight depends on the window), and into `gpt2/tiny` of the same sizes, a classifier, copies the same 30 and resets
-the 8 weights of `task_head`, dropping none (an `lm_head` an untied source holds is dropped, not refused). Those four, the two pretrain pairs
-below and that language-model pair are the seven declared cross-task pairs (the ConvUNext pair counts once each way); any other pair, and a
+the 8 weights of `task_head`, dropping none (an `lm_head` an untied source holds is dropped, not refused); `dino_v1/tiny` into `vit/vit_tiny` at 96 px and patch 16 copies 150, resets the 2 weights of `classification_head` and drops
+the 7 of `dino_projection_head` (the student's backbone, see `dino`). Those five, the two pretrain pairs
+below and that language-model pair are the eight declared cross-task pairs (the ConvUNext pair counts once each way); any other pair, and a
 width change (`convnext_v2` atto to femto: 139 of 140 weights differ), are refused, `bert` has no cross-task source (an encoder cannot start
-from a causal decoder), and a language-model run into it is refused by the declared-sources sentence (the table of the `text_classification` section). A `beit_tokenizer` run takes an
+from a causal decoder), and a language-model run into it is refused by the declared-sources sentence (the table of the `text_classification` section).
+A `beit_tokenizer` run takes an
 earlier run of its own task only, so it is no pair: `vq_vae_rotation/small` copies 47 of 47 and resets none at its own size, and the engine would copy all 47 into a 64 px model too,
 which `init` refuses by policy (see `beit_tokenizer`).
 
@@ -2002,6 +2120,7 @@ statistics alone, D-048) and fresh otherwise
 | no `task.json` | `Invalid value for 'init': <run>/task.json does not exist; a source is a python -m train run, which writes it before its first epoch (legacy trainer runs and runs made before their task wrote one have none)` |
 | no `best_model.keras` | `Invalid value for 'init': <run> holds no best_model.keras (the run ended before its first epoch)` |
 | a pair not declared | `Invalid value for 'init': <family> (<task>) cannot seed <family> (<task>); <family> takes weights from <its declared sources>`, for example `beit (image_classification) cannot seed beit_mim (pretrain); beit_mim takes weights from beit_mim (pretrain)` |
+| a source no declared pair names, for example a language model into a `vit` | `Invalid value for 'init': gpt2_lm (language_model_pretraining) cannot seed vit (image_classification); vit takes weights from vit (image_classification) or dino_v1 (dino)` |
 | a geometry the family sizes its weights by | `Invalid value for 'init': nbeats sizes its weights by data.lookback; the source trained at 168, this run asks for 336 (families of time_series_forecasting that keep every weight across a data.lookback change: ets, timestral, tirex, xlstm)`; every key that differs is named: `et_mim sizes its weights by transform_args.image_size and data.patch_size; the source trained at [32, 32] and 4, this run asks for [224, 224] and 16` |
 | another input scaling | `Invalid value for 'init': the source standardizes its input and this run takes its input in [0, 1] (transform_args.normalize)` |
 | a resume of a pretrain run recorded before the rename | `Cannot resume <run>: it is a pretrain run recorded before its family was renamed (energy_transformer to et_mim, beit to beit_mim), so its config_requested.json names 'energy_transformer/et_tiny', which no pretrain request can name, and it cannot be resumed. Start a new run with another 'out'; it cannot be an init source either (it has no task.json)` (D-052) |
