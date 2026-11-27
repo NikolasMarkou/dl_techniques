@@ -206,12 +206,13 @@ def test_the_families_listed_here_are_the_classification_families_registered():
     # checked in test_image_segmentation_task.py and test_segmentation_metrics.py. The two pretrain families
     # (`beit_mim`, `et_mim`), the seven forecasting families, the depth family (`depth_anything`), the language
     # family (`gpt2_lm`, plan 7806a290 step 4), the two text-classification families (`bert`, `gpt2`, step 10) and the tokenizer
-    # family (`vq_vae_rotation`, plan-2026-11-25T124419-fa94f59c step 6) have their own task and tests.
+    # family (`vq_vae_rotation`, plan-2026-11-25T124419-fa94f59c step 6) and the dino family (`dino_v1`, plan-2026-11-26T224507-e3381378 step 6)
+    # have their own task and tests.
     classifiers = sorted(f for f, spec in registry.MODELS.items() if spec.tasks == ("image_classification",))
     assert sorted(family for family, _ in FAMILIES) == classifiers
     assert sorted(set(registry.MODELS) - set(classifiers)) == [
         "accunet", "beit_mim", "bert", "bfcnn", "bfconvunext", "bfunet", "convnext_seg", "convunext", "convunext_biased",
-        "depth_anything", "et_mim", "ets", "gpt2", "gpt2_lm", "mdn", "nbeats", "prism", "resnet_seg", "scunet", "timestral",
+        "depth_anything", "dino_v1", "et_mim", "ets", "gpt2", "gpt2_lm", "mdn", "nbeats", "prism", "resnet_seg", "scunet", "timestral",
         "tirex", "vq_vae_rotation", "xlstm",
     ]
 

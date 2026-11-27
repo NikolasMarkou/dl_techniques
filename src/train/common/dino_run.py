@@ -43,6 +43,10 @@ Interface contract
     :return: a new ``KNNEvalCallback`` over the data's cached bank and query streams: compiled extractor (D-025), ``k`` 10 and 20, every epoch,
         no random-init control file. The ONE place the probe is configured: epoch zero, every epoch and the reload check call it.
 
+``constant_feature_baseline(data)``
+    :return: ``{dino_knn_top1_k<k>: accuracy}`` of CONSTANT features against the real labels of the data's bank and queries: what a representation
+        that carries no information scores. Labels only: no model, so a resumed run (which never calls ``epoch_zero``) reads it too.
+
 ``epoch_zero(model, data, loss)``
     :return: an :class:`EpochZero`: ``probe`` (every log key of the probe on the untrained model, through ``evaluate_split``), ``baseline``
         (the k-NN accuracy of constant features against the real labels, per ``k``: what a representation that carries no information scores) and
@@ -242,6 +246,16 @@ def _labels_of(stream: "tf.data.Dataset") -> np.ndarray:
     return np.concatenate([np.asarray(batch[1]).reshape(-1) for batch in stream])
 
 
+def constant_feature_baseline(data: DinoBatches) -> Dict[str, float]:
+    """The k-NN accuracy of constant features against the real labels of the data's bank and queries, per ``k``; see ``epoch_zero``."""
+    bank_labels, query_labels = _labels_of(data.probe_bank_ds), _labels_of(data.probe_query_ds)
+    return {
+        f"dino_knn_top1_k{k}": float(knn_top1_accuracy(
+            np.ones((len(bank_labels), 1)), bank_labels, np.ones((len(query_labels), 1)), query_labels, k=k,
+            temperature=DEFAULT_KNN_TEMPERATURE, num_classes=None))
+        for k in DEFAULT_KS}
+
+
 def epoch_zero(model: Any, data: DinoBatches, loss: DINOLoss) -> EpochZero:
     """The :class:`EpochZero` of ``model``; see the module contract."""
     # DECISION plan-2026-11-26T224507-e3381378/D-022
@@ -258,12 +272,7 @@ def epoch_zero(model: Any, data: DinoBatches, loss: DINOLoss) -> EpochZero:
     probe.set_model(model)
     metrics = {key: float(value) for key, value in probe.evaluate_split(data.probe_query_ds, data.query_batches).items()}
 
-    bank_labels, query_labels = _labels_of(data.probe_bank_ds), _labels_of(data.probe_query_ds)
-    baseline = {
-        f"dino_knn_top1_k{k}": float(knn_top1_accuracy(
-            np.ones((len(bank_labels), 1)), bank_labels, np.ones((len(query_labels), 1)), query_labels, k=k,
-            temperature=DEFAULT_KNN_TEMPERATURE, num_classes=None))
-        for k in probe.ks}
+    baseline = constant_feature_baseline(data)
 
     throwaway = DINOLoss(
         out_dim=loss.out_dim, student_temp=loss.student_temp, teacher_temp=loss.teacher_temp, center_momentum=loss.center_momentum)

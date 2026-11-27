@@ -286,7 +286,7 @@ Relations recorded: `same_split`, `different_data` (other builtin dataset, anoth
 | Input-channel adaptation (timm's `adapt_input_conv`, RGB to grey) | No consumer: segmentation, depth and pretrain fix RGB, a grey denoiser would be the only one | Not planned; refused by name as a stem change |
 | Width or block-type variant changes | Under 8 percent of weights fit | Not planned; refused by the weight-level check |
 | Cross-family pairs beyond the four declared | No shared architecture in the registry | A new family row declares its `sources` |
-| DINO (v1), Phase 5 wrappers | Not tasks yet (`language_model_pretraining` and `text_classification` shipped in Phase 4i, `beit_tokenizer` in Phase 4j) | Their own phases |
+| DINO (v1), Phase 5 wrappers | Not tasks yet for the wrappers (`language_model_pretraining` and `text_classification` shipped in Phase 4i, `beit_tokenizer` in Phase 4j, `dino` in Phase 4k) | Their own phases |
 
 ---
 

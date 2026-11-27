@@ -47,8 +47,8 @@ REQUEST = {
     "metric_args.success_threshold": 0.0,
     "analysis_args.figures": False,
 }
-#: The tasks that override ``validation_stream``. Phase 4k's DINO task joins this set in the step that registers it.
-OVERRIDERS = set()  # class names
+#: The tasks that override ``validation_stream``. The dino task (plan-2026-11-26T224507-e3381378 step 6) is the one of them.
+OVERRIDERS = {"DinoTrainer"}  # class names
 
 IMAGE = 32
 PATCH = 16

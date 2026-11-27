@@ -72,7 +72,7 @@ def test_the_family_count_and_its_split_over_the_tasks_are_the_registrys(world):
 
 
 def test_the_number_of_tasks_is_the_registrys_in_both_documents(world):
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
     sentence = f"It has {words[len(registry.TASKS)]} tasks"
     assert FORECASTING in registry.TASKS
     assert sentence in README.read_text() and sentence in AGENTS.read_text()
@@ -87,8 +87,8 @@ def test_every_other_n_tasks_phrase_counts_the_tasks_of_the_registry_but_one(wor
 
     The denoising section kept "the other three tasks" after the pretrain and forecasting tasks were added; no test read it.
     """
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
-    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight|nine) tasks?\b")
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight|nine|ten) tasks?\b")
     found = pattern.findall(README.read_text()) + pattern.findall(AGENTS.read_text())
     assert len(found) >= 3, "the control: the README names the other tasks in the denoising, pretrain and forecasting sections"
     assert set(found) == {words[len(registry.TASKS) - 1]}, found
@@ -681,19 +681,21 @@ def test_the_lost_tokenizers_sha256_is_quoted_in_full_once():
 
 def test_the_repo_map_and_the_roadmaps_count_the_tasks_the_registry_has(world):
     """Plan fa94f59c step 9: three documents no other test reads say how many tasks there are and which is the newest (a stale count stayed in the roadmap)."""
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
     names = [spec.name for spec in BUILTIN_TASKS]
     newest = names[-1]
-    ordinal = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth")[len(names) - 1]
-    assert newest == "beit_tokenizer" and len(names) == len(registry.TASKS)
+    ordinal = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")[len(names) - 1]
+    assert newest == "dino" and names[-2] == "beit_tokenizer" and len(names) == len(registry.TASKS)
     repo_map = " ".join((ROOT / "REPO_MAP.md").read_text().split())
     scripts = " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split())
     init = " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split())
-    assert f"The {ordinal} task, `{newest}`, trains the BEiT tokenizer that a `beit_mim` run reads" in repo_map
-    assert f"`python -m train <task> help` of all {words[len(names)]};" in scripts and f"and `{newest}` (Phase 4j), in that order" in scripts
-    assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Phase 4j: the BEiT tokenizer. Code done, GPU gate run**" in scripts
+    assert "The ninth task, `beit_tokenizer`, trains the BEiT tokenizer that a `beit_mim` run reads" in repo_map
+    assert f"The {ordinal} task, `{newest}`, trains a DINOv1 self-supervised ViT" in repo_map
+    assert f"`python -m train <task> help` of all {words[len(names)]};" in scripts and f"`beit_tokenizer` (Phase 4j) and `{newest}` (Phase 4k), in that order" in scripts
+    assert f"`beit_tokenizer` is the ninth task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Phase 4j: the BEiT tokenizer. Code done, GPU gate run**" in scripts
+    assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['dino_v1'].family}`" in scripts and "Phase 4k: DINO." in scripts
     assert ("Phase 4j (plan fa94f59c, branch `train-api/phase-4j`: code done, its GPU gate run, numbers in `src/train/README.md` under "
-            "\"Measured: the tokenizer gate\")") in init and f"`{newest}` in Phase 4j" in init
+            "\"Measured: the tokenizer gate\")") in init and "`beit_tokenizer` in Phase 4j" in init and f"`{newest}` in Phase 4k" in init
     # Review pass 2, N4: both roadmaps state what the code does: the bar's two floors, and the two entries of the family row that lift the size refusal of `init`
     from train.common import pretrain_run, tokenizer_data as td
 

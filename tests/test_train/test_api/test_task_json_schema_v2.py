@@ -59,6 +59,7 @@ PRETRAIN = "pretrain"
 LANGUAGE = "language_model_pretraining"
 TEXT_CLASSIFICATION = "text_classification"
 BEIT_TOKENIZER = "beit_tokenizer"
+DINO = "dino"
 
 #: The keys and order of a version 1 classification record, written out (not read from the module).
 V1_KEYS = [
@@ -156,10 +157,10 @@ def without(value, *keys):
 # ---------------------------------------------------------------------
 
 
-def test_the_version_is_two_and_the_tables_are_the_nine_tasks():
+def test_the_version_is_two_and_the_tables_are_the_ten_tasks():
     assert SCHEMA_VERSION == 2
     assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH, PRETRAIN, LANGUAGE,
-                                          TEXT_CLASSIFICATION, BEIT_TOKENIZER])
+                                          TEXT_CLASSIFICATION, BEIT_TOKENIZER, DINO])
     assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
     assert OPTIONAL_RECORD_KEYS == ("variant_overrides", "init", "tokenizer_dir")
 

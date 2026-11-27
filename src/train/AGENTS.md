@@ -539,8 +539,8 @@ an exemption to green a newly dead field.
 
 `src/train/api/` is a key=value command line and a Python function over strict configs, beside the
 per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
-[`README.md`](README.md)). It has nine tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain`,
-`time_series_forecasting`, `depth_estimation`, `language_model_pretraining`, `text_classification` and `beit_tokenizer` (`python -m train list_tasks` prints them), each
+[`README.md`](README.md)). It has ten tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain`,
+`time_series_forecasting`, `depth_estimation`, `language_model_pretraining`, `text_classification`, `beit_tokenizer` and `dino` (`python -m train list_tasks` prints them), each
 a `TaskTrainer` subclass in `api/tasks/` (`api/trainer.py:TaskTrainer` holds the hooks and the shared sequence). The
 classification task calls the same `train.common.classification_run` helpers as `train.convnext.common` in the same order.
 
@@ -587,8 +587,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   (`api/forecast_models.py:builtin_forecast_models`) and the one depth family
   (`api/depth_models.py:builtin_depth_models`) and the one language-model family
   (`api/text_models.py:builtin_text_models`, which also builds the two text-classification families, `bert` and `gpt2`) and the one tokenizer
-  family (`api/tokenizer_models.py:builtin_tokenizer_models`), so a guard that walks
-  `registry.MODELS` meets 31 families (8 + 4 + 5 + 2 + 7 + 1 + 1 + 2 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  family (`api/tokenizer_models.py:builtin_tokenizer_models`) and the one dino family (`api/dino_models.py:builtin_dino_models`), so a guard that walks
+  `registry.MODELS` meets 32 families (8 + 4 + 5 + 2 + 7 + 1 + 1 + 2 + 1 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
   classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
   layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
   changed once with another session's commits; a test fails when the head gains a knob).
@@ -705,10 +705,10 @@ classification task calls the same `train.common.classification_run` helpers as 
   `check_data_unchanged` were made against the original. `TaskTrainer.resume_order` (a class variable, default `None`) is the clause
   that says what a resume does to the data order, for the summary's resume note and, through `config.resume_help(order=)`, the help of
   `resume_interrupted`: the default text is the older tasks' ("replays epoch 0's"), a task whose `resume_stream` trains on another
-  stream sets it (`pretrain`, `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `language_model_pretraining` and `text_classification` do). `resume_help(backup=)` is the
+  stream sets it (`pretrain`, `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `dino`, `language_model_pretraining` and `text_classification` do). `resume_help(backup=)` is the
   help's clause on `checkpoint_args.backup_every_steps`: the default (`config.BACKUP_HELP`) says the key bounds the lost
-  work, and `depth_estimation`, which refuses the key, passes a clause saying so. Both hooks have six users today, `pretrain`,
-  `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `language_model_pretraining` and `text_classification`, the last two of which continue
+  work, and `depth_estimation`, which refuses the key, passes a clause saying so. Both hooks have seven users today, `pretrain`,
+  `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `dino`, `language_model_pretraining` and `text_classification`, the last two of which continue
   the stream at the settled step instead of deriving a seed. `TaskTrainer.resume_stream_exact` (a class variable, default `False`) says that a
   resume from a copy taken inside an epoch reads the batches the unkilled run reads next, because `resume_stream` returns the SAME stream
   at the settled step; two tasks set it today, `language_model_pretraining` and `text_classification`, and a task that derives another stream or replays epoch 0
@@ -942,12 +942,14 @@ classification task calls the same `train.common.classification_run` helpers as 
   of the first table it is missing from, and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
   only for a task whose `RECORD_KEYS` hold those keys. A record kind is a row in each of the 10 tables of `TASK_TABLES` plus one in each of the
   2 cli tables, `PREDICT_WRITERS` and `DATA_LISTERS`;
-  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. All nine tasks write a record, `pretrain`
+  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. All ten tasks write a record, `pretrain`
   the sixth (plan 5c6cc105 D-009; its predictor, served function and export check are `api/pretrain_predictor.py`, D-013),
   `language_model_pretraining` the seventh (plan 7806a290: `api/text_predictor.py`), `text_classification` the eighth (the same
   module, whose two predictors share a base class and the language model's export functions) and `beit_tokenizer` the ninth (plan fa94f59c
   D-044 to D-047: `api/tokenizer_predictor.py`, whose served function is the registered layer `TokenizerCodes` of `common/tokenizer_data.py`,
-  D-045; its `MODEL_CHECKS` row proves the code grid by running the model, and its family has an `observe`): do
+  D-045; its `MODEL_CHECKS` row proves the code grid by running the model, and its family has an `observe`) and `dino` the tenth (plan e3381378:
+  `api/dino_predictor.py`, whose served function is the derived feature model of the student; its `INPUT_SHAPE_OF` row is the rank-5 view set the
+  training model takes, its `MODEL_CHECKS` row holds the views, size, patch and widths to the record before the model is called): do
   not write a partial record for a new task, a record that exists makes `load_model` dispatch on the task's rows. Do not add an `elif task ==` to
   `load_model`, `input_shape_of`, `_run_on_zeros` or the predict command. The help text of `cli.PREDICT_OPTIONS` and
   `cli.EXPORT_NOTES` names every task's output; `test_export_per_family.py` pins phrases of it.

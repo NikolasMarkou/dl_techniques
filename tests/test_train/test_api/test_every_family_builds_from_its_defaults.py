@@ -141,9 +141,15 @@ TEXT_CLASSIFICATION = "text_classification"
 #: Its adapter, recipe and refusals are in ``test_beit_tokenizer_families.py``.
 TOKENIZER_VARIANTS = {"vq_vae_rotation": ["small"]}
 TOKENIZER = "beit_tokenizer"
+
+#: The one dino family (plan-2026-11-26T224507-e3381378 step 6); its two variants are the API's own table (the library's has three more). Its adapter,
+#: recipe and refusals are in ``test_dino_families.py``.
+DINO_VARIANTS = {"dino_v1": ["small", "tiny"]}
+DINO = "dino"
 ALL_VARIANTS = {
     **VARIANTS, **SEGMENTATION_VARIANTS, **DENOISING_VARIANTS, **PRETRAIN_VARIANTS, **FORECAST_VARIANTS,
     **DEPTH_VARIANTS, **LANGUAGE_VARIANTS, **TEXT_CLASSIFICATION_VARIANTS, **TOKENIZER_VARIANTS,
+    **DINO_VARIANTS,
 }
 
 
@@ -173,8 +179,8 @@ def test_the_listing_is_the_literal_variant_tables(builtin):
     expected = sorted(f"{f}/{v}" for f, names in ALL_VARIANTS.items() for v in names)
     # 76 before the pretrain families (3 + 4), the forecasting families (23), depth (3); 109 + 4 + 3 classifier
     # variants of beit and energy_transformer (plan 5c6cc105 Step 5), the 5 variants of gpt2_lm, the 4 + 5 of the two
-    # text classifiers, and the one of the tokenizer.
-    assert len(expected) == 131
+    # text classifiers, the one of the tokenizer, and the two of dino.
+    assert len(expected) == 133
     assert registry.list_models() == expected
     for family, spec in builtin.items():
         if family in SEGMENTATION_VARIANTS:
@@ -193,6 +199,8 @@ def test_the_listing_is_the_literal_variant_tables(builtin):
             assert spec.tasks == (TEXT_CLASSIFICATION,), family
         elif family in TOKENIZER_VARIANTS:
             assert spec.tasks == (TOKENIZER,), family
+        elif family in DINO_VARIANTS:
+            assert spec.tasks == (DINO,), family
         else:
             assert spec.tasks == (TASK,), family
 
@@ -213,6 +221,7 @@ def test_the_task_filter_keeps_every_family_of_the_task(builtin):
     registry.register_task(registry.TaskSpec(LANGUAGE, "x.y:Config", "x.y:run", "language model pretraining"))
     registry.register_task(registry.TaskSpec(TEXT_CLASSIFICATION, "x.y:Config", "x.y:run", "text classification"))
     registry.register_task(registry.TaskSpec(TOKENIZER, "x.y:Config", "x.y:run", "tokenizer"))
+    registry.register_task(registry.TaskSpec(DINO, "x.y:Config", "x.y:run", "dino"))
     classifiers = sorted(f"{f}/{v}" for f, names in VARIANTS.items() for v in names)
     segmenters = sorted(f"{f}/{v}" for f, names in SEGMENTATION_VARIANTS.items() for v in names)
     denoisers = sorted(f"{f}/{v}" for f, names in DENOISING_VARIANTS.items() for v in names)
@@ -222,6 +231,7 @@ def test_the_task_filter_keeps_every_family_of_the_task(builtin):
     language = sorted(f"{f}/{v}" for f, names in LANGUAGE_VARIANTS.items() for v in names)
     text = sorted(f"{f}/{v}" for f, names in TEXT_CLASSIFICATION_VARIANTS.items() for v in names)
     tokenizers = sorted(f"{f}/{v}" for f, names in TOKENIZER_VARIANTS.items() for v in names)
+    dino = sorted(f"{f}/{v}" for f, names in DINO_VARIANTS.items() for v in names)
     assert registry.list_models(TASK) == classifiers
     assert registry.list_models(SEGMENTATION) == segmenters
     assert registry.list_models(DENOISING) == denoisers
@@ -231,8 +241,9 @@ def test_the_task_filter_keeps_every_family_of_the_task(builtin):
     assert registry.list_models(LANGUAGE) == language
     assert registry.list_models(TEXT_CLASSIFICATION) == text
     assert registry.list_models(TOKENIZER) == tokenizers
+    assert registry.list_models(DINO) == dino
     assert sorted(
-        classifiers + segmenters + denoisers + pretrainers + forecasters + depth + language + text + tokenizers
+        classifiers + segmenters + denoisers + pretrainers + forecasters + depth + language + text + tokenizers + dino
     ) == registry.list_models()
     # Control: a family that lists another task drops out of the filter.
     other = dataclasses.replace(builtin["vit"], family="other_vit", tasks=("else",))

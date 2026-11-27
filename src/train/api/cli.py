@@ -201,7 +201,7 @@ from .config import (
 from .errors import ConfigError, ConfigValidationError, DLTrainError
 from .forecast_predictor import FLAT_WINDOW_EXPORT_NOTE
 from .predictor import (
-    BEIT_TOKENIZER, CLASSIFICATION, CLASSIFICATION_EXPORT_REFUSALS, DENOISING, DEPTH, FORECASTING, LANGUAGE_MODEL, PRETRAIN,
+    BEIT_TOKENIZER, CLASSIFICATION, CLASSIFICATION_EXPORT_REFUSALS, DENOISING, DEPTH, DINO, FORECASTING, LANGUAGE_MODEL, PRETRAIN,
     SEGMENTATION, TEXT_CLASSIFICATION, known_tasks_line, record_beside,
 )
 from .pretrain_predictor import EXPORT_REFUSALS as PRETRAIN_EXPORT_REFUSALS
@@ -652,6 +652,19 @@ def _predict_codes(model_path: Path, record: Mapping[str, Any], files: List[Path
     return 0
 
 
+def _predict_features(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the CLS embeddings of ``files`` as ``.npy`` arrays and an index into the new directory ``out``."""
+    from .depth_predictor import ARRAY_SUFFIX
+    from .dino_predictor import write_predictions
+    from .predictor import load_model
+    from .segmentation_predictor import mask_names
+
+    mask_names(files, ARRAY_SUFFIX)  # two images with one stem are refused before the model is loaded
+    write_predictions(load_model(model_path), files, out)
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
 def _text_files(data: Path) -> List[Path]:
     """Return ``[data]``: a ``.txt`` or a ``.jsonl`` file; a directory or another suffix is refused by name."""
     from .text_predictor import list_data
@@ -694,6 +707,7 @@ DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
     LANGUAGE_MODEL: _text_files,
     TEXT_CLASSIFICATION: _text_files,
     BEIT_TOKENIZER: _image_files,
+    DINO: _image_files,
 }
 
 #: What ``predict`` writes, per task: ``writer(model_path, record, files, out) -> exit code``. A task
@@ -710,6 +724,7 @@ PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path],
     LANGUAGE_MODEL: _predict_documents,
     TEXT_CLASSIFICATION: _predict_labelled_documents,
     BEIT_TOKENIZER: _predict_codes,
+    DINO: _predict_features,
 }
 
 

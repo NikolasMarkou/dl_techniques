@@ -137,3 +137,74 @@ def weights_of(model: Any) -> List[np.ndarray]:
 
 def same_arrays(a: List[np.ndarray], b: List[np.ndarray]) -> bool:
     return len(a) == len(b) and all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+# ---------------------------------------------------------------------
+# The task world (step 6): a tiny REAL run of the ``dino`` task on the real CIFAR-10 rows
+# ---------------------------------------------------------------------
+#
+# ``task_request(out, **changes)``: the mapping of a tiny run of ``dino_v1/tiny`` (``dino_out_dim`` 64, 2 local crops, patch 8, 1,000 pool rows, 32 per
+# batch) that a dotted key adjusts. ``shallow_backbone(monkeypatch)``: the factory builds a ``DEPTH``-block backbone (12 blocks cost about a minute of
+# tracing per fit on a CPU; nothing a run tests depends on the depth). ``flatten_request(asked)``: ``key=value`` tokens for ``cli.main``.
+# ``csv_column(run_dir, name)``: a column of ``training_log.csv`` as floats. ``world`` (fixture, module scope): an empty registry holding every
+# built-in family and task.
+
+TASK_MODEL = "dino_v1/tiny"
+TASK_BATCH, TASK_EPOCHS, TASK_MAX_SAMPLES = 32, 2, 1000
+
+
+def task_request(out: Any, **changes: Any) -> dict:
+    """The mapping of a tiny real run; see the block comment above."""
+    from ._resume_protocol import merge_changes
+
+    asked = {
+        "out": str(out), "model": TASK_MODEL,
+        "data": {"dataset": "cifar10", "max_samples": TASK_MAX_SAMPLES, "patch_size": PATCH, "n_local_crops": N_LOCAL},
+        "epochs": TASK_EPOCHS, "batch_size": TASK_BATCH, "model_args": {"dino_out_dim": OUT_DIM},
+        "optim_args": {"lr": 1e-3, "warmup_epochs": 0},
+        "analysis_args": {"model_analysis": False, "figures": False},
+    }
+    return merge_changes(asked, changes)
+
+
+def shallow_backbone(monkeypatch: Any, depth: int = DEPTH) -> None:
+    """Make ``create_dino_model`` build a ``depth``-block backbone (the library factory takes ``depth``; the adapter does not pass one)."""
+    import dl_techniques.models.vision.dino.training as training
+
+    original = training.create_dino_training_model
+    monkeypatch.setattr(training, "create_dino_training_model", lambda *args, **kwargs: original(*args, depth=depth, **kwargs))
+
+
+def flatten_request(asked: dict) -> list:
+    """``key=value`` tokens as the command line takes them: groups are dotted, ``model_args`` is one JSON value."""
+    import json
+
+    tokens = []
+    for key, value in asked.items():
+        if isinstance(value, dict) and key != "model_args":
+            tokens += [f"{key}.{inner}={str(v).lower() if isinstance(v, bool) else v}" for inner, v in value.items()]
+        else:
+            tokens.append(f"{key}={json.dumps(value, separators=(',', ':')) if isinstance(value, dict) else value}")
+    return tokens
+
+
+def csv_column(run_dir: Any, name: str) -> List[float]:
+    import csv
+    from pathlib import Path
+
+    with open(Path(run_dir) / "training_log.csv", newline="") as handle:
+        return [float(row[name]) for row in csv.DictReader(handle)]
+
+
+@pytest.fixture(scope="module")
+def world():
+    """An empty registry holding every built-in family and task."""
+    from train.api import recipes, registry
+    from train.api.tasks import register_builtin_tasks
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(registry, "MODELS", {})
+        patch.setattr(registry, "TASKS", {})
+        recipes.register_builtin_models()
+        register_builtin_tasks()
+        yield

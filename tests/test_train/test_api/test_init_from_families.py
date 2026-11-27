@@ -70,6 +70,7 @@ TEXT_CLASSIFICATION = "text_classification"
 #: The tokenizer task has one family, ``vq_vae_rotation`` (plan-2026-11-25T124419-fa94f59c): censused at the end of the file, as the pretrain
 #: and language rows are.
 TOKENIZER, TOKENIZER_FAMILY = "beit_tokenizer", "vq_vae_rotation"
+DINO_TASK = "dino"
 #: The tasks that take ``init``.
 INIT_TASKS = (CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH)
 
@@ -210,13 +211,15 @@ def undeclared(specs: Mapping[str, registry.ModelSpec]) -> List[str]:
 
 
 def test_every_row_declares_a_spec():
-    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL, TEXT_CLASSIFICATION, TOKENIZER}
+    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL, TEXT_CLASSIFICATION, TOKENIZER, DINO_TASK}
     assert all(len(spec.tasks) == 1 for spec in registry.MODELS.values())
     assert undeclared(registry.MODELS) == []
     assert sum(task_of(family) == PRETRAIN for family in registry.MODELS) == 2
     assert sum(task_of(family) == LANGUAGE_MODEL for family in registry.MODELS) == 1
     assert sum(task_of(family) == TEXT_CLASSIFICATION for family in registry.MODELS) == 2
     assert sum(task_of(family) == TOKENIZER for family in registry.MODELS) == 1
+    # A dino run is no `init` target (plan-2026-11-26T224507-e3381378 D-013): its row declares nothing and the census never measures it.
+    assert sum(task_of(family) == DINO_TASK for family in registry.MODELS) == 1
 
 
 def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():

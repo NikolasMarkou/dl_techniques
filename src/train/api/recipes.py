@@ -18,7 +18,8 @@ Interface contract
     :func:`train.api.forecast_models.builtin_forecast_models`,
     :func:`train.api.depth_models.builtin_depth_models`,
     :func:`train.api.text_models.builtin_text_models` and
-    :func:`train.api.tokenizer_models.builtin_tokenizer_models`) into
+    :func:`train.api.tokenizer_models.builtin_tokenizer_models` and
+    :func:`train.api.dino_models.builtin_dino_models`) into
     :data:`train.api.registry.MODELS`. Idempotent: a family already registered is
     left alone. Imports no model code. The count of families is ``len(MODELS)``, never written here.
 
@@ -1054,6 +1055,7 @@ def register_builtin_models() -> None:
     # ``merge_model_args``), so a module-scope import would be a cycle.
     from .denoising_models import builtin_denoising_models
     from .depth_models import builtin_depth_models
+    from .dino_models import builtin_dino_models
     from .forecast_models import builtin_forecast_models
     from .pretrain_models import builtin_pretrain_models
     from .segmentation_models import builtin_segmentation_models
@@ -1063,6 +1065,7 @@ def register_builtin_models() -> None:
     for spec in (
         *builtin_models(), *builtin_segmentation_models(), *builtin_denoising_models(), *builtin_pretrain_models(),
         *builtin_forecast_models(), *builtin_depth_models(), *builtin_text_models(), *builtin_tokenizer_models(),
+        *builtin_dino_models(),
     ):
         if spec.family not in registry.MODELS:
             registry.register_model(spec)

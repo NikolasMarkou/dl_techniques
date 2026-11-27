@@ -999,7 +999,7 @@ def test_every_earlier_tasks_input_spec_sentence_is_the_one_it_always_was_and_th
     ranks = {task: len(rule.shape_of(SHAPE_RECORD)) for task, rule in predictor.EXPORT_RULES.items()}
     assert ranks == {
         "image_classification": 3, "image_segmentation": 3, "image_denoising": 3, "time_series_forecasting": 2,
-        "depth_estimation": 3, "pretrain": 3, "language_model_pretraining": 1, "text_classification": 1, "beit_tokenizer": 3,
+        "depth_estimation": 3, "pretrain": 3, "language_model_pretraining": 1, "text_classification": 1, "beit_tokenizer": 3, "dino": 3,
     }
     for task, rank in ranks.items():
         bad = (0,) * rank
@@ -1108,7 +1108,7 @@ def sha256_of(text):
 EXACT_TASKS = ("language_model_pretraining", "text_classification")
 #: The tasks written after the flag whose resumed stream is NOT exact (a stream derived from the settled steps): they leave it false and
 #: their helps and note keep the shared "fresh pass" text (plan-2026-11-25T124419-fa94f59c step 6).
-LATER_TASKS = ("beit_tokenizer",)
+LATER_TASKS = ("beit_tokenizer", "dino")
 
 
 def test_the_flag_is_false_by_default_and_the_two_text_tasks_are_the_tasks_that_set_it():
