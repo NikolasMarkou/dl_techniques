@@ -1,14 +1,17 @@
 """The shared pieces of the ``dino`` tests; no ``test_`` prefix, so pytest does not collect it.
 
-The data layer and the run callbacks of the ``dino`` task (``train.common.dino_data``, ``train.common.dino_run``) are tested on a tiny
-world that a CPU builds in seconds: fake CIFAR-10 rows (noise, so every row is its own identity; ``tests.classification_fakes``), a
-``DINOTrainingModel`` whose backbone is 2 blocks deep (the callbacks and the probe do not care how deep the backbone is, and 12 blocks
-cost about a minute of tracing per fit), and a ``DINOLoss`` of 64 outputs.
+The ``dino`` task is tested on tiny worlds that a CPU builds in seconds. This module serves the data layer and the run callbacks
+(``train.common.dino_data``, ``train.common.dino_run``) and also the task, wiring, resume-helper, init and predictor tests. The data world
+is fake CIFAR-10 rows (noise, so every row is its own identity; ``tests.classification_fakes``), a ``DINOTrainingModel`` whose backbone is
+2 blocks deep (the callbacks and the probe do not care how deep the backbone is, and 12 blocks cost about a minute of tracing per fit) and a
+``DINOLoss`` of 64 outputs; the task world and the real tiny run (their entries come last) are for the task-level tests.
 
 Interface contract
 ------------------
 ``IMAGE`` / ``PATCH`` / ``N_LOCAL`` / ``OUT_DIM`` / ``BATCH`` / ``DEPTH`` / ``N_TRAIN`` / ``N_TEST`` / ``BANK_BATCHES`` / ``QUERY_BATCHES``
     The sizes of the world. 220 fake train rows give 22 selection rows (3 batches: 8, 8 and 6) and 198 fit rows (24 steps of 8).
+``N_VIEWS`` / ``SEED`` / ``CLASSES``
+    ``2 + N_LOCAL``, the number of views the model takes; the seed of the world (42); the CIFAR-10 class count.
 ``fake_rows`` (fixture, module scope)
     Replaces the raw CIFAR-10 arrays with ``N_TRAIN`` / ``N_TEST`` rows of noise; nothing reads the Keras cache. Every test that builds
     data asks for it.
@@ -16,10 +19,9 @@ Interface contract
     :return: a ``DinoBatches`` at the sizes above (``changes`` override any keyword of ``load_dino_batches``).
 ``raw_rows()``
     :return: ``(x_train, y_train, x_test, y_test)``, the uint8 arrays the fake serves (read from the same fake, never from the loader under test).
-``standardized(rows)``
-    uint8 rows to the streams' input in float32, ``(rows / 255 - mean) / std`` per channel (the loader's own statistics).
-``images_of(ds, batches=None)`` / ``labels_of(ds, batches=None)``
-    The images (labels) of the first ``batches`` batches of ``ds`` (the whole finite pass when ``None``), as one array.
+``labels_of(ds, batches=None)``
+    The labels of the first ``batches`` batches of ``ds`` (the whole finite pass when ``None``), as one array. ``images_of`` and ``standardized``
+    are the ones of ``test_common_tokenizer_data`` (the same function, imported where used: D-116).
 ``nearest_rows(images, oracle)``
     :return: ``(index, distance)`` arrays: for each image the index of the nearest oracle row and its euclidean distance. Two fake rows
         are noise, so two different rows are hundreds apart and one row against its own standardization is below 1e-3.
@@ -36,6 +38,25 @@ Interface contract
     :return: ``[numpy copy of every weight]``.
 ``same_arrays(a, b)``
     ``True`` when two lists of arrays are equal bit for bit.
+``CLAIM_LEAVES`` / ``TASK_MODEL`` / ``TASK_BATCH`` / ``TASK_EPOCHS`` / ``TASK_MAX_SAMPLES``
+    What the claim of a run directory writes and so all a run refused after the claim leaves behind (README, ``test_dino_init.py``); the model,
+    batch size, epochs and pool rows of the tiny real run.
+``task_request(out, **changes)``
+    :return: the mapping of a tiny run of ``dino_v1/tiny`` (``dino_out_dim`` 64, 2 local crops, patch 8, 1,000 pool rows, 32 per batch) that a
+        dotted key adjusts.
+``shallow_backbone(monkeypatch, depth=DEPTH)``
+    Makes the factory build a ``depth``-block backbone (12 blocks cost about a minute of tracing per fit on a CPU; nothing a run tests depends
+    on the depth).
+``flatten_request(asked)``
+    :return: ``key=value`` tokens for ``cli.main`` (groups dotted, ``model_args`` one JSON value).
+``csv_column(run_dir, name)``
+    :return: a column of ``training_log.csv`` as floats.
+``world`` / ``identity_world`` (fixtures, module scope)
+    An empty registry holding every built-in family and task; the second also serves the identity fake of CIFAR-10 (no real data is read).
+``train_real_run(out)``
+    One finished 1-epoch run of the real 12-block model through ``cli.main``, with the cifar10 margin patched to what a toy reaches (for the exit
+    code only); :return: the exit code. ``load_model`` refuses a model whose depth is not its variant's, so a test of the file a run writes
+    (predict, export, init) needs these 12 blocks and not ``shallow_backbone``'s 2.
 """
 
 from typing import Any, List, Tuple
@@ -48,7 +69,6 @@ from dl_techniques.losses.dino_loss import DINOLoss
 from dl_techniques.models.vision.dino.training import create_dino_training_model
 from tests.classification_fakes import tiny_raw
 from train.common import classification_data, dino_data
-from train.common.image_streams import stream_statistics
 
 IMAGE = 32
 PATCH = 8
@@ -77,11 +97,6 @@ def raw_rows() -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return x_train, y_train, x_test, y_test
 
 
-def standardized(rows: np.ndarray) -> np.ndarray:
-    mean, std = stream_statistics("cifar10")
-    return (rows.astype(np.float32) / 255.0 - mean) / std
-
-
 def build(**changes: Any) -> dino_data.DinoBatches:
     """``load_dino_batches`` at the sizes of the world."""
     settings = dict(
@@ -89,11 +104,6 @@ def build(**changes: Any) -> dino_data.DinoBatches:
         validation_split=None, max_samples=None, knn_bank_batches=BANK_BATCHES, knn_query_batches=QUERY_BATCHES)
     settings.update(changes)
     return dino_data.load_dino_batches(**settings)
-
-
-def images_of(ds: Any, batches: Any = None) -> np.ndarray:
-    taken = ds if batches is None else ds.take(batches)
-    return np.concatenate([np.asarray(batch[0]) for batch in taken])
 
 
 def labels_of(ds: Any, batches: Any = None) -> np.ndarray:
@@ -142,12 +152,6 @@ def same_arrays(a: List[np.ndarray], b: List[np.ndarray]) -> bool:
 # ---------------------------------------------------------------------
 # The task world (step 6): a tiny REAL run of the ``dino`` task on the real CIFAR-10 rows
 # ---------------------------------------------------------------------
-#
-# ``task_request(out, **changes)``: the mapping of a tiny run of ``dino_v1/tiny`` (``dino_out_dim`` 64, 2 local crops, patch 8, 1,000 pool rows, 32 per
-# batch) that a dotted key adjusts. ``shallow_backbone(monkeypatch)``: the factory builds a ``DEPTH``-block backbone (12 blocks cost about a minute of
-# tracing per fit on a CPU; nothing a run tests depends on the depth). ``flatten_request(asked)``: ``key=value`` tokens for ``cli.main``.
-# ``csv_column(run_dir, name)``: a column of ``training_log.csv`` as floats. ``world`` (fixture, module scope): an empty registry holding every
-# built-in family and task.
 
 #: What the claim of a run directory writes, and so all a run refused after the claim leaves behind (README, ``test_dino_init.py``).
 CLAIM_LEAVES = ("config.json", "config_requested.json", "run.lock", "run.log")
@@ -215,12 +219,6 @@ def world():
 # ---------------------------------------------------------------------
 # The real tiny run (steps 7 and 8): the FULL 12-block ``dino_v1/tiny`` on the identity fake of CIFAR-10
 # ---------------------------------------------------------------------
-#
-# ``identity_world`` (fixture, module scope): the identity fake of CIFAR-10 and an empty registry holding every built-in family and task (no real
-# data is read). ``train_real_run(out)``: one finished 1-epoch run of the real 12-block model at the sizes above, through ``cli.main``, with the
-# cifar10 margin patched to what a toy reaches (for the exit code only); :return: the exit code. ``load_model`` refuses a model whose depth is not its
-# variant's, so a test of the file a run writes (predict, export, init) needs these 12 blocks and not ``shallow_backbone``'s 2.
-
 
 @pytest.fixture(scope="module")
 def identity_world():
@@ -246,4 +244,3 @@ def train_real_run(out: Any) -> int:
         # A warmup of one epoch is as long as a 1-epoch run, which the task refuses (D-100): half an epoch trains the teacher for the second half.
         return cli.main(["dino", *flatten_request(task_request(
             out, epochs=1, batch_size=16, model_args={"dino_out_dim": OUT_DIM, "ema_warmup_epochs": 0.5}))])
-

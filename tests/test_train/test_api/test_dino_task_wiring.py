@@ -36,7 +36,7 @@ from train.common.resume_state import FIT_STATE_NAME
 from train.common.seed import set_seeds
 
 from ._dino_world import (  # noqa: F401  (``identity_world`` is a fixture)
-    IMAGE, OUT_DIM, PATCH, flatten_request, identity_world, shallow_backbone, task_request)
+    OUT_DIM, flatten_request, identity_world, shallow_backbone, task_request)
 
 WATCH = "dino_knn_top1_k20"
 #: A request whose epoch has 6 steps (54 fit rows over 8), over 4 epochs: the numbers below are derived from the data, never typed.

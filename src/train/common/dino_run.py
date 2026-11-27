@@ -51,8 +51,8 @@ Interface contract
     :return: an :class:`EpochZero`: ``probe`` (every log key of the probe on the untrained model, through ``evaluate_split``), ``baseline``
         (the k-NN accuracy of constant features against the real labels, per ``k``: what a representation that carries no information scores) and
         ``loss`` (the DINO loss of one eager forward of ``model`` on ``data.loss_batch_ds`` through a throwaway ``DINOLoss`` of
-        ``loss``'s hyperparameters and a zero centre). ``model.evaluate`` is never called (it would advance the loss centre inside ``call``); the run's
-        centre, weights, optimizer step and random state are untouched.
+        ``loss``'s hyperparameters and a zero centre). ``model.evaluate`` is never called (it would advance the loss centre inside ``call``);
+        the run's centre, weights, optimizer step and random state are untouched.
     :raises ValueError: whatever the probe raises.
 
 ``knn_of(model, ds, *, data, loss)``
@@ -167,10 +167,11 @@ class CentreFile(keras.callbacks.Callback):
     def write(self) -> None:
         """Write ``loss.center`` to the file: whole, or not at all."""
         # DECISION plan-2026-11-26T224507-e3381378/D-104
-        # The file carries NO epoch stamp. The gap between the centre and the weights is at most one epoch (the centre is written first, D-054) because a
-        # failing write of either raises and ends `fit`: no later epoch writes a newer centre over weights that were never saved
-        # (`test_a_failing_weights_write_after_the_centre_write_stops_the_run...`). Do NOT add a stamp that is refused on a mismatch: it would have to accept
-        # the documented one-epoch-ahead window, so it could only catch a gap the ordering already excludes, and it is a second thing to keep in step.
+        # The file carries NO epoch stamp. The gap between the centre and the weights is at most one epoch (the centre is written first, D-054)
+        # because a failing write of either raises and ends `fit`: no later epoch writes a newer centre over weights that were never saved
+        # (`test_a_failing_weights_write_after_the_centre_write_stops_the_run...`). Do NOT add a stamp that is refused on a mismatch: it would have to
+        # accept the documented one-epoch-ahead window, so it could only catch a gap the ordering already excludes, and it is a second thing to keep
+        # in step.
         centre = np.asarray(keras.ops.convert_to_numpy(self.loss.center), dtype=np.float32)
         partial = partial_path(self.path)
         # DECISION plan-2026-11-26T224507-e3381378/D-027

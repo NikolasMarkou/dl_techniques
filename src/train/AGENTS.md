@@ -965,8 +965,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   `test_an_exported_keras_file_holds_library_layers_only_and_loads_where_the_train_package_cannot_be_imported`); a dino run seeds a `vit` by its student and is no `init` target (D-013, D-068, D-069:
   `test_the_unit_plan_of_a_dino_student_into_a_vit_pairs_every_backbone_weight_and_leaves_nothing_over`, `test_init_naming_any_run_is_refused_before_the_claim_with_the_reason`). The recipe
   notices state what the gate covers and name the README block, never a figure of it (D-015, D-049). Tests, in `tests/test_train/test_api/`: `test_dino_{task,task_wiring,resume,families,predictor_and_export,init}.py`,
-  `test_common_dino_data.py`, `test_dino_run_callbacks.py` and `test_the_validation_stream_seam.py`, sharing `_dino_world.py`. The user-facing description is in [`README.md`](README.md), which holds
-  the numbers of its GPU gate in its own block.
+  `test_common_dino_data.py`, `test_dino_run_callbacks.py` and `test_the_validation_stream_seam.py`, sharing `_dino_world.py`. The user-facing description is in [`README.md`](README.md); its GPU gate is not yet run, so
+  the block "Measured: the dino gate" holds no measurement.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `MODEL_CHECKS`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served, sample)`: the shape `export` traces, the cells it refuses, the

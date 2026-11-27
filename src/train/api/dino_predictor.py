@@ -90,7 +90,9 @@ def check_built_model(model: Any, record: Mapping[str, Any], model_file: Path, t
     views = 2 + record["n_local_crops"]
     problems: List[str] = []
     if 2 + config.get("n_local_views", -1) != views:
-        problems.append(f"n_local_crops {record['n_local_crops']} ({views} views) but {model_file} was built for {2 + config.get('n_local_views', -1)} views")
+        problems.append(
+            f"n_local_crops {record['n_local_crops']} ({views} views) but {model_file} was built for {2 + config.get('n_local_views', -1)} views"
+        )
     student = getattr(model, "student", None)
     if student is None:
         raise ConfigError(f"Invalid {TASK_FILE} {task_file}: {model_file} holds a {type(model).__name__} with no student; it is not a dino model")
@@ -170,10 +172,11 @@ class DinoPredictor:
 def write_predictions(predictor: DinoPredictor, files: Sequence[Path], out: Path) -> None:
     """Write one ``.npy`` per file and ``index.json`` into the new directory ``out``; see the module contract."""
     # DECISION plan-2026-11-26T224507-e3381378/D-099
-    # The FOURTH `.npy` writer, a near-copy of pretrain's (they differ in the output name, the note and nothing else) beside depth's and the tokenizer's, sharing
-    # what they share (mask_names, check_free, INDEX_NAME, the .npy suffix and the no-truncate write_array). No shared writer exists in the repository, and
-    # making one means editing three shipped writers (and their tests) in a fix round of another phase, for 18 lines. Do NOT generalize one for the others
-    # here, do NOT copy write_array back here, and when the index protocol changes change all four (`test_the_four_npy_writers_...` reads each index).
+    # The FOURTH `.npy` writer, a near-copy of pretrain's (they differ in the output name, the note and nothing else) beside depth's and the
+    # tokenizer's, sharing what they share (mask_names, check_free, INDEX_NAME, the .npy suffix and the no-truncate write_array). No shared writer
+    # exists in the repository, and making one means editing three shipped writers (and their tests) in a fix round of another phase, for 18 lines. Do
+    # NOT generalize one for the others here, do NOT copy write_array back here, and when the index protocol changes change all four
+    # (`test_the_four_npy_writers_...` reads each index).
     names = mask_names(files, ARRAY_SUFFIX)
     check_free(out, "out", "predict")
     out.mkdir(parents=True)
@@ -197,10 +200,10 @@ def write_predictions(predictor: DinoPredictor, files: Sequence[Path], out: Path
 def served(model: Any, record: Mapping[str, Any]) -> Any:
     """Return the functional feature model every format runs: a standardized image to its CLS embedding; see the module contract."""
     # DECISION plan-2026-11-26T224507-e3381378/D-063
-    # `exporting` traces THIS model but archives the TRAINING model it was given, so a SavedModel (and the directory beside a tflite file) also carries
-    # the teacher's and the heads' weights: 117 MB against 22 MB for the keras, tflite and onnx files at the default size (measured, scratch_export). Do NOT
-    # try to shrink it from here (the function returns a model; what the archive tracks is `exporting`'s) and do NOT drop the sentence of `export_note`
-    # that says so until a test (`test_the_limit_the_export_note_states_is_still_real...`) fails.
+    # `exporting` traces THIS model but archives the TRAINING model it was given, so a SavedModel (and the directory beside a tflite file) also
+    # carries the teacher's and the heads' weights: 117 MB against 22 MB for the keras, tflite and onnx files at the default size (measured,
+    # scratch_export). Do NOT try to shrink it from here (the function returns a model; what the archive tracks is `exporting`'s) and do NOT drop the
+    # sentence of `export_note` that says so until a test (`test_the_limit_the_export_note_states_is_still_real...`) fails.
     return feature_model(model)
 
 

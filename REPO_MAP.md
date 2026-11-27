@@ -279,7 +279,7 @@ their default `gpt2` tokenizer, read two BPE files from a pinned directory outsi
 the language section of `src/train/README.md` says how they are checked and restored, and `src/train/api/text_tokenizer.py` holds their hash table.
 The ninth task, `beit_tokenizer`, trains the BEiT tokenizer that a `beit_mim` run reads (`model_args.tokenizer_checkpoint=<its run>/best_model.keras`); the tokenizer the
 Phase 4h `beit_mim` rows read is lost, and the `beit_tokenizer` section of `src/train/README.md` says what that leaves standing.
-The tenth task, `dino`, trains a DINOv1 self-supervised ViT (a student, an EMA teacher and multi-crop views, family `dino_v1`) and judges it by a k-NN probe of its features against constant and untrained features; `python -m train dino help` lists its keys, and its section of `src/train/README.md` follows the Phase 4k GPU gate (not run yet), and a `dino` run can seed a `vit` classifier through `init=`.
+The tenth task, `dino`, trains a DINOv1 self-supervised ViT (a student, an EMA teacher and multi-crop views, family `dino_v1`) and judges it by a k-NN probe of its features against constant and untrained features; `python -m train dino help` lists its keys, and its section of `src/train/README.md` follows the Phase 4k GPU gate (its GPU gate is not yet run), and a `dino` run can seed a `vit` classifier through `init=`.
 
 **Why it resolves from any working directory.** The editable install drops a `.pth` file
 into the virtualenv's `site-packages` whose sole content is the absolute path of this repo's

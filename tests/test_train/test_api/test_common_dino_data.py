@@ -20,11 +20,7 @@ read through an oracle that never goes through the loader under test). The tests
 
 import dataclasses
 import math
-import os
-import subprocess
-import sys
 import weakref
-from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
@@ -37,11 +33,11 @@ from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
 from train.common.image_streams import load_image_streams
 
 from ._dino_world import (  # noqa: F401  (``fake_rows`` is a fixture)
-    BANK_BATCHES, BATCH, IMAGE, N_LOCAL, N_TEST, N_TRAIN, N_VIEWS, QUERY_BATCHES, SEED, build, fake_rows, images_of, labels_of,
-    nearest_rows, raw_rows, standardized)
+    BANK_BATCHES, BATCH, IMAGE, N_LOCAL, N_TEST, N_TRAIN, N_VIEWS, QUERY_BATCHES, SEED, build, fake_rows, labels_of, nearest_rows, raw_rows)
+from .test_beit_tokenizer_task import fresh_process  # the 4j helpers, imported and not copied (D-116, as D-082 did)
+from .test_common_tokenizer_data import images_of, standardized
 
 STREAM_SEEDS = (0, 1, 7, 4_000_000_000)
-REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: The images of the first FIRST_BATCHES train batches of each object, read the moment it was made. The train stream reshuffles on EVERY
 #: pass, so only a first pass compares with another object's first pass.
@@ -379,12 +375,6 @@ def test_the_two_shared_definitions_are_imported_from_pretrain_data_and_not_copi
 # ---------------------------------------------------------------------
 # 5. the import rule
 # ---------------------------------------------------------------------
-
-def fresh_process(code: str):
-    return subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "CUDA_VISIBLE_DEVICES": ""})
-
 
 def test_the_front_door_does_not_load_the_dino_modules():
     """``train.api`` may import the data and run modules inside functions only: loading the package, the CLI and the task table loads neither."""

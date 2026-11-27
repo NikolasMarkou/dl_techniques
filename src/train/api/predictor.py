@@ -131,6 +131,17 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     image is held to the record's size (:func:`train.api.tokenizer_predictor.check_output`). A resume compares ``input_size``,
     ``channels``, ``normalize``, ``mean``, ``std`` and ``patch_size``: the codebook is the model's and ``output`` is how the predictor answers.
 
+``input_size``, ``channels``, ``normalize``, ``mean``, ``std``, ``patch_size``, ``n_local_crops``, ``dino_out_dim``, ``embedding_dim``, ``output`` (dino)
+    A dino record has the pretrain record's geometry and scaling (``input_size`` is ``[side, side]`` every view is rendered at, ``channels`` 3,
+    ``normalize`` ``"standardize"`` with the streams' ``mean`` and ``std``, ``patch_size`` a positive int dividing the side) and no ``tokenizer``
+    file hash. ``n_local_crops`` is the number of local crops per image, so the training model takes ``2 + n_local_crops`` views;
+    ``dino_out_dim`` is the projection head's width and ``embedding_dim`` the backbone's CLS feature width (each a positive int); ``output``
+    is ``"cls_embeddings"`` (:data:`DINO_OUTPUTS`: the student's post-final-norm CLS token, never the head's output). ``load_model`` refuses,
+    before the model is called on a view set, a record whose view count, size, channels, patch, head width or embedding width is not the
+    model's own (:func:`train.api.dino_predictor.check_built_model`), and one whose packed output of a zero view set is not the record's
+    (:func:`train.api.dino_predictor.check_output`). A resume compares the seven keys ``input_size`` to ``n_local_crops``: the head's width and
+    the embedding's are the model's and ``output`` is how the predictor answers.
+
 ``seq_len``, ``encoding``, ``n_vocab``, ``vocab_size``, ``eot_id``, ``pad_id``, ``tokenizer``, ``tokenizer_files``, ``output`` (language model)
     A language-model record has no ``class_names``, input size or statistics: the model takes ``seq_len`` token ids and returns the
     next-token logits ``(seq_len, vocab_size)`` (``output`` is ``"next_token_logits"``, :data:`LANGUAGE_OUTPUTS`). ``encoding`` is the
@@ -164,11 +175,11 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)`` / ``build_language_model_record(...)`` / ``build_text_classification_record(...)`` / ``build_tokenizer_record(...)``
+``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)`` / ``build_language_model_record(...)`` / ``build_text_classification_record(...)`` / ``build_tokenizer_record(...)`` / ``build_dino_record(...)``
     :return: the record for a finished data load (not checked; see their docstrings). The first
         writes a classification record, the second a segmentation record, the third a denoising one, the fourth a forecasting
         one, the fifth a depth one, the sixth a pretrain one, the seventh a language-model one, the eighth a text-classification one,
-        the ninth a tokenizer one.
+        the ninth a tokenizer one, the tenth a dino one.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
@@ -223,7 +234,8 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
         :class:`~train.api.pretrain_predictor.PretrainPredictor`, a ``language_model_pretraining`` one a
         :class:`~train.api.text_predictor.LanguageModelPredictor`, a ``text_classification`` one a
         :class:`~train.api.text_predictor.TextClassifierPredictor`, a ``beit_tokenizer`` one a
-        :class:`~train.api.tokenizer_predictor.TokenizerPredictor`.
+        :class:`~train.api.tokenizer_predictor.TokenizerPredictor`, a ``dino`` one a
+        :class:`~train.api.dino_predictor.DinoPredictor`.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -248,17 +260,19 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     forecasting and pretrain only, :data:`CLASSIFICATION_EXPORT_REFUSALS`,
     :data:`train.api.denoising_predictor.EXPORT_REFUSALS`,
     :data:`train.api.forecast_predictor.EXPORT_REFUSALS`, :data:`train.api.pretrain_predictor.EXPORT_REFUSALS`) and,
-    for forecasting, depth, pretrain, the two text tasks and the tokenizer, for a traced shape that is not the record's (a depth model exports
+    for forecasting, depth, pretrain, the two text tasks, the tokenizer and dino, for a traced shape that is not the record's (a depth model exports
     every format at its trained size only, :func:`train.api.depth_predictor.check_export`, and so do a pretrain model,
     :func:`train.api.pretrain_predictor.check_export`, a language model or a text classifier, :func:`train.api.text_predictor.check_export`,
-    and a tokenizer, :func:`train.api.tokenizer_predictor.check_export`, which refuses no cell of the table: all four formats were measured), and
-    ``note(record)`` is the sentence logged beside an export.
+    and a tokenizer, :func:`train.api.tokenizer_predictor.check_export`, which refuses no cell of the table: all four formats were measured;
+    a dino export is the DERIVED feature model, image to CLS embedding, at the trained size only, :func:`train.api.dino_predictor.check_export`,
+    which refuses no cell either), and ``note(record)`` is the sentence logged beside an export.
     ``served`` is ``None`` for the other image tasks (the file is the model), for forecasting the layer that
     standardizes a raw window, runs the model, decodes and de-standardizes
     (:class:`train.common.forecast_run.ServedForecaster`), and for pretrain a functional model over the run's backbone
     that returns the patch-token embeddings (:func:`train.api.pretrain_predictor.served`), and for a language model or a text classifier the
     model with ``training=False`` (:func:`train.api.text_predictor.served`: a rule with no served function is written with no tflite check
-    at all), and for a tokenizer the layer that returns the int32 code grid (:class:`train.common.tokenizer_data.TokenizerCodes`);
+    at all), and for a tokenizer the layer that returns the int32 code grid (:class:`train.common.tokenizer_data.TokenizerCodes`), and for dino the
+    functional feature model run with ``training=False`` (:func:`train.api.dino_predictor.served`);
     the rank of ``shape_of(record)`` is the rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster, 1 for
     a text model). ``sample`` is the two text tasks' check batch of seeded ids (:func:`train.api.text_predictor.sample_ids`) and
     ``None`` for every other task. A row in every table of :data:`TASK_TABLES`, this one included.

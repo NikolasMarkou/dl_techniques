@@ -9,8 +9,8 @@ One family trains the ``dino`` task (its name is :data:`train.api.dino_args.FAMI
 
 The registry's row needs a variants table, and the library's ``DINOv1.MODEL_VARIANTS`` holds five (base, large and giant included), so
 :data:`VARIANTS` is the API's: ``tiny`` and ``small``, with the keys the loaded model shows (a test holds them equal to the library's). Importing
-this module imports no model code and no keras: the adapter imports the model inside the call, so ``python -m train help`` allocates nothing. The row is
-registered with its task and not before (D-043).
+this module imports no model code and no keras: the adapter imports the model inside the call, so ``python -m train help`` allocates nothing. The
+row is registered with its task and not before (D-043).
 
 Interface contract
 ------------------
@@ -18,7 +18,8 @@ Interface contract
     :param variant: a key of :data:`VARIANTS` (``tiny``, ``small``).
     :param num_classes: must be ``None``: a DINO model has no classes.
     :param input_shape: ``(size, size, 3)`` of positive ints: ONE plain image, which every view (the local crops too) is rendered at.
-    :param patch_size: a power of 2 dividing the side and leaving at least ``dino_args.MIN_TOKENS`` tokens per view. The task passes ``data.patch_size``.
+    :param patch_size: a power of 2 dividing the side and leaving at least ``dino_args.MIN_TOKENS`` tokens per view. The task passes
+        ``data.patch_size``.
     :param n_local_crops: local crops per image, at least 1. The task passes ``data.n_local_crops``.
     :param dino_out_dim: the projection head's width, an int of at least 2. Required: the library's 65536 does not fit the recipe's devices.
     :param model_args: nothing else is accepted (:data:`ALLOWED` holds three more keys, which the task reads and the model does not).
@@ -43,15 +44,18 @@ Interface contract
 
 ``factory_signatures()`` / ``signature_census(signatures=None)``
     The denoising pattern: the census returns ``{"unclassified": [...], "stale": [...]}``, the parameters of the callables in :data:`FACTORIES`
-    that :data:`ALLOWED`, :data:`REFUSED` and :data:`SUPPLIED` do not name, and the keys those tables name that none has (:data:`UNSEEN_KEYS` excepted).
+    that :data:`ALLOWED`, :data:`REFUSED` and :data:`SUPPLIED` do not name, and the keys those tables name that none has (:data:`UNSEEN_KEYS`
+    excepted).
 
-``precision_problems(precision, prefix="")`` / ``schedule_problems(schedule, prefix="optim_args")`` / ``backup_problems(backup_every_steps, prefix="checkpoint_args")``
+``precision_problems(precision, prefix="")`` / ``schedule_problems(schedule, prefix="optim_args")`` /
+``backup_problems(backup_every_steps, prefix="checkpoint_args")``
     :return: the lines that refuse a ``precision`` other than ``float32``, a ``constant`` schedule, and any ``backup_every_steps``; ``[]`` when
         the value is the accepted one. For the task config's ``problems``, which names the field (``prefix`` is the dotted path of its group).
 
 ``warmup_problems(ema_warmup_epochs, epochs, smoke=False)``
     :return: the line that refuses an ``ema_warmup_epochs`` that is not below the run's resolved ``epochs`` (a teacher frozen for the whole run);
-        ``[]`` for a smaller warmup and for a smoke run (one epoch, no bar). The task calls it from ``check_model_args``, which sees the resolved epochs.
+        ``[]`` for a smaller warmup and for a smoke run (one epoch, no bar). The task calls it from ``check_model_args``, which sees the resolved
+        epochs.
 
 ``warmup_steps_problems(ema_warmup_epochs, epochs, steps_per_epoch, smoke=False)``
     :return: the line that refuses an ``ema_warmup_epochs`` whose warmup IN STEPS (``ema_warmup_steps``, rounded) reaches ``steps_per_epoch * epochs``
@@ -117,11 +121,11 @@ TABLE_KEYS: Tuple[str, ...] = tuple(VARIANTS["tiny"])
 
 # DECISION plan-2026-11-26T224507-e3381378/D-044
 # Four keys are offered, and only because the measurement record names a value for each (`research/2026_dino_ssl_measurements.md`, the rule of D-002):
-# the head's width, the two ends of the teacher temperature and the EMA warmup in EPOCHS. Every other constructor parameter and every other flag of the
-# legacy trainer is REFUSED by name before the claim, each with its reason. Do NOT move `student_temp`, `center_momentum`, the EMA decays or `ema_warmup_steps`
-# to the offered keys "for experiments": the record names no value for the first four, and `ema_warmup_steps` is a constant of one scale (295 steps is one
-# epoch at imagenette and batch 32 only, 266 at HEAD). A table key is also a claim that the task works with it, and the gate varies none of them.
-# The tables are FLAT (one family) and read from the P9 knob table of the plan (`scratch_step2/p9_knobs.json`, D-031).
+# the head's width, the two ends of the teacher temperature and the EMA warmup in EPOCHS. Every other constructor parameter and every other flag of
+# the legacy trainer is REFUSED by name before the claim, each with its reason. Do NOT move `student_temp`, `center_momentum`, the EMA decays or
+# `ema_warmup_steps` to the offered keys "for experiments": the record names no value for the first four, and `ema_warmup_steps` is a constant of one
+# scale (295 steps is one epoch at imagenette and batch 32 only, 266 at HEAD). A table key is also a claim that the task works with it, and the gate
+# varies none of them. The tables are FLAT (one family) and read from the P9 knob table of the plan (`scratch_step2/p9_knobs.json`, D-031).
 #: Keys the factory takes (the model).
 FACTORY_KEYS: Tuple[str, ...] = ("dino_out_dim",)
 
@@ -148,14 +152,23 @@ _FIXED_BY_THE_TASK = "the task fixes it"
 REFUSED: Dict[str, str] = {
     # The legacy trainer's keys the record names no value for.
     "student_temp": f"{_NOT_NAMED} (the task uses {FIXED['student_temp']})",
-    "center_momentum": f"the record names it only in an 8-epoch diagnostic arm (0.0, no effect), so {_NOT_NAMED} (the task uses {FIXED['center_momentum']})",
+    "center_momentum": (
+        f"the record names it only in an 8-epoch diagnostic arm (0.0, no effect), so {_NOT_NAMED} (the task uses {FIXED['center_momentum']})"
+    ),
     "ema_decay_start": f"{_NOT_NAMED} (the task uses {FIXED['ema_decay_start']})",
     "ema_decay_end": f"{_NOT_NAMED} (the task uses {FIXED['ema_decay_end']})",
-    "ema_warmup_steps": "it is an absolute step count, a constant of one scale (295 steps is one epoch at imagenette and batch 32 only); use model_args.ema_warmup_epochs",
-    "source_image_size": "the record names it only in an 8-epoch diagnostic arm (224 px, no difference); every crop is decoded at transform_args.image_size",
+    "ema_warmup_steps": (
+        "it is an absolute step count, a constant of one scale (295 steps is one epoch at imagenette and batch 32 only); "
+        "use model_args.ema_warmup_epochs"
+    ),
+    "source_image_size": (
+        "the record names it only in an 8-epoch diagnostic arm (224 px, no difference); every crop is decoded at transform_args.image_size"
+    ),
     # The values the task fixes.
     "stateless_augmentation": f"{_FIXED_BY_THE_TASK} on: the reproducible stream is what makes two runs comparable",
-    "teacher_temp_warmup_epochs": f"{_FIXED_BY_THE_TASK} at {FIXED['teacher_temp_warmup_epochs']}, and it has no effect while teacher_temp_final equals teacher_temp",
+    "teacher_temp_warmup_epochs": (
+        f"{_FIXED_BY_THE_TASK} at {FIXED['teacher_temp_warmup_epochs']}, and it has no effect while teacher_temp_final equals teacher_temp"
+    ),
     "knn_eval_every": f"{_FIXED_BY_THE_TASK} to every epoch: a skipped epoch would write NaN, and a NaN monitor marks a run diverged",
     "knn_bank_batches": f"{_FIXED_BY_THE_TASK} at {FIXED['knn_bank_batches']}: the bar's margin was derived at that estimator",
     "knn_query_batches": f"{_FIXED_BY_THE_TASK} at up to {FIXED['knn_query_batches']}: the bar's margin was derived at that estimator",
@@ -182,7 +195,8 @@ REFUSED: Dict[str, str] = {
     "name": "the task names the model",
 }
 
-#: Keywords the task or the API passes to the adapter itself (or that the data layer decides): ``{key: why}``. Naming one in ``model_args`` is refused.
+#: Keywords the task or the API passes to the adapter itself (or that the data layer decides): ``{key: why}``. Naming one in ``model_args`` is
+#: refused.
 SUPPLIED: Dict[str, str] = {
     "variant": f"model={FAMILY}/<variant> chooses it",
     "input_shape": "it is (image_size, image_size, 3), from transform_args.image_size",
@@ -268,11 +282,11 @@ def signature_census(signatures: Optional[Mapping[str, Sequence[str]]] = None) -
 # ---------------------------------------------------------------------
 
 # DECISION plan-2026-11-26T224507-e3381378/D-050
-# These three are FUNCTIONS the task config calls, not checks of the resolver: the resolver is handed `(context, optim_args, model_args)` and nothing else,
-# while the schedule is in `optim_args`, `backup_every_steps` in `checkpoint_args` and `precision` at the top level of the task config, so the one place that sees
-# all three before the claim is the task's own `problems` (step 6). Do NOT fold them into `_merged` (it cannot see the checkpoint group), and do NOT drop one because
-# "the shared code warns anyway": the constant schedule only WARNS at the end of every epoch (P8), and a mid-epoch copy resumes without error on a centre
-# the weights never had.
+# These three are FUNCTIONS the task config calls, not checks of the resolver: the resolver is handed `(context, optim_args, model_args)` and nothing
+# else, while the schedule is in `optim_args`, `backup_every_steps` in `checkpoint_args` and `precision` at the top level of the task config, so the
+# one place that sees all three before the claim is the task's own `problems` (step 6). Do NOT fold them into `_merged` (it cannot see the checkpoint
+# group), and do NOT drop one because "the shared code warns anyway": the constant schedule only WARNS at the end of every epoch (P8), and a mid-epoch
+# copy resumes without error on a centre the weights never had.
 
 
 def precision_problems(precision: str, prefix: str = "") -> List[str]:
@@ -308,7 +322,7 @@ def warmup_problems(ema_warmup_epochs: Any, epochs: Any, smoke: bool = False) ->
         return []
     return [
         f"Invalid value for 'model_args.ema_warmup_epochs': {ema_warmup_epochs!r} is not below the run's {epochs!r} epochs, so the teacher's EMA "
-        f"would never start and the teacher would stay at its initial weights for the whole run, a configuration no run measured; use a value "
+        "would never start and the teacher would stay at its initial weights for the whole run, a configuration no run measured; use a value "
         f"below {epochs!r} (the recipe's is {RECIPE['model_args']['ema_warmup_epochs']!r}) or train more epochs"
     ]
 
@@ -318,9 +332,9 @@ def warmup_steps_problems(ema_warmup_epochs: Any, epochs: Any, steps_per_epoch: 
     # DECISION plan-2026-11-26T224507-e3381378/D-109
     # The warmup is rounded to STEPS (`ema_warmup_steps`) and `CompiledTeacherEMA` updates only after step `warmup_steps`, so a warmup of
     # `steps_per_epoch * epochs` steps or more gives no update at all: 59.999 at 60 epochs and 266 steps is 15,960 of 15,960, and `warmup_problems`
-    # (epochs against epochs) lets it through. The steps need the data, which is loaded after the claim, so this runs from `fit_kwargs`, the first hook
-    # that sees the data, and still before the model is built. Do NOT move it into `check_model_args` (no data there: it would need a guess of the
-    # epoch's length, and a guess refuses a good run), and do NOT replace `warmup_problems` with it (that one refuses before the claim).
+    # (epochs against epochs) lets it through. The steps need the data, which is loaded after the claim, so this runs from `fit_kwargs`, the first
+    # hook that sees the data, and still before the model is built. Do NOT move it into `check_model_args` (no data there: it would need a guess of
+    # the epoch's length, and a guess refuses a good run), and do NOT replace `warmup_problems` with it (that one refuses before the claim).
     if smoke or not _real(ema_warmup_epochs) or not _real(epochs):
         return []
     steps = ema_warmup_steps(ema_warmup_epochs, steps_per_epoch)
@@ -329,7 +343,7 @@ def warmup_steps_problems(ema_warmup_epochs: Any, epochs: Any, steps_per_epoch: 
     return [
         f"Invalid value for 'model_args.ema_warmup_epochs': {ema_warmup_epochs!r} epochs of {steps_per_epoch} steps rounds to a warmup of {steps} "
         f"steps, which is all {steps_per_epoch * epochs} steps of the run, so the teacher's EMA would never update and the teacher would stay at its "
-        f"initial weights for the whole run, a configuration no run measured; use a smaller value (the recipe's is "
+        "initial weights for the whole run, a configuration no run measured; use a smaller value (the recipe's is "
         f"{RECIPE['model_args']['ema_warmup_epochs']!r}) or train more epochs"
     ]
 
@@ -367,7 +381,9 @@ def create_dino_model(
         raise ValueError(f"patch_size {patch_size!r} {reason} (input_shape {shape!r})")
     if not is_count(n_local_crops):
         raise ValueError(f"n_local_crops must be a positive int (the views are 2 global and n_local_crops local), got {n_local_crops!r}")
-    lines = [f"model_args.{key} is read by the task and is not a model keyword, got {value!r}" for key, value in model_args.items() if key in TASK_KEYS]
+    lines = [
+        f"model_args.{key} is read by the task and is not a model keyword, got {value!r}" for key, value in model_args.items() if key in TASK_KEYS
+    ]
     lines += problems_of({"dino_out_dim": dino_out_dim, **{key: value for key, value in model_args.items() if key not in TASK_KEYS}})
     if lines:
         raise ValueError("; ".join(lines))
@@ -380,11 +396,11 @@ def create_dino_model(
     )
     # DECISION plan-2026-11-26T224507-e3381378/D-045
     # The model is built HERE with the rank-5 input, and what it does is PROVED by two real forward passes: the sequence's own
-    # `build((None, *input_shape))` is refused by this model (P1: "expects a rank-5 multi-crop input"), and the view count and the patch grid are what the
-    # record will state, so they are compared with what the ARGUMENTS say and never with the model's own attributes (`n_views`, `num_patches` agree with
-    # themselves by construction). A grid that is not the image over the patch trains on the wrong positions and still reports a finite loss. Do NOT take
-    # the expected numbers from the built model, do NOT leave the model unbuilt for the sequence to build, and do NOT wrap it: the file this family
-    # saves is the library's training model.
+    # `build((None, *input_shape))` is refused by this model (P1: "expects a rank-5 multi-crop input"), and the view count and the patch grid are
+    # what the record will state, so they are compared with what the ARGUMENTS say and never with the model's own attributes (`n_views`,
+    # `num_patches` agree with themselves by construction). A grid that is not the image over the patch trains on the wrong positions and still
+    # reports a finite loss. Do NOT take the expected numbers from the built model, do NOT leave the model unbuilt for the sequence to build, and do
+    # NOT wrap it: the file this family saves is the library's training model.
     views = 2 + n_local_crops
     model.build((None, views, *shape))
     packed = model(keras.ops.zeros((1, views, *shape), dtype="float32"), training=False)
@@ -449,10 +465,11 @@ def task_values(context: AutoContext, optim_args: OptimArgs, model_args: Mapping
 def ema_warmup_steps(ema_warmup_epochs: float, steps_per_epoch: int) -> int:
     """Return the teacher EMA's warmup in optimizer steps; see the module contract."""
     # DECISION plan-2026-11-26T224507-e3381378/D-047
-    # The warmup is DENOMINATED IN EPOCHS and resolved here, against the steps the data gives. The record's measured 295 is `num_train // batch_size` of ONE
-    # dataset and batch (one epoch there, an arbitrary number anywhere else), and at HEAD that epoch is 266 steps: a typed 295 would freeze the teacher for
-    # 1.1 epochs on the gate's own run and 0.2 on cifar10's 1,406. Do NOT type a step count into the recipe or read one off the record, and do NOT offer
-    # `ema_warmup_steps` (D-044). `test_the_teacher_ema_warmup_is_denominated_in_epochs...` holds this equal to the legacy trainer's resolution.
+    # The warmup is DENOMINATED IN EPOCHS and resolved here, against the steps the data gives. The record's measured 295 is `num_train // batch_size`
+    # of ONE dataset and batch (one epoch there, an arbitrary number anywhere else), and at HEAD that epoch is 266 steps: a typed 295 would freeze the
+    # teacher for 1.1 epochs on the gate's own run and 0.2 on cifar10's 1,406. Do NOT type a step count into the recipe or read one off the record,
+    # and do NOT offer `ema_warmup_steps` (D-044). `test_the_teacher_ema_warmup_is_denominated_in_epochs...` holds this equal to the legacy trainer's
+    # resolution.
     return int(round(ema_warmup_epochs * steps_per_epoch))
 
 
@@ -487,10 +504,10 @@ RECIPE: Dict[str, Any] = {
 }
 
 # DECISION plan-2026-11-26T224507-e3381378/D-049
-# The notices name WHERE the gate's numbers are and state none of them, and they say what the gate COVERS, which stays true after any night: a sentence
-# that said "unmeasured" went false the night the 4j gate ran, and one that quoted a gate's figures would go stale at the next. Do NOT write a number, a
-# count or a date of the gate here, and do NOT say a recipe is unmeasured or "a first measurement": the README block is rewritten by every later gate,
-# the pointer and the coverage stay true. (The block itself and the test that it exists are step 9's.)
+# The notices name WHERE the gate's numbers are and state none of them, and they say what the gate COVERS, which stays true after any night: a
+# sentence that said "unmeasured" went false the night the 4j gate ran, and one that quoted a gate's figures would go stale at the next. Do NOT write
+# a number, a count or a date of the gate here, and do NOT say a recipe is unmeasured or "a first measurement": the README block is rewritten by every
+# later gate, the pointer and the coverage stay true. (The block itself and the test that it exists are step 9's.)
 #: Where the dino gate's numbers live: the block of ``src/train/README.md`` between the ``dino-gate`` markers.
 GATE_BLOCK = "the README block 'Measured: the dino gate' (src/train/README.md, between its dino-gate markers)"
 
@@ -511,7 +528,7 @@ def recipe_notices_of(dataset: str) -> List[Tuple[str, str]]:
         notices.append((
             "info",
             f"{dataset}: {GEOMETRY[dataset][0]} px and patch {GEOMETRY[dataset][1]} are this recipe's row for it (the library's patch 16 leaves 4 "
-            f"tokens), and a DINO run on it was not trained by the gate; the bar's margin for it is above the spread of a random-init model's "
+            "tokens), and a DINO run on it was not trained by the gate; the bar's margin for it is above the spread of a random-init model's "
             f"probe, which is all that measures it (see {GATE_BLOCK})",
         ))
     return notices
@@ -523,8 +540,9 @@ def builtin_dino_models() -> Tuple[ModelSpec, ...]:
     # The row is built and tested HERE and registered with its task: `recipes.register_builtin_models` calls this function in the commit that adds the
     # `dino` TaskSpec (step 6). MEASURED at step 5 (`scratch_step5/measured.md`): registering the family first turned red the three listing tests of
     # `test_every_family_builds_from_its_defaults`, `test_every_row_declares_a_spec` of the init census and the family count sentence of
-    # `src/train/AGENTS.md` (32 families whose split over the nine registered tasks sums to 31), and made `python -m train list_models` list `dino_v1/*`
-    # with no command to run them. Do NOT add the call without the TaskSpec, nor the TaskSpec without the call (the tokenizer row's rule, plan fa94f59c D-031).
+    # `src/train/AGENTS.md` (32 families whose split over the nine registered tasks sums to 31), and made `python -m train list_models` list
+    # `dino_v1/*` with no command to run them. Do NOT add the call without the TaskSpec, nor the TaskSpec without the call (the tokenizer row's rule,
+    # plan fa94f59c D-031).
     return (
         ModelSpec(
             family=FAMILY,
@@ -535,11 +553,11 @@ def builtin_dino_models() -> Tuple[ModelSpec, ...]:
             resolve_model_args=f"{_HERE}:resolve_dino_args",
             observe=f"{_HERE}:observe_dino",
             # DECISION plan-2026-11-26T224507-e3381378/D-048
-            # EMPTY on purpose, and present because the init census requires a declaration of EVERY row (`undeclared(registry.MODELS) == []`), whatever its
-            # task. A dino run is no `init` target (plan D-013: the student and the teacher sit at the same paths, so a copy needs a teacher re-sync that the
-            # run does not do, and epoch zero would call `model.evaluate`, which advances the centre): the task refuses before `init_from` reads this row, so
-            # a `head` or a `fixed` key here would be a claim nothing reads. Do NOT fill it "to be safe": step 8 adds the `vit` row's `("dino", "dino_v1")`
-            # source on the TARGET's row, and the refusal sentence is the task's.
+            # EMPTY on purpose, and present because the init census requires a declaration of EVERY row (`undeclared(registry.MODELS) == []`),
+            # whatever its task. A dino run is no `init` target (plan D-013: the student and the teacher sit at the same paths, so a copy needs a
+            # teacher re-sync that the run does not do, and epoch zero would call `model.evaluate`, which advances the centre): the task refuses
+            # before `init_from` reads this row, so a `head` or a `fixed` key here would be a claim nothing reads. Do NOT fill it "to be safe": step 8
+            # adds the `vit` row's `("dino", "dino_v1")` source on the TARGET's row, and the refusal sentence is the task's.
             transfer=TransferSpec(),
         ),
     )

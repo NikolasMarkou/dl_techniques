@@ -170,10 +170,11 @@ class DinoData(StrictConfig):
 
 
 # DECISION plan-2026-11-26T224507-e3381378/D-051
-# The group is the task's OWN and has one key. The pretrain task's `PretrainTransformArgs` was the plan's first choice, and printing its help showed two
-# defects for this task: its `image_size` says "224 for imagenette" (the DINO recipe is 96 px), and its `augment` key switches the shared loader's flip and
-# pad-crop, which the multi-crop map never reads (a key nothing reads is a lie the config-fields census would also catch). Do NOT reuse it, and do NOT add an
-# `augment` key "for symmetry": the DINO augmentations are the map's, fixed, and `stateless_augmentation` is refused by name in `dino_models.REFUSED`.
+# The group is the task's OWN and has one key. The pretrain task's `PretrainTransformArgs` was the plan's first choice, and printing its help showed
+# two defects for this task: its `image_size` says "224 for imagenette" (the DINO recipe is 96 px), and its `augment` key switches the shared loader's
+# flip and pad-crop, which the multi-crop map never reads (a key nothing reads is a lie the config-fields census would also catch). Do NOT reuse it,
+# and do NOT add an `augment` key "for symmetry": the DINO augmentations are the map's, fixed, and `stateless_augmentation` is refused by name in
+# `dino_models.REFUSED`.
 @dataclasses.dataclass(frozen=True)
 class DinoTransformArgs(StrictConfig):
     """The size every view is rendered at; read by the dino task."""

@@ -103,8 +103,7 @@ def test_the_compiled_update_equals_the_legacy_eager_update_bit_for_bit_after_ev
         eager.update_teacher_ema(decay)
         callback.update(decay)
         worst = max(worst, max(float(np.abs(a - b).max()) for a, b in zip(weights_of(eager.teacher), weights_of(compiled.teacher))))
-    print(f"EMA PARITY isolated update: {callback.updates} updates, max abs gap of every teacher weight after every update = {worst!r}")
-    assert worst == 0.0, "the compiled update is the legacy update, not a number within a band of it"
+    assert worst == 0.0, f"the compiled update is the legacy update, not a number within a band of it: max abs gap {worst!r} over {callback.updates} updates"
     assert callback.updates == len(decays_over_the_schedule())
     moved_away = max(float(np.abs(a - b).max()) for a, b in zip(initial, weights_of(compiled.teacher)))
     assert moved_away > 1e-3, "the control: the update did move the teacher, so a gap of 0.0 compares something"
@@ -207,9 +206,7 @@ def test_a_real_fit_with_each_callback_ends_bitwise_equal_in_the_teacher_the_stu
     teacher_gap = max(float(np.abs(a - b).max()) for a, b in zip(weights_of(legacy["model"].teacher), weights_of(compiled["model"].teacher)))
     student_gap = max(float(np.abs(a - b).max()) for a, b in zip(weights_of(legacy["model"].student), weights_of(compiled["model"].student)))
     centre_gap = float(np.abs(legacy["loss"].center.numpy() - compiled["loss"].center.numpy()).max())
-    print(f"EMA PARITY real 20-step fit: teacher {teacher_gap!r} student {student_gap!r} centre {centre_gap!r} "
-          f"loss {legacy['history']} against {compiled['history']}")
-    assert (teacher_gap, student_gap, centre_gap) == (0.0, 0.0, 0.0)
+    assert (teacher_gap, student_gap, centre_gap) == (0.0, 0.0, 0.0), f"gaps of the teacher, the student and the centre: {teacher_gap!r} {student_gap!r} {centre_gap!r}"
     assert legacy["history"] == compiled["history"], "the four per-epoch losses are identical to the last digit"
     assert legacy["callback"]._post_warmup_count == compiled["callback"].updates == 15 and compiled["callback"].traces == 1
     # the controls: the fits did something and the EMA did something
@@ -521,8 +518,7 @@ def test_the_epoch_zero_loss_is_one_eager_forward_through_a_throwaway_loss_of_th
     reference_loss = DINOLoss(out_dim=OUT_DIM, student_temp=0.2, teacher_temp=0.06, center_momentum=0.8)
     reference = compile_model(make_model(), reference_loss).evaluate(views, labels, batch_size=len(views), verbose=0)
     default = compile_model(make_model(), make_loss()).evaluate(views, labels, batch_size=len(views), verbose=0)
-    print(f"EPOCH ZERO loss {result.loss!r}; evaluate of an identical model with the same loss {float(reference)!r}")
-    assert np.isfinite(result.loss) and result.loss == pytest.approx(float(reference), rel=1e-5)
+    assert np.isfinite(result.loss) and result.loss == pytest.approx(float(reference), rel=1e-5), (result.loss, float(reference))
     assert abs(float(default) - float(reference)) > 1e-3, "the control: another student temperature gives another loss, so the hyperparameters matter"
     runs_centre = centre_of(loss)
     loss.center.assign(np.zeros((1, OUT_DIM), np.float32))
@@ -576,6 +572,5 @@ def test_the_knn_seam_is_the_reload_check_of_a_best_checkpoint_and_the_reloaded_
     model.save(str(tmp_path / "best_model.keras"))
     reloaded, load_error, gap = classification_run.check_best_checkpoint(
         model, tmp_path, data.test_ds, lambda m, ds: dino_run.knn_of(m, ds, data=data, loss=loss))
-    print(f"RELOAD gap of every k-NN key between the in-memory model and best_model.keras: {gap!r}")
     assert load_error is None and reloaded is not None and set(reloaded) >= {"dino_knn_top1_k10", "dino_knn_top1_k20"}
-    assert gap is not None and gap <= classification_run.WEIGHT_MISMATCH_TOLERANCE
+    assert gap is not None and gap <= classification_run.WEIGHT_MISMATCH_TOLERANCE, f"gap of every k-NN key, in memory against best_model.keras: {gap!r}"

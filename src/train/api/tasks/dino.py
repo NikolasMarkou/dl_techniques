@@ -48,9 +48,10 @@ Interface contract
     run is kept, exits 1 and its summary says which part. Under ``debug_args.smoke`` no bar is applied.
 
     ``evaluate_and_report`` scores the best checkpoint (reloaded from ``best_model.keras``) and the last epoch's weights on the TEST split by
-    :func:`train.common.dino_run.knn_of` (never ``model.evaluate``), runs the data-free analysis and saves ``final_model.keras``. ``Evaluation.extras``
-    carries ``baseline``, ``epoch_zero``, ``margin``, ``best``, ``last3_mean``, ``collapse_max``, ``selection`` and ``bar`` (both parts with their
-    numbers). The record (``task.json``) is ``build_dino_record``: the view geometry, the patch, the local crops, the head and the embedding width.
+    :func:`train.common.dino_run.knn_of` (never ``model.evaluate``), runs the data-free analysis and saves ``final_model.keras``.
+    ``Evaluation.extras`` carries ``baseline``, ``epoch_zero``, ``margin``, ``best``, ``last3_mean``, ``collapse_max``, ``selection`` and ``bar``
+    (both parts with their numbers). The record (``task.json``) is ``build_dino_record``: the view geometry, the patch, the local crops, the head
+    and the embedding width.
 
 ``train_dino(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -74,6 +75,7 @@ import dataclasses
 import functools
 import math
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .. import dino_models, recipes, registry
@@ -181,12 +183,12 @@ def judge(
         window, in order. :param first_epoch: the 1-based epoch number of the first flag.
     """
     # DECISION plan-2026-11-26T224507-e3381378/D-055
-    # BOTH parts (D-004), each STRICT. Part 1 is `best > max(baseline, epoch_zero) + margin` on plain floats in accuracy units (a k-NN accuracy moves in
-    # steps of 1/946 and the forecast bars' float32 tie bands do not fit it): a value equal to the threshold misses. Part 2 reads the flag AND
+    # BOTH parts (D-004), each STRICT. Part 1 is `best > max(baseline, epoch_zero) + margin` on plain floats in accuracy units (a k-NN accuracy moves
+    # in steps of 1/946 and the forecast bars' float32 tie bands do not fit it): a value equal to the threshold misses. Part 2 reads the flag AND
     # `is_centered` at every epoch, and a value that is not exactly 0 (flag) or 1 (centred), a NaN included, is an offence: the flag cannot see
-    # exactly-zero features and `collapse_metrics` never trips on a NaN entropy. Do NOT use `>=`, do NOT drop the baseline or the epoch-zero
-    # term (the larger binds: a run must beat what a constant and an untrained model score), do NOT drop either part or either flag, and do NOT
-    # judge part 2 on the last epoch alone.
+    # exactly-zero features and `collapse_metrics` never trips on a NaN entropy. Do NOT use `>=`, do NOT drop the baseline or the epoch-zero term (the
+    # larger binds: a run must beat what a constant and an untrained model score), do NOT drop either part or either flag, and do NOT judge part 2 on
+    # the last epoch alone.
     # DECISION plan-2026-11-26T224507-e3381378/D-096
     # A baseline or an epoch-zero term that is NOT FINITE has no threshold, and the verdict says so: Python's `max(0.1, nan)` is 0.1 and
     # `max(nan, 0.1)` is nan, so a NaN term used to be dropped without a word (a hand-edited or damaged sidecar lowered the bar) or poison it by
@@ -376,8 +378,9 @@ class DinoTrainer(TaskTrainer):
     def init_identity(self, config: DinoConfig, context: AutoContext) -> Dict[str, Any]:
         # DECISION plan-2026-11-26T224507-e3381378/D-056 (the clause naming the `vit` pair: D-071)
         # Refused for ANY source (D-013), before the claim. Do NOT build an identity "for later": the student and the teacher sit at the same weight
-        # paths, so a copy needs a teacher re-sync nothing here does, and the sequence's epoch zero under `init` is `evaluate`, which moves the
-        # centre (the very call this task exists to avoid). A dino run is a SOURCE for a `vit` classifier (the pair of recipes.VIT_TRANSFER, D-068), never a target.
+        # paths, so a copy needs a teacher re-sync nothing here does, and the sequence's epoch zero under `init` is `evaluate`, which moves the centre
+        # (the very call this task exists to avoid). A dino run is a SOURCE for a `vit` classifier (the pair of recipes.VIT_TRANSFER, D-068), never a
+        # target.
         raise ConfigError(f"Invalid value for 'init': {_INIT_REFUSED}")
 
     def used_arguments(self, config: DinoConfig, context: AutoContext) -> Dict[str, Any]:
@@ -446,8 +449,8 @@ class DinoTrainer(TaskTrainer):
     def fit_kwargs(self, config: DinoConfig, data: Any) -> Dict[str, Any]:
         # The train stream is INFINITE, so an epoch is `steps_per_epoch` batches by this keyword. No `validation_steps`: there is no validation.
         # DECISION plan-2026-11-26T224507-e3381378/D-109
-        # The first hook after the data loads (before the model is built), fresh run and resume alike: a warmup that ROUNDS to every step of the run is
-        # refused here, as a ValueError the sequence turns into the exit-2 refusal that names the claimed directory (the epochs of the same refusal
+        # The first hook after the data loads (before the model is built), fresh run and resume alike: a warmup that ROUNDS to every step of the run
+        # is refused here, as a ValueError the sequence turns into the exit-2 refusal that names the claimed directory (the epochs of the same refusal
         # are checked before the claim, `check_model_args`). Do NOT move this to `_callbacks`: it runs after the model is built and compiled.
         if self._warmup_epochs is None:
             raise RuntimeError("fit_kwargs needs the warmup `check_model_args` resolves; it was asked for before the request was resolved")
@@ -639,8 +642,8 @@ class DinoTrainer(TaskTrainer):
         self._baseline = dino_run.constant_feature_baseline(data)[WATCH_METRIC]
         broken = non_finite_terms(self._baseline, self._epoch_zero)
         if broken:
-            # Refused BEFORE any scoring: the sidecar is the one place an epoch-zero term can be damaged (a hand edit, a torn write that still parses), and
-            # a run judged against a threshold nobody can state is no run (D-096). The training is kept.
+            # Refused BEFORE any scoring: the sidecar is the one place an epoch-zero term can be damaged (a hand edit, a torn write that still
+            # parses), and a run judged against a threshold nobody can state is no run (D-096). The training is kept.
             raise RuntimeError(
                 f"the bar cannot be judged: the {' and the '.join(broken)} is not a finite number (the epoch-zero term is read from {sidecar}); "
                 "the training is kept in the run directory")
@@ -656,8 +659,6 @@ class DinoTrainer(TaskTrainer):
         # through the same multi-crop map, the same on every pass.
         views, labels = next(iter(data.loss_batch_ds))
         sample = np.asarray(views)[: classification_run.LOAD_CHECK_SAMPLES]
-        from types import SimpleNamespace
-
         analysis, test_final, load_check, load_detail = run_summary.report_data_free_run(
             fit.model,
             SimpleNamespace(x_fig=np.asarray(views), y_fig=np.asarray(labels)),

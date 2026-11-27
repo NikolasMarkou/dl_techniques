@@ -346,7 +346,7 @@ def with_patch(color: int, row: int, column: int, value: int) -> np.ndarray:
     return image
 
 
-def test_a_changed_patch_moves_the_embedding_and_the_flat_image_alone_does_not_move_it_wherever_it_sits_in_a_batch(loaded, capsys):
+def test_a_changed_patch_moves_the_embedding_and_the_flat_image_alone_does_not_move_it_wherever_it_sits_in_a_batch(loaded):
     background = flat(100)
     alone = loaded.predict(background)["embeddings"][0]
     crowd = pictures(5, seed=12)
@@ -363,8 +363,6 @@ def test_a_changed_patch_moves_the_embedding_and_the_flat_image_alone_does_not_m
     assert float(np.abs(a - b).max()) > 1e-3, "the same change at two cells is two embeddings: the model reads where it is"
     first, second = loaded.predict(pictures(2, seed=33))["embeddings"]
     assert float(np.abs(first - second).max()) > 1e-3, "two different images differ"
-    with capsys.disabled():
-        print(f"\nDELTA PROBE: flat-image noise {noise:.2e}; one patch changed moves the embedding by {min(moved.values()):.3f} to {max(moved.values()):.3f}")
 
 
 @pytest.mark.parametrize("bad, fragment", [([], "list of images is empty"), (np.zeros((0, SIDE, SIDE, 3), np.uint8), "array of images is empty")])
@@ -527,7 +525,7 @@ def bytes_under(path: Path) -> int:
     return path.stat().st_size if path.is_file() else sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
-def test_the_limit_the_export_note_states_is_still_real_a_savedmodel_carries_the_training_models_weights(loaded, exported, capsys):
+def test_the_limit_the_export_note_states_is_still_real_a_savedmodel_carries_the_training_models_weights(loaded, exported):
     # `exporting._export_saved_model` tracks the model it is given, which is the TRAINING model (the teacher and both projection heads ride in
     # the archive beside the feature graph the endpoint traces). Measured at the default size: the SavedModel 117 MB against 22 MB for the keras, tflite
     # and onnx files. When the archive tracks only the served model this fails: then lift the sentence of `dino_predictor.export_note` and of
@@ -536,9 +534,7 @@ def test_the_limit_the_export_note_states_is_still_real_a_savedmodel_carries_the
     variables = sum(item.stat().st_size for item in (exported["saved_model"] / "variables").glob("variables.data*"))
     feature = sum(int(np.prod(w.shape)) * 4 for w in loaded.features.weights)
     training = sum(int(np.prod(w.shape)) * 4 for w in loaded.model.weights)
-    with capsys.disabled():
-        print(f"\nSIZES (bytes): {sizes}; SavedModel variables {variables}; feature model weights {feature}; training model weights {training}")
-    assert feature < training and variables > 1.5 * feature, "the SavedModel's variables are more than the feature model's weights"
+    assert feature < training and variables > 1.5 * feature, f"the SavedModel's variables ({variables}) are more than the feature model's weights ({feature}, of {training})"
     assert sizes["saved_model"] > 2 * sizes["keras"] and sizes["onnx"] < sizes["saved_model"], sizes
 
 

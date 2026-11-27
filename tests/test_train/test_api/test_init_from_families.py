@@ -774,4 +774,3 @@ def test_production_order_a_dino_student_into_a_vit_of_another_variant_is_refuse
     (got, plan, message), _ = dino_into_vit(archives, variant)
     assert got == "REFUSE", f"a {variant} took a DINO tiny student: {plan}"
     assert OTHER_VARIANT[variant] in message, message
-

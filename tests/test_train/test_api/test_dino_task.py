@@ -213,8 +213,6 @@ def test_the_task_module_imports_no_tensorflow_and_the_help_lists_the_keys(tmp_p
 def test_the_task_is_the_tenth_row_of_the_table_and_the_registry_counts_say_so(world):
     assert [spec.name for spec in BUILTIN_TASKS][-1] == "dino"
     assert registry.TASKS["dino"].config_class.endswith(":DinoConfig") and "dino_v1" in registry.MODELS
-    # Printed (the log of the step reads them); every count is the registry's own.
-    print(f"len(registry.TASKS) = {len(registry.TASKS)}; len(registry.MODELS) = {len(registry.MODELS)}")
     assert len(registry.TASKS) == len(BUILTIN_TASKS) == 10
 
 

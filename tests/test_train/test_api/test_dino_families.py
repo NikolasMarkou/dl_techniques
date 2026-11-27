@@ -813,5 +813,3 @@ def test_importing_the_modules_and_building_the_row_imports_no_model_code():
     )
     assert done.returncode == 0, done.stderr[-2000:]
     assert done.stdout.strip().splitlines()[-1] == "LOADED []"
-
-
