@@ -125,6 +125,11 @@ class TestTheRefusals:
         with pytest.raises(ValueError, match=message):
             load_image_streams(settings.pop("dataset"), **settings)
 
+    def test_an_unshuffled_train_stream_with_augmentation_is_refused(self, monkeypatch) -> None:
+        use_identity_cifar10(monkeypatch)
+        with pytest.raises(ValueError, match="shuffle_train=False needs augment=False"):
+            _streams("cifar10", shuffle_train=False, augment=True)
+
     @pytest.mark.parametrize("split", [0.0, 1.0, -0.1])
     def test_a_selection_split_outside_the_open_interval_is_refused(self, split, monkeypatch) -> None:
         use_identity_cifar10(monkeypatch)
@@ -299,6 +304,38 @@ def _every_element(streams):
     """Train (two passes of batches), then every select and test batch, as arrays."""
     return (_take(streams.train_ds, 2 * N_BATCHES_OF_TRAIN),
             _take(streams.select_ds, 10), _take(streams.test_ds, 10))
+
+
+class TestTheUnshuffledFitStream:
+    """``shuffle_train=False`` (D-095 of plan e3381378): the fit rows in the split's seeded order, a function of ``seed`` alone."""
+
+    def test_the_fit_rows_come_in_the_seeded_permutations_order_and_wrap_after_one_pass(self, dataset) -> None:
+        streams = _streams(dataset, shuffle_train=False)
+        fit_rows, _, _ = seeded_split_indices(N_TRAIN, N_TEST, SEED, 0.1)
+        assert len(fit_rows) == streams.n_train
+        batches = 2 * streams.n_train // BATCH_SIZE
+        ids = _identities(dataset, streams.train_ds, batches, 0)
+        # `.repeat()` comes before `.batch()`, so the stream is the fit rows end to end, again and again, whatever the batch size
+        assert list(ids) == [int(fit_rows[i % len(fit_rows)]) for i in range(len(ids))]
+        assert len(ids) > len(fit_rows), "the control: the window runs past one pass"
+
+    def test_the_order_follows_no_global_seed_and_the_default_still_does(self, dataset) -> None:
+        try:
+            orders, shuffled = [], []
+            for global_seed in (1, 2):
+                tf.random.set_seed(global_seed)
+                orders.append(list(_identities(dataset, _streams(dataset, shuffle_train=False).train_ds, 4, 0)))
+                shuffled.append(list(_identities(dataset, _streams(dataset).train_ds, 4, 0)))
+        finally:
+            tf.random.set_seed(None)
+        assert orders[0] == orders[1]
+        assert shuffled[0] != shuffled[1], "the control: the default stream is a function of the global seed too"
+
+    def test_the_selection_and_test_rows_are_the_same_either_way(self, dataset) -> None:
+        shuffled, fixed = _streams(dataset), _streams(dataset, shuffle_train=False)
+        for part, offset in (("select_ds", 0), ("test_ds", TEST_OFFSET)):
+            np.testing.assert_array_equal(_all(dataset, getattr(fixed, part), offset), _all(dataset, getattr(shuffled, part), offset))
+        assert (fixed.n_train, fixed.n_select, fixed.n_test) == (shuffled.n_train, shuffled.n_select, shuffled.n_test)
 
 
 class TestTheStreamSeed:

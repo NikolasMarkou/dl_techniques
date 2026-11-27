@@ -168,6 +168,7 @@ def load_image_streams(
         select_indexed_map_fn: Optional[ElementMapFn] = None,
         test_indexed_map_fn: Optional[ElementMapFn] = None,
         num_parallel_calls: int = tf.data.AUTOTUNE,
+        shuffle_train: bool = True,
 ) -> ImageStreams:
     """Build the train / selection / test pipelines of ``dataset`` for a self-supervised trainer.
 
@@ -207,10 +208,15 @@ def load_image_streams(
         ``element_map_fn``; it may be combined with the other indexed maps.
     :param test_indexed_map_fn: Same as ``select_indexed_map_fn``, for the TEST stream.
     :param num_parallel_calls: ``tf.data`` parallelism of the maps.
+    :param shuffle_train: ``False`` leaves the train rows in the seeded-permutation order of the split (the fit rows of
+        ``dl_techniques.datasets.vision.splits.seeded_split_indices``, uniform and fixed by ``seed``), so the stream is a function of ``seed``
+        alone; ``True`` (the default) is the stream that reshuffles every pass, whose order follows TensorFlow's global seed as well. The
+        stream still repeats, so it wraps to its first row after one pass. Refused with ``augment`` (an augmented stream is always shuffled).
     :return: The :class:`ImageStreams`.
     :raises ValueError: An unsupported ``dataset``, a non-positive ``image_size`` or
         ``batch_size``, an unknown ``crop_policy`` (or ``"random_resized_crop"`` with an
-        in-memory dataset), ``element_map_fn`` beside any indexed map, or a selection split holding out zero rows.
+        in-memory dataset), ``element_map_fn`` beside any indexed map, ``shuffle_train=False`` with ``augment``, or a selection split holding
+        out zero rows.
     :raises FileNotFoundError: The Imagenette records are not prepared.
     """
     # DECISION plan-2026-08-01T195746-12a1f2db/D-007
@@ -240,6 +246,14 @@ def load_image_streams(
                 "`fn(index, image, label)`), and applying both would feed the second one the "
                 "first one's output. Pass exactly one."
             )
+    # DECISION plan-2026-11-26T224507-e3381378/D-095
+    # `shuffle_train=False` is the fit rows in the split's seeded order, a function of `seed` alone (a tf.data shuffle also follows TensorFlow's global
+    # seed, so the dino probe's bank could not be read twice the same by a caller that had not seeded the process). It defaults to the shuffle every other
+    # caller reads. Do NOT default it to False, and do NOT allow it with `augment`: the augmented stream draws another crop of a row on every pass.
+    if not shuffle_train and augment:
+        raise ValueError(
+            "shuffle_train=False needs augment=False: an unshuffled train stream is the fixed-order fit rows of a probe, and an augmented one "
+            "would draw a different crop of each on every pass")
     dataset = dataset.lower()
     if dataset not in SUPPORTED_DATASETS:
         raise ValueError(f"Unsupported dataset {dataset!r}; supported: {sorted(SUPPORTED_DATASETS)}")
@@ -268,7 +282,7 @@ def load_image_streams(
         config = ImagenetteConfig(
             image_size=image_size, batch_size=batch_size, crop_policy=crop_policy,
             augment=augment, normalize="imagenet", validation_split=split, seed=seed,
-            stream_seed=stream_seed, max_images=max_samples,
+            stream_seed=stream_seed, max_images=max_samples, shuffle=shuffle_train,
         )
         train, n_train = imagenette_examples("train", config)
         select, n_select = imagenette_examples("select", config)
@@ -280,7 +294,7 @@ def load_image_streams(
             seed=stream, normalize=standardizer(*stream_statistics(dataset)),
             resize=resizer(None if image_size == spec.input_shape[0] else image_size))
         hook = flip_pad_crop(mode="REFLECT", seed=stream) if augment else None
-        train = array_examples(arrays.x_train, arrays.y_train, training=True,
+        train = array_examples(arrays.x_train, arrays.y_train, training=shuffle_train,
                                augment=hook, **common)
         select = array_examples(arrays.x_select, arrays.y_select, training=False,
                                 augment=None, **common)

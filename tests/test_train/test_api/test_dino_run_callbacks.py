@@ -258,6 +258,35 @@ def test_the_centre_is_written_at_each_epoch_end_and_the_file_holds_the_loss_cen
     assert sorted(entry.name for entry in tmp_path.iterdir()) == ["centre.npy"], "no temporary file is left beside it"
 
 
+def test_a_failing_weights_write_after_the_centre_write_stops_the_run_so_the_file_is_at_most_one_epoch_ahead_and_a_resume_restores_it_as_it_is(
+        tmp_path, fake_rows):
+    """D-104: the file carries no epoch stamp, and the bound that makes it unnecessary is the callback order: the centre is written BEFORE the weights backup,
+    and a backup write that fails raises, which ends ``fit``, so no later epoch writes a newer centre over weights that were never saved."""
+    path = tmp_path / "centre.npy"
+    loss, model = make_loss(), make_model()
+    compile_model(model, loss)
+    ends: List[np.ndarray] = []
+
+    class BackupThatFails(keras.callbacks.Callback):
+        """Stands for the weights backup: it runs after ``CentreFile`` at each epoch end and fails at the second one (the first one 'succeeds')."""
+
+        def on_epoch_end(self, epoch, logs=None):
+            ends.append(centre_of(loss))
+            if epoch == 1:
+                raise OSError("the weights backup could not be written")
+
+    x, y = views_and_labels(2)
+    with pytest.raises(OSError, match="weights backup"):
+        model.fit(x, y, batch_size=BATCH, epochs=4, shuffle=False, verbose=0, callbacks=[dino_run.CentreFile(loss, path, completed_epochs=None), BackupThatFails()])
+    assert len(ends) == 2, "no third epoch ran: a failed backup ends the run"
+    assert not np.array_equal(ends[0], ends[1]), "the control: the centre moved between the two epoch ends"
+    np.testing.assert_array_equal(np.load(path), ends[1], err_msg="the file holds the LATEST epoch end's centre, one epoch ahead of the last backup")
+    # The backup that settled is the one of epoch 0 (one finished epoch): the resume restores the file's centre whatever epoch it is from.
+    resumed = make_loss()
+    assert dino_run.CentreFile(resumed, path, completed_epochs=1).restore() is True
+    np.testing.assert_array_equal(centre_of(resumed), ends[1])
+
+
 def test_a_resume_restores_the_centre_exactly_and_a_fresh_run_reads_no_file(tmp_path, monkeypatch):
     path = tmp_path / "centre.npy"
     written = loss_with_centre(2)

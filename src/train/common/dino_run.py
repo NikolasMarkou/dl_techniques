@@ -166,6 +166,11 @@ class CentreFile(keras.callbacks.Callback):
 
     def write(self) -> None:
         """Write ``loss.center`` to the file: whole, or not at all."""
+        # DECISION plan-2026-11-26T224507-e3381378/D-104
+        # The file carries NO epoch stamp. The gap between the centre and the weights is at most one epoch (the centre is written first, D-054) because a
+        # failing write of either raises and ends `fit`: no later epoch writes a newer centre over weights that were never saved
+        # (`test_a_failing_weights_write_after_the_centre_write_stops_the_run...`). Do NOT add a stamp that is refused on a mismatch: it would have to accept
+        # the documented one-epoch-ahead window, so it could only catch a gap the ordering already excludes, and it is a second thing to keep in step.
         centre = np.asarray(keras.ops.convert_to_numpy(self.loss.center), dtype=np.float32)
         partial = partial_path(self.path)
         # DECISION plan-2026-11-26T224507-e3381378/D-027

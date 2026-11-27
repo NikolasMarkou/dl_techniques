@@ -20,7 +20,8 @@ Interface contract
 ``judge(best, baseline, epoch_zero, margin, collapse_flags, centred_flags)`` and :class:`Verdict`
     The bar (D-004) as one pure function; ``bar_is_met``, the summary's ``bar`` block and the notes read it. :return: a :class:`Verdict` with the
     two parts (``part1_met``, ``part2_met``), the threshold ``max(baseline, epoch_zero) + margin``, the first epoch (1-based, in the window) at
-    which part 2 failed and its reason, and a sentence that names the part(s) missed.
+    which part 2 failed and its reason, and a sentence that names the part(s) missed. A ``baseline`` or an ``epoch_zero`` that is not a finite
+    number (a damaged sidecar) has no threshold: part 1 is missed, the threshold is NaN and the sentence names the term (D-096).
 
 ``DinoConfig``
     Frozen :class:`~train.api.config.StrictConfig`; one field per keyword of the function. ``out``, ``model`` and ``data`` are required. Groups:
@@ -102,8 +103,8 @@ from ..dino_args import (
     load_dino_data_config,
     read_dino_data_file,
 )
-from ..dino_models import backup_problems, precision_problems, recipe_notices_of, schedule_problems
-from ..errors import ConfigError
+from ..dino_models import backup_problems, precision_problems, recipe_notices_of, schedule_problems, warmup_problems
+from ..errors import ConfigError, ConfigValidationError
 from ..predictor import build_dino_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
@@ -146,6 +147,11 @@ def margin_of(control_sd: float, null_p99: float) -> float:
 MARGIN: Dict[str, float] = {name: margin_of(CONTROL_SD[name], NULL_P99[name]) for name in CONTROL_SD}
 
 
+def non_finite_terms(baseline: float, epoch_zero: float) -> List[str]:
+    """Return the bar's two terms that are not finite numbers, as ``"<name> <value>"`` (``[]`` for none); see :func:`judge`."""
+    return [f"{name} {value!r}" for name, value in (("baseline", baseline), ("epoch zero", epoch_zero)) if not math.isfinite(value)]
+
+
 @dataclasses.dataclass(frozen=True)
 class Verdict:
     """The two parts of the bar with the numbers behind them; see :func:`judge`."""
@@ -180,8 +186,13 @@ def judge(
     # exactly-zero features and `collapse_metrics` never trips on a NaN entropy. Do NOT use `>=`, do NOT drop the baseline or the epoch-zero
     # term (the larger binds: a run must beat what a constant and an untrained model score), do NOT drop either part or either flag, and do NOT
     # judge part 2 on the last epoch alone.
-    threshold = max(baseline, epoch_zero) + margin
-    part1 = bool(best > threshold)
+    # DECISION plan-2026-11-26T224507-e3381378/D-096
+    # A baseline or an epoch-zero term that is NOT FINITE has no threshold, and the verdict says so: Python's `max(0.1, nan)` is 0.1 and
+    # `max(nan, 0.1)` is nan, so a NaN term used to be dropped without a word (a hand-edited or damaged sidecar lowered the bar) or poison it by
+    # position. Do NOT call `max` on the raw terms, and do NOT treat a NaN term as "absent".
+    broken = non_finite_terms(baseline, epoch_zero)
+    threshold = float("nan") if broken else max(baseline, epoch_zero) + margin
+    part1 = bool(not broken and best > threshold)
     offending: Optional[int] = None
     reason: Optional[str] = None
     for offset, (flag, centred) in enumerate(zip(collapse_flags, centred_flags)):
@@ -195,7 +206,9 @@ def judge(
             break
     part2 = offending is None and len(collapse_flags) > 0 and len(collapse_flags) == len(centred_flags)
     words = []
-    if not part1:
+    if broken:
+        words.append(f"part 1 missed: the bar has no threshold, the {' and the '.join(broken)} is not a finite number")
+    elif not part1:
         words.append(
             f"part 1 missed: best {WATCH_METRIC} {best:.4f} is not above max(baseline {baseline:.4f}, epoch zero {epoch_zero:.4f}) + margin "
             f"{margin:.3f} = {threshold:.4f}")
@@ -302,6 +315,8 @@ class DinoTrainer(TaskTrainer):
         self._epoch_zero: Optional[float] = None
         self._flags: Optional[Tuple[List[float], List[float]]] = None
         self._first_epoch: int = 1
+        #: Whether ``_callbacks`` ran in this process, that is whether ``fit`` trained here (it is False in a resume that only reports).
+        self._trained_here: bool = False
 
     # -- data and model -------------------------------------------------
 
@@ -369,7 +384,10 @@ class DinoTrainer(TaskTrainer):
     def check_model_args(self, config: DinoConfig, context: AutoContext) -> None:
         # The family's own refusals first (every refused key at once), then the geometry of the views.
         self._model_kwargs(config, context)
-        self._task_values(config, context)
+        values = self._task_values(config, context)
+        lines = warmup_problems(values["ema_warmup_epochs"], config.epochs, smoke=config.debug_args.smoke)
+        if lines:
+            raise ConfigValidationError(lines)
         check_geometry(config.data.patch_size, config.transform_args.image_size)
 
     # -- compile --------------------------------------------------------
@@ -455,6 +473,7 @@ class DinoTrainer(TaskTrainer):
         loss, values = self._loss, self._values
         if loss is None or values is None:
             raise RuntimeError("the callbacks need the loss and the task values, which the model and compile stages set; they were not run")
+        self._trained_here = True
         # DECISION plan-2026-11-26T224507-e3381378/D-008
         # The probe goes BEFORE the first of the stopper and the killed-epoch finisher (`FinishKilledEpoch` is present only with a mid-epoch
         # backup, which this task refuses; the `min` keeps the rule true if that changes): `EarlyStopping` and the checkpoint read the monitor from
@@ -498,6 +517,9 @@ class DinoTrainer(TaskTrainer):
                 "success_threshold needs the constant-feature baseline and the epoch-zero probe value, which evaluate_and_report works out; it "
                 "was asked for before the reporting"
             )
+        broken = non_finite_terms(self._baseline, self._epoch_zero)
+        if broken:
+            raise RuntimeError(f"the bar has no threshold: the {' and the '.join(broken)} is not a finite number")
         return float(max(self._baseline, self._epoch_zero) + MARGIN[config.data.dataset])
 
     def _verdict(self, config: DinoConfig, reached: float) -> Verdict:
@@ -588,12 +610,27 @@ class DinoTrainer(TaskTrainer):
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
         metric_cfg: DinoMetricArgs = config.metric_args
+        if not self._trained_here:
+            # DECISION plan-2026-11-26T224507-e3381378/D-103
+            # A resume that only REPORTS (training had finished) builds no callbacks, so `CentreFile` never restored the loss's centre and the test
+            # split would be scored against a ZERO centre: the entropy columns of `test_metrics_best` and `test_metrics_final` (and the centre the
+            # compile config of `final_model.keras` carries) would differ from an uninterrupted run's. The file holds the last finished epoch's
+            # centre, which is what an uninterrupted run has at this point. Do NOT skip the restore "because no batch runs": the entropy reads it.
+            dino_run.CentreFile(
+                self._loss, Path(fit.run_dir) / CHECKPOINTS_DIR / CENTRE_FILE, completed_epochs=fit.epochs_run).restore()
         sidecar = fit.run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME
         # The epoch-zero term from the SIDECAR, always (a resume never evaluates the untrained model), and the constant-feature baseline from the
         # labels (no model: a resume reads it the same way).
         self._epoch_zero = pretrain_run.epoch_zero_val_loss(sidecar, key=WATCH_METRIC)
         initial = read_fit_state(sidecar)["initial"]["metrics"]
         self._baseline = dino_run.constant_feature_baseline(data)[WATCH_METRIC]
+        broken = non_finite_terms(self._baseline, self._epoch_zero)
+        if broken:
+            # Refused BEFORE any scoring: the sidecar is the one place an epoch-zero term can be damaged (a hand edit, a torn write that still parses), and
+            # a run judged against a threshold nobody can state is no run (D-096). The training is kept.
+            raise RuntimeError(
+                f"the bar cannot be judged: the {' and the '.join(broken)} is not a finite number (the epoch-zero term is read from {sidecar}); "
+                "the training is kept in the run directory")
         score = functools.partial(dino_run.knn_of, data=data, loss=self._loss)
         test_best: Optional[Dict[str, float]] = None
         load_error: Optional[str] = None

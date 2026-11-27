@@ -324,6 +324,7 @@ def runs(world, cifar, tmp_path_factory):
     def callbacks(self, *arguments, **keywords):
         epoch_line, built = original_callbacks(self, *arguments, **keywords)
         done["order"] = [type(callback).__name__ for callback in built]
+        done.setdefault("ema", next(callback for callback in built if type(callback).__name__ == "CompiledTeacherEMA"))   # the first run's: "met"
         built.append(Recorder(self))
         return epoch_line, built
 
@@ -397,14 +398,23 @@ def test_the_centre_advances_exactly_steps_per_epoch_times_per_epoch_and_no_eval
     steps = summary["steps_per_epoch"]
     assert steps == 28 and runs["epoch_counts"] == [steps * (e + 1) for e in range(TASK_EPOCHS)]                      # M35: validation adds batches
     events = runs["spy"].events
+    assert "train_end" in events, "the spy saw the run end: a spy that records nothing would pass every line below"
     assert "evaluate" not in events and "test_on_batch" not in events, events                                         # M40: the test split through evaluate
-    after = events[events.index("train_end"):] if "train_end" in events else []
+    after = events[events.index("train_end"):]
+    assert "predict" in after, "the positive control: the final load check calls predict after training, and the spy saw it"
     assert "predict" not in events[:events.index("train_end")], "no predict while the loss is running"
     assert set(after) <= {"train_end", "predict"}
     centre = runs["centres"]
     assert np.abs(centre["train_end"]).max() > 0.0 and np.array_equal(centre["train_end"], centre["end"]), "the reporting moved the centre"
     saved = np.load(runs["root"] / "met" / "checkpoints" / CENTRE_FILE)
     assert saved.shape == (1, OUT_DIM) and np.array_equal(saved, centre["train_end"]), "the centre file is the last epoch end's"
+
+
+def test_the_run_moved_the_teacher_after_the_one_epoch_warmup_and_not_before(runs):
+    """The fresh run's EMA count: ``steps * epochs`` batches, the first ``ema_warmup_epochs * steps`` of them frozen (the recipe's warmup is 1 epoch)."""
+    ema = runs["ema"]
+    steps = summary_of(runs, "met")["steps_per_epoch"]
+    assert ema.warmup_steps == steps and ema.updates == steps * TASK_EPOCHS - steps == steps, (ema.warmup_steps, ema.updates, steps)
 
 
 def test_the_files_the_run_leaves_and_the_best_checkpoint_is_the_epoch_the_summary_names(runs):
@@ -429,6 +439,7 @@ def test_the_best_checkpoint_reloads_and_its_probe_value_is_the_in_memory_best_w
 
     run = runs["root"] / "met"
     summary = summary_of(runs, "met")
+    # No `set_seeds` here: the bank is a function of `seed` alone (D-095), so it is the run's bank whatever global seed the process was left with.
     data = dino_data.load_dino_batches(
         dataset="cifar10", image_size=IMAGE, n_local_crops=N_LOCAL, batch_size=TASK_BATCH, seed=42, stream_seed=None, validation_split=None,
         max_samples=TASK_MAX_SAMPLES, knn_bank_batches=64, knn_query_batches=32)
@@ -451,6 +462,7 @@ def controls(world, cifar):
 
     from ._dino_world import make_loss, make_model
 
+    # No `set_seeds` here either (D-095): the bank is a function of `seed` alone, so the rows are the run's whatever global seed was left behind.
     data = dino_data.load_dino_batches(
         dataset="cifar10", image_size=IMAGE, n_local_crops=N_LOCAL, batch_size=TASK_BATCH, seed=42, stream_seed=None, validation_split=None,
         max_samples=TASK_MAX_SAMPLES, knn_bank_batches=64, knn_query_batches=32)

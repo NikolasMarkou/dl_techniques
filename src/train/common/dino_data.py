@@ -6,7 +6,9 @@ batches (the probe scores the representation of a plain image, not of an augment
 ``.take(n).cache()`` of the plain fit rows and of the selection rows. ``train.dino.train_dino.build_dataset`` and ``build_knn_datasets`` do this
 from the legacy 39-field ``TrainingConfig`` and seed the split, the shuffle and the crops from ONE seed, so they cannot give a resumed run a
 stream of its own. This module calls the same two primitives (``load_image_streams`` and the stateless multi-crop map) and adds what a
-resume needs: a batches object whose :meth:`DinoBatches.with_stream` moves the shuffle and the crops and nothing else.
+resume needs: a batches object whose :meth:`DinoBatches.with_stream` moves the shuffle and the crops and nothing else. One difference from the legacy
+streams is deliberate: the legacy bank is the first pass of a SHUFFLED fit stream, which follows TensorFlow's global seed as well as the split seed;
+here the bank is the first fit rows in the split's seeded-permutation order, so it is a function of ``seed`` alone.
 
 This module imports TensorFlow; ``train.api`` imports it inside functions only.
 
@@ -18,11 +20,13 @@ knn_bank_batches, knn_query_batches)``
     :param image_size: the global crop size, which is also the local crop size and the size of the plain images (every view of the model has
         the same pixel resolution).
     :param n_local_crops: local crops per image (0 or more); a view count of ``2 + n_local_crops``.
-    :param seed: the split seed: the selection, test and probe rows are a function of it alone.
+    :param seed: the split seed: the selection and test rows, the probe's queries and its memory bank are a function of it alone (the bank is the
+        first fit rows in the split's seeded-permutation order, never a shuffle, so the process's TensorFlow global seed does not reach it).
     :param stream_seed: the seed of the train shuffle AND of the stateless crops; ``None`` means ``seed``. Never reaches the split or the probe.
     :param validation_split, max_samples: as in ``load_image_streams``; the cap bounds the train pool, never the test split.
-    :param knn_bank_batches, knn_query_batches: the probe's bank is the first ``knn_bank_batches`` batches of the plain fit stream; its
-        queries are the first ``knn_query_batches`` batches of the selection split (all of it when the split is shorter).
+    :param knn_bank_batches, knn_query_batches: the probe's bank is the first ``knn_bank_batches`` batches of the plain fit rows in their seeded
+        order (a fit pool shorter than the bank wraps to its first row, so the bank repeats rows); its queries are the first
+        ``knn_query_batches`` batches of the selection split (all of it when the split is shorter).
     :return: a :class:`DinoBatches`.
     :raises TypeError: for a seed, stream seed, crop count or batch count that is not an ``int`` (a ``bool`` is not), before any data is read.
     :raises ValueError: for a negative crop count, a batch count below 1, or a finite stream whose length is not the one pass it should
@@ -70,8 +74,8 @@ class DinoBatches:
         rows, each ``.take(n).cache()`` of a stream on the split seed, so every probe of the run reads the same rows.
     :param loss_batch_ds: ONE multi-crop batch of ``(views, label)``: the first selection batch put through the same stateless multi-crop map,
         keyed on ``(stream seed, row)``, the same on every pass. Epoch zero feeds it to a throwaway loss. It is read from the selection split
-        and not from a train or a bank stream: every pass of those is a new shuffle (and a half-read ``.cache()`` is dropped and refilled from
-        a new pass), so a batch read from them for a diagnostic would change what ``fit`` and the probe see.
+        and not from the train stream, every pass of which is a new shuffle, so a batch read from it for a diagnostic would change what ``fit``
+        sees; nor from the bank, which is read in full or not at all (D-038).
     :param steps_per_epoch, val_steps, test_steps: batches in an epoch and in a selection and a test pass.
     :param n_train, n_select, n_test: rows of the three splits.
     :param bank_batches, query_batches: batches of the two probe streams.
@@ -156,9 +160,15 @@ def load_dino_batches(
     train = load_image_streams(
         dataset, image_size=image_size, batch_size=batch_size, seed=seed, stream_seed=stream,
         validation_split=validation_split, max_samples=max_samples, augment=False, indexed_element_map_fn=map_fn)
+    # DECISION plan-2026-11-26T224507-e3381378/D-095
+    # The plain load's FIT stream is NOT shuffled (`shuffle_train=False`): its rows come in the split's seeded-permutation order, so the bank
+    # (its first `knn_bank_batches` batches) is a function of `seed` alone. The first pass of a `shuffle(seed=...)` is a function of the pair
+    # (TensorFlow's global seed, `seed`), so a caller that had not called `set_seeds(seed)` scored other bank rows than the run's (measured:
+    # 3 different banks under 3 global seeds, review-iter-1 concern 2). Do NOT take the bank from a shuffled stream "with a seed": a seed on a
+    # tf.data shuffle does not remove the global seed. Do NOT read the plain fit stream for anything but the bank: it is the same rows every pass.
     plain = load_image_streams(
         dataset, image_size=image_size, batch_size=batch_size, seed=seed, stream_seed=None,
-        validation_split=validation_split, max_samples=max_samples, augment=False)
+        validation_split=validation_split, max_samples=max_samples, augment=False, shuffle_train=False)
     states_its_length("select_ds", plain.select_ds, plain.val_steps)
     states_its_length("test_ds", plain.test_ds, plain.test_steps)
 
@@ -171,9 +181,9 @@ def load_dino_batches(
     # One batch of multi-crop views for the epoch-zero loss, from the first SELECTION batch (unshuffled, so the same on every pass) through the
     # same map. Do NOT read it from `train.train_ds`: every iteration of that stream is a new shuffle drawn from one seed generator, so a
     # batch read for a diagnostic would change the order `fit` then trains on. Do NOT read it from `probe_bank` either: `.take(1)` over a
-    # `.cache()` is a PARTIAL pass, tf.data drops a half-filled cache and refills it from the next pass of the shuffled source, and the bank
-    # would then hold other rows than the ones a full read cached (measured by `test_the_loss_batch_...`). The probe streams are read in
-    # full or not at all.
+    # `.cache()` is a PARTIAL pass and tf.data drops a half-filled cache, which a SHUFFLED source refilled with other rows (the first
+    # draft's measured 99.6 percent difference; since D-095 the bank source is unshuffled, so a half read refills the same rows, and
+    # `test_a_half_read_of_the_bank_cache_...` holds that). The probe streams are still read in full or not at all.
     loss_batch = plain.select_ds.take(1).unbatch().enumerate().map(
         lambda index, element: map_fn(index, *element)).batch(batch_size)
 

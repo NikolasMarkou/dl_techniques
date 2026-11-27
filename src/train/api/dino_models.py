@@ -49,6 +49,10 @@ Interface contract
     :return: the lines that refuse a ``precision`` other than ``float32``, a ``constant`` schedule, and any ``backup_every_steps``; ``[]`` when
         the value is the accepted one. For the task config's ``problems``, which names the field (``prefix`` is the dotted path of its group).
 
+``warmup_problems(ema_warmup_epochs, epochs, smoke=False)``
+    :return: the line that refuses an ``ema_warmup_epochs`` that is not below the run's resolved ``epochs`` (a teacher frozen for the whole run);
+        ``[]`` for a smaller warmup and for a smoke run (one epoch, no bar). The task calls it from ``check_model_args``, which sees the resolved epochs.
+
 ``ema_warmup_steps(ema_warmup_epochs, steps_per_epoch)``
     :return: the teacher EMA's warmup in optimizer steps, ``round(epochs * steps_per_epoch)``: the recipe is denominated in EPOCHS, so it moves
         with the dataset and the batch (a test holds it equal to the legacy trainer's ``resolve_ema_warmup_steps``).
@@ -283,6 +287,24 @@ def schedule_problems(schedule: Any, prefix: str = "optim_args") -> List[str]:
     return [
         f"Invalid value for {join_path(prefix, 'schedule')!r}: {schedule!r} adds a ReduceLROnPlateau(monitor='val_loss') to the run, and a "
         f"{TASK} run has no validation data, so it would warn at the end of every epoch and never act; use 'cosine_decay', the recipe's"
+    ]
+
+
+def warmup_problems(ema_warmup_epochs: Any, epochs: Any, smoke: bool = False) -> List[str]:
+    """Return the line that refuses a teacher EMA warmup as long as the run or longer; see the module contract."""
+    # DECISION plan-2026-11-26T224507-e3381378/D-100
+    # A warmup of `epochs` or more freezes the teacher for the WHOLE run: `CompiledTeacherEMA` never updates it, the student chases its own
+    # initial weights, and the run still reaches the claim, trains to the end and reports a number nobody measured (`ema_warmup_epochs=60` at the
+    # recipe's 60 epochs). The check needs the RESOLVED epochs, which the resolver is never handed, so it is a function the task calls from
+    # `check_model_args` (before the claim, for a fresh run and a resume alike: both resolve first). A smoke run is exempt: it trains one epoch and
+    # applies no bar, so the recipe's own 1-epoch warmup leaves its teacher frozen, and the documents say so. Do NOT make the recipe's warmup
+    # shrink with the epochs (a silent change of the recipe), and do NOT refuse the smoke run (the documented plumbing check would need a typed key).
+    if smoke or not _real(ema_warmup_epochs) or not _real(epochs) or ema_warmup_epochs < epochs:
+        return []
+    return [
+        f"Invalid value for 'model_args.ema_warmup_epochs': {ema_warmup_epochs!r} is not below the run's {epochs!r} epochs, so the teacher's EMA "
+        f"would never start and the teacher would stay at its initial weights for the whole run, a configuration no run measured; use a value "
+        f"below {epochs!r} (the recipe's is {RECIPE['model_args']['ema_warmup_epochs']!r}) or train more epochs"
     ]
 
 

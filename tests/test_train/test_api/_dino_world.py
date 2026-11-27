@@ -149,6 +149,8 @@ def same_arrays(a: List[np.ndarray], b: List[np.ndarray]) -> bool:
 # ``csv_column(run_dir, name)``: a column of ``training_log.csv`` as floats. ``world`` (fixture, module scope): an empty registry holding every
 # built-in family and task.
 
+#: What the claim of a run directory writes, and so all a run refused after the claim leaves behind (README, ``test_dino_init.py``).
+CLAIM_LEAVES = ("config.json", "config_requested.json", "run.lock", "run.log")
 TASK_MODEL = "dino_v1/tiny"
 TASK_BATCH, TASK_EPOCHS, TASK_MAX_SAMPLES = 32, 2, 1000
 
@@ -241,5 +243,7 @@ def train_real_run(out: Any) -> int:
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setitem(task.MARGIN, "cifar10", -0.5)
-        return cli.main(["dino", *flatten_request(task_request(out, epochs=1, batch_size=16))])
+        # A warmup of one epoch is as long as a 1-epoch run, which the task refuses (D-100): half an epoch trains the teacher for the second half.
+        return cli.main(["dino", *flatten_request(task_request(
+            out, epochs=1, batch_size=16, model_args={"dino_out_dim": OUT_DIM, "ema_warmup_epochs": 0.5}))])
 

@@ -35,7 +35,7 @@ from train.api.errors import ConfigError
 from train.api.tasks.dino import train_dino
 from train.api.tasks.image_classification import ImageClassificationTrainer, train_image_classification
 
-from ._dino_world import IMAGE, PATCH, identity_world, task_request, train_real_run  # noqa: F401  (``identity_world`` is a fixture)
+from ._dino_world import CLAIM_LEAVES, IMAGE, PATCH, identity_world, task_request, train_real_run  # noqa: F401  (``identity_world`` is a fixture)
 from .test_init_from_runs import (
     DRIVER, QUIET, REPO_ROOT, archive_weights, check_copied, classification_record, dino_record, pretrain_record, record_of, relative, sha, started,
     summary_of, watch_opens, write_source,
@@ -234,3 +234,27 @@ def test_wire_a_resume_of_the_run_opens_no_file_of_its_source(pair, tmp_path, mo
     assert summary_of(run_dir)["reporting_resumed"] is True and opened == []
     assert rebuilt == {path: value.shape for path, value in archive_weights(pair.out).items()}  # the patch of the record, no source read
     assert summary_of(run_dir)["init"] == record_of(run_dir)["init"] == record_of(pair.out)["init"]
+
+
+# ---------------------------------------------------------------------
+# a vit of another width than the dino source: refused AFTER the claim (D-105)
+# ---------------------------------------------------------------------
+
+
+def test_a_vit_of_another_width_than_the_dino_source_is_refused_after_the_claim_by_the_weight_check_and_leaves_no_run_to_resume(
+        identity_world, dino_source, tmp_path):
+    """MEASURED (D-105): the width of the target lives in the library's ``ViT.SCALE_CONFIGS``, not in the registry's variants table (``{"scale": "small"}``), so
+    no record key of the source can be compared with it before the claim without a new declared field on every target family; the weight check names the
+    first weight that does not fit, the claimed directory holds only what the claim writes, and nothing was copied or trained."""
+    out = tmp_path / "vit_small_run"
+    before = sha(dino_source / "best_model.keras")
+    keras.backend.clear_session()
+    with pytest.raises(ConfigError) as caught:
+        train_image_classification(**vit_request(out, model="vit/vit_small", init=str(dino_source)))
+    message = str(caught.value)
+    assert "vit pos_embed (1, 17, 192) cannot become (1, 17, 384)" in message, message
+    assert "was claimed before this failed, so 'out' is now used" in message, "the message says the claim happened and what to do"
+    assert sorted(path.name for path in out.rglob("*")) == sorted(CLAIM_LEAVES), "only what the claim writes"
+    for name in ("task.json", "best_model.keras", "final_model.keras", "training_log.csv", "results_summary.json"):
+        assert not (out / name).exists(), f"{name} of a run that never trained"
+    assert sha(dino_source / "best_model.keras") == before, "the source archive is byte for byte what it was"

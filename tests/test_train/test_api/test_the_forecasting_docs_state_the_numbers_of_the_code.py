@@ -756,6 +756,7 @@ def dino_refusal_cases():
         raised(lambda: da.check_geometry(3, 96)),
         dm.problems_of({"student_temp": 0.2})[0],
         dm.problems_of({"teacher_temp": 0.04, "teacher_temp_final": 0.03})[0],
+        dm.warmup_problems(60, 60)[0],
         dm.precision_problems("mixed_float16")[0],
         dm.schedule_problems("constant")[0],
         dm.backup_problems(100)[0],
@@ -816,6 +817,19 @@ def test_the_dino_section_states_the_numbers_of_the_code(world):
         quoted = cell[2:-2].strip() if cell.startswith("``") else cell[1:-1]
         assert is_the_message("`" + quoted.replace("`", "'") + "`", message.replace("`", "'")), f"row {number} ({case}): the table quotes {cell}, the code raises {message}"
     assert "a message quoted with `<run>`, `<out>` or `...` is abbreviated there" in section
+    # fix round 11.1 (review-iter-1): what the corrections say, each sentence read against the code or the test that holds it
+    from ._dino_world import CLAIM_LEAVES
+
+    assert dm.warmup_problems(1.0, 1) and dm.warmup_problems(1.0, 1, smoke=True) == [], "the refusal and its smoke exemption are the code's"
+    assert ("`model_args.ema_warmup_epochs` that is not below the run's `epochs`" in section and "except under `debug_args.smoke`" in section
+            and "for a fresh run and a resume alike" in section)
+    assert "the bank is the first fit rows in the split's seeded order and not a shuffle" in section and "does not reach it" in section
+    assert dino_task.non_finite_terms(0.1, float("nan")) == ["epoch zero nan"] and dino_task.non_finite_terms(float("inf"), 0.1) == ["baseline inf"]
+    assert ("A `baseline` or `epoch zero` term that is not a finite number" in section and "the report is refused before any scoring" in section
+            and "a miss of part 1" in section)
+    assert "A diverged student is caught by its loss, not by the probe" in section and "ends the run as `diverged`, exit 1, with no bar applied" in section
+    assert "The centre file carries no epoch stamp" in section and "A resume that only reports (training had finished) restores the centre from the file before it scores the test split" in section
+    assert ", ".join(f"`{name}`" for name in CLAIM_LEAVES[:-1]) + f" and `{CLAIM_LEAVES[-1]}` only" in section and "`vit/vit_small` after `dino_v1/tiny`" in section
 
 
 def dino_refusal_rows():

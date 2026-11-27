@@ -169,10 +169,11 @@ class DinoPredictor:
 
 def write_predictions(predictor: DinoPredictor, files: Sequence[Path], out: Path) -> None:
     """Write one ``.npy`` per file and ``index.json`` into the new directory ``out``; see the module contract."""
-    # DECISION plan-2026-11-26T224507-e3381378/D-047
-    # A writer of its own beside depth's, pretrain's and the tokenizer's, sharing what they share (mask_names, check_free, INDEX_NAME, the .npy
-    # suffix and the no-truncate write_array); each is bound to its answer's key, its note and its index entry. Do NOT generalize one for the
-    # others and do NOT copy write_array back here.
+    # DECISION plan-2026-11-26T224507-e3381378/D-099
+    # The FOURTH `.npy` writer, a near-copy of pretrain's (they differ in the output name, the note and nothing else) beside depth's and the tokenizer's, sharing
+    # what they share (mask_names, check_free, INDEX_NAME, the .npy suffix and the no-truncate write_array). No shared writer exists in the repository, and
+    # making one means editing three shipped writers (and their tests) in a fix round of another phase, for 18 lines. Do NOT generalize one for the others
+    # here, do NOT copy write_array back here, and when the index protocol changes change all four (`test_the_four_npy_writers_...` reads each index).
     names = mask_names(files, ARRAY_SUFFIX)
     check_free(out, "out", "predict")
     out.mkdir(parents=True)

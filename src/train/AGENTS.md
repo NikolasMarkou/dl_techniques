@@ -418,7 +418,9 @@ train, and the TEST split never selects.
   0-based row position of the pass, int64, the same on every pass; each is refused beside `element_map_fn`, and absent they leave
   the stream a plain `(image, label)` batch). `stream_seed=None` is the seed of the train shuffle and the train augmentation only
   (`ImagenetteConfig.stream_seed` likewise): `None` means `seed`, `0` is a seed (`is None`, never truthiness), and the split, the
-  selection rows and the test rows always come from `seed` (the mask-key rule under `pretrain` below says why). They use
+  selection rows and the test rows always come from `seed` (the mask-key rule under `pretrain` below says why). `shuffle_train=False` (default `True`, refused with
+  `augment`; `ImagenetteConfig.shuffle` likewise) leaves the train rows in the split's seeded order, a function of `seed` alone where a shuffle also follows TensorFlow's global
+  seed: the `dino` probe's bank reads it (plan e3381378 D-095). They use
   `add_selection_arguments(parser, imagenet=False, figures=False)`.
   DINO's per-epoch k-NN probe queries the selection slice, and `KNNEvalCallback.evaluate_split`
   scores the test split once after training (`knn_test.json`).
@@ -948,7 +950,12 @@ classification task calls the same `train.common.classification_run` helpers as 
   epoch zero runs the frozen networks and a THROWAWAY loss, never the run's (D-022: `test_epoch_zero_leaves_the_centre_the_weights_the_step_and_the_random_state_alone`); the bar is two
   parts read through the one pure function `judge`, each strict, with a margin that is a function of two measured spreads and never a typed number (D-004, D-026, D-055:
   `test_the_margin_is_a_function_of_the_two_measured_spreads_and_its_two_outputs_are_pinned`, `test_a_run_that_meets_one_part_misses_and_the_text_names_the_other`,
-  `test_the_bar_needs_both_parts_over_the_real_numbers`); the probe sits before the stopper and the CSV logger and writes every key every epoch (D-008:
+  `test_the_bar_needs_both_parts_over_the_real_numbers`, and a baseline or epoch-zero term that is not a number is a miss, never a dropped term (D-096:
+  `test_the_verdict_has_no_threshold_for_a_term_that_is_not_a_number_and_misses_part_one_saying_which`)); the probe's bank is the first fit rows in the split's seeded order and a function of `seed` alone, never a shuffle
+  (D-095: `test_the_bank_is_a_function_of_the_seed_alone_the_first_fit_rows_in_their_seeded_order_whatever_the_global_seed`); the task's four callback values (the EMA warmup in steps, the cosine
+  horizon, the teacher temperature from `teacher_temp` to `teacher_temp_final`, the `k20` column of the bar's terms) are held to the legacy trainer's functions (D-097: `test_dino_task_wiring.py`), a
+  `model_args.ema_warmup_epochs` not below the run's epochs is refused (D-100), a NaN student ends the run through its loss alone (D-102), and a resume that only reports restores the centre first (D-103);
+  the probe sits before the stopper and the CSV logger and writes every key every epoch (D-008:
   `test_the_csv_has_every_probe_key_each_epoch_and_no_val_column_and_the_probe_sits_before_the_csv_logger`); the teacher's EMA is compiled with its decay a TENSOR argument and its step read from
   `optimizer.iterations` (D-009, D-024: `test_the_compiled_update_equals_the_legacy_eager_update_bit_for_bit_after_every_update`); the centre is written atomically at each epoch end, and
   `backup_every_steps` is refused (D-010, D-050: `test_a_resume_restores_the_centre_exactly_and_a_fresh_run_reads_no_file`,
@@ -957,7 +964,7 @@ classification task calls the same `train.common.classification_run` helpers as 
   `train` package (D-063, D-066: `test_the_limit_the_export_note_states_is_still_real_a_savedmodel_carries_the_training_models_weights`,
   `test_an_exported_keras_file_holds_library_layers_only_and_loads_where_the_train_package_cannot_be_imported`); a dino run seeds a `vit` by its student and is no `init` target (D-013, D-068, D-069:
   `test_the_unit_plan_of_a_dino_student_into_a_vit_pairs_every_backbone_weight_and_leaves_nothing_over`, `test_init_naming_any_run_is_refused_before_the_claim_with_the_reason`). The recipe
-  notices state what the gate covers and name the README block, never a figure of it (D-015, D-049). Tests, in `tests/test_train/test_api/`: `test_dino_{task,resume,families,predictor_and_export,init}.py`,
+  notices state what the gate covers and name the README block, never a figure of it (D-015, D-049). Tests, in `tests/test_train/test_api/`: `test_dino_{task,task_wiring,resume,families,predictor_and_export,init}.py`,
   `test_common_dino_data.py`, `test_dino_run_callbacks.py` and `test_the_validation_stream_seam.py`, sharing `_dino_world.py`. The user-facing description is in [`README.md`](README.md), which holds
   the numbers of its GPU gate in its own block.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task

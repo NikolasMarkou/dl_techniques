@@ -163,6 +163,8 @@ class ImagenetteConfig:
     :param max_images: Smoke-run cap on the train pool (the test split is never capped).
     :param tfds_data_dir: The TFDS data directory; ``None`` inherits ``$TFDS_DATA_DIR``.
     :param num_parallel_calls: ``tf.data`` parallelism of the decode.
+    :param shuffle: ``False`` reads the ``train`` split in the seeded-permutation order of its rows instead of shuffling it (a stream that is
+        a function of ``seed`` alone, whatever TensorFlow's global seed is); ``True`` (the default) reshuffles on every pass. No other split reads it.
     """
 
     image_size: int = 224
@@ -177,6 +179,7 @@ class ImagenetteConfig:
     max_images: Optional[int] = None
     tfds_data_dir: Optional[str] = None
     num_parallel_calls: int = tf.data.AUTOTUNE
+    shuffle: bool = True
 
 
 class ImagenetteData(NamedTuple):
@@ -250,7 +253,7 @@ def imagenette_examples(
 
     dataset = tf.data.Dataset.from_tensor_slices(
         (tf.constant(images[rows]), tf.constant(labels[rows])))
-    if training:
+    if training and config.shuffle:
         # Shuffle the encoded rows: the buffer holds bytes, not decoded floats.
         dataset = dataset.shuffle(len(rows), seed=stream, reshuffle_each_iteration=True)
 

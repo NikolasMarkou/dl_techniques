@@ -582,3 +582,42 @@ def test_the_export_note_says_what_goes_in_what_comes_out_and_that_the_file_need
     for fragment in ("float32", f"(batch, {SIDE}, {SIDE}, 3)", "the trained size only", "(x - mean) / std", "CLS embedding", f"(batch, {EMBED})",
                      "not the projection head's output", "no teacher", "dl_techniques", "train package"):
         assert fragment in note, (fragment, note)
+
+
+# ---------------------------------------------------------------------
+# the four `.npy` writers are one protocol (D-099)
+# ---------------------------------------------------------------------
+
+
+def writer_cases() -> List[Tuple[str, Any, str, str, Any]]:
+    """``(name, module, answer key, entry key, outputs)`` of the four writers that share ``mask_names``, ``check_free`` and ``write_array``."""
+    from train.api import depth_predictor, dino_predictor, pretrain_predictor, tokenizer_predictor
+
+    return [
+        ("depth", depth_predictor, "disparity", "size", predictor.DEPTH_OUTPUTS),
+        ("pretrain", pretrain_predictor, "embeddings", "shape", predictor.PRETRAIN_OUTPUTS),
+        ("tokenizer", tokenizer_predictor, "codes", "shape", predictor.TOKENIZER_OUTPUTS),
+        ("dino", dino_predictor, "embeddings", "shape", predictor.DINO_OUTPUTS),
+    ]
+
+
+@pytest.mark.parametrize("name, module, key, entry_key, outputs", writer_cases(), ids=[case[0] for case in writer_cases()])
+def test_the_four_npy_writers_write_one_array_per_file_and_an_index_of_one_shape_and_refuse_a_directory_that_exists(
+        name, module, key, entry_key, outputs, tmp_path):
+    files = [tmp_path / "a.png", tmp_path / "b.png"]
+    arrays = [np.arange(6, dtype=np.float32).reshape(2, 3), np.arange(6, dtype=np.float32).reshape(2, 3) + 1]
+
+    class Stub:
+        def predict(self, items):
+            return {key: arrays[: len(items)] if len(items) == 2 else [arrays[0]]}
+
+    out = tmp_path / "out"
+    module.write_predictions(Stub(), files, out)
+    index = json.loads((out / "index.json").read_text())
+    assert set(index) == {"output", "note", key} and index["output"] == outputs[0] and index["note"] == module.OUTPUT_NOTE
+    assert [entry["file"] for entry in index[key]] == ["a.npy", "b.npy"] and [entry["path"] for entry in index[key]] == [str(f) for f in files]
+    assert all(set(entry) == {"path", "file", entry_key} for entry in index[key])
+    for entry, array in zip(index[key], arrays):
+        np.testing.assert_array_equal(np.load(out / entry["file"]), array)
+    with pytest.raises(ConfigError):
+        module.write_predictions(Stub(), files, out)

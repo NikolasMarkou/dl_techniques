@@ -9,7 +9,8 @@ A DINO run reads FOUR kinds of stream and the failure of each is silent (a numbe
    score the same rows after a kill (a split keyed on the stream seed would move the rows under the weights).
 3. **The probe's bank and queries** are cached ``.take(n)`` of the plain fit rows and of the selection rows, built once. The bank is fit
    rows and the queries selection rows, disjoint numerically (a bank drawn from the selection rows lets a query find itself at cosine 1.0
-   and score a free hit), and ``with_stream`` leaves them on the original seed so a resumed run's probe stays comparable.
+   and score a free hit), and ``with_stream`` leaves them on the original seed so a resumed run's probe stays comparable. The bank is the first
+   fit rows in the split's seeded order and so a function of ``seed`` alone, whatever TensorFlow's global seed (D-095).
 4. **The stated length.** Keras logs ``n / (n + 1)`` of a loss over a stream of unknown length, so every finite stream states its length
    through the one shared rule (``train.common.pretrain_data.states_its_length``).
 
@@ -33,6 +34,7 @@ import tensorflow as tf
 from dl_techniques.datasets.vision.splits import seeded_split_indices
 from train.common import dino_data, pretrain_data
 from train.common.classification_data import DEFAULT_VALIDATION_SPLIT
+from train.common.image_streams import load_image_streams
 
 from ._dino_world import (  # noqa: F401  (``fake_rows`` is a fixture)
     BANK_BATCHES, BATCH, IMAGE, N_LOCAL, N_TEST, N_TRAIN, N_VIEWS, QUERY_BATCHES, SEED, build, fake_rows, images_of, labels_of,
@@ -154,11 +156,11 @@ def test_the_loss_batch_is_one_multi_crop_batch_of_the_first_selection_rows_and_
     np.testing.assert_array_equal(images_of(used.probe_bank_ds), images_of(other.probe_bank_ds))
 
 
-def test_a_half_read_of_the_bank_cache_is_dropped_and_refilled_from_another_pass_so_the_bank_is_read_in_full_or_not_at_all(fake_rows):
-    """The failure the loss batch avoids: ``.take(1)`` over the bank is a partial pass, and tf.data refills the cache from the next shuffle."""
+def test_a_half_read_of_the_bank_cache_refills_the_same_rows_because_the_bank_is_not_shuffled(fake_rows):
+    """``.take(1)`` over a cache is a partial pass and tf.data drops the half-filled cache: a SHUFFLED source refilled it with other rows (D-038)."""
     spoiled, whole = build(), build()
     list(spoiled.probe_bank_ds.take(1))
-    assert not np.array_equal(images_of(spoiled.probe_bank_ds), images_of(whole.probe_bank_ds)), "the control: the instrument can see it"
+    np.testing.assert_array_equal(images_of(spoiled.probe_bank_ds), images_of(whole.probe_bank_ds), err_msg="a half read changed the bank")
     np.testing.assert_array_equal(images_of(whole.probe_bank_ds), images_of(whole.probe_bank_ds))
 
 
@@ -260,7 +262,7 @@ def test_the_bank_is_fit_rows_and_the_queries_are_selection_rows_and_the_two_are
     in_select, to_select = nearest_rows(bank, split["select"])
     assert to_fit.max() < 1e-3, "every bank row is a fit row"
     assert in_select.size and to_select.min() > 1.0, "no bank row is a selection row (the nearest selection row is far away)"
-    assert len(set(in_fit.tolist())) == len(bank), "forty-eight batches of a reshuffled stream hold no row twice"
+    assert len(set(in_fit.tolist())) == len(bank), "forty-eight batches of the seeded fit order (198 rows) hold no row twice"
     np.testing.assert_array_equal(labels_of(fresh.probe_bank_ds), split["fit_labels"][in_fit], err_msg="the labels travel with the rows")
 
     queries = images_of(fresh.probe_query_ds)
@@ -289,6 +291,44 @@ def test_with_stream_leaves_the_probe_rows_untouched(fresh, completed):
 def test_the_bank_follows_the_split_seed_so_another_seed_has_another_bank(fresh, fake_rows):
     other = build(seed=SEED + 1)
     assert not np.array_equal(images_of(other.probe_bank_ds), images_of(fresh.probe_bank_ds)), "the control: the bank is a function of the seed"
+
+
+def test_the_bank_is_a_function_of_the_seed_alone_the_first_fit_rows_in_their_seeded_order_whatever_the_global_seed(fake_rows, split):
+    """D-095: the first pass of a seeded ``shuffle`` follows TensorFlow's global seed too (review-iter-1 concern 2); the seeded order does not."""
+    n_bank = BANK_BATCHES * BATCH
+    try:
+        banks = {}
+        for global_seed in (None, 42, 7):
+            tf.random.set_seed(global_seed)
+            banks[global_seed] = built_bank()
+        # The control: the loader's own shuffled fit stream IS moved by the global seed, so the instrument can see the dependence.
+        shuffled = {}
+        for global_seed in (42, 7):
+            tf.random.set_seed(global_seed)
+            streams = load_image_streams(
+                "cifar10", image_size=IMAGE, batch_size=BATCH, seed=SEED, augment=False, shuffle_train=True)
+            shuffled[global_seed] = images_of(streams.train_ds, BANK_BATCHES)
+    finally:
+        tf.random.set_seed(None)
+    assert not np.array_equal(shuffled[42], shuffled[7]), "the control: a shuffled fit stream follows the global seed"
+    for global_seed, (rows, labels) in banks.items():
+        np.testing.assert_array_equal(rows, banks[None][0], err_msg=f"the bank moved under global seed {global_seed}")
+        np.testing.assert_array_equal(labels, banks[None][1])
+    rows, labels = banks[None]
+    np.testing.assert_array_equal(rows, split["fit"][:n_bank], err_msg="the bank is the first fit rows in the seeded permutation's order")
+    np.testing.assert_array_equal(labels, split["fit_labels"][:n_bank])
+    tf.random.set_seed(7)
+    try:
+        other = built_bank(seed=SEED + 1)
+    finally:
+        tf.random.set_seed(None)
+    assert not np.array_equal(other[0], rows), "another seed is another bank, under any global seed"
+
+
+def built_bank(**changes):
+    """``(images, labels)`` of a fresh object's bank, read the moment it is made."""
+    batches = build(**changes)
+    return images_of(batches.probe_bank_ds), labels_of(batches.probe_bank_ds)
 
 
 # ---------------------------------------------------------------------
