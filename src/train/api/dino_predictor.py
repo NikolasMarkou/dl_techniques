@@ -195,6 +195,11 @@ def write_predictions(predictor: DinoPredictor, files: Sequence[Path], out: Path
 
 def served(model: Any, record: Mapping[str, Any]) -> Any:
     """Return the functional feature model every format runs: a standardized image to its CLS embedding; see the module contract."""
+    # DECISION plan-2026-11-26T224507-e3381378/D-063
+    # `exporting` traces THIS model but archives the TRAINING model it was given, so a SavedModel (and the directory beside a tflite file) also carries
+    # the teacher's and the heads' weights: 117 MB against 22 MB for the keras, tflite and onnx files at the default size (measured, scratch_export). Do NOT
+    # try to shrink it from here (the function returns a model; what the archive tracks is `exporting`'s) and do NOT drop the sentence of `export_note`
+    # that says so until a test (`test_the_limit_the_export_note_states_is_still_real...`) fails.
     return feature_model(model)
 
 
@@ -215,5 +220,6 @@ def export_note(record: Mapping[str, Any]) -> str:
         f"the exported model takes float32 images (batch, {height}, {width}, {record['channels']}), the trained size only, with pixels scaled to "
         "[0, 1] and then standardized with the mean and std of the record, (x - mean) / std; it returns the student's CLS embedding "
         f"(batch, {record['embedding_dim']}) (not the projection head's output, and no teacher); the .keras file holds the functional feature "
-        "model of the student"
+        "model of the student, built from dl_techniques layers only, so it loads without the train package; a SavedModel (and the directory beside "
+        "a tflite file) also holds the training model's weights, the teacher's and the heads', so it is several times the size of the other files"
     )
