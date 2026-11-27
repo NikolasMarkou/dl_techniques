@@ -208,3 +208,38 @@ def world():
         recipes.register_builtin_models()
         register_builtin_tasks()
         yield
+
+
+# ---------------------------------------------------------------------
+# The real tiny run (steps 7 and 8): the FULL 12-block ``dino_v1/tiny`` on the identity fake of CIFAR-10
+# ---------------------------------------------------------------------
+#
+# ``identity_world`` (fixture, module scope): the identity fake of CIFAR-10 and an empty registry holding every built-in family and task (no real
+# data is read). ``train_real_run(out)``: one finished 1-epoch run of the real 12-block model at the sizes above, through ``cli.main``, with the
+# cifar10 margin patched to what a toy reaches (for the exit code only); :return: the exit code. ``load_model`` refuses a model whose depth is not its
+# variant's, so a test of the file a run writes (predict, export, init) needs these 12 blocks and not ``shallow_backbone``'s 2.
+
+
+@pytest.fixture(scope="module")
+def identity_world():
+    from tests.classification_fakes import use_identity_cifar10
+    from train.api import recipes, registry
+    from train.api.tasks import register_builtin_tasks
+
+    with pytest.MonkeyPatch.context() as patch:
+        use_identity_cifar10(patch)
+        patch.setattr(registry, "MODELS", {})
+        patch.setattr(registry, "TASKS", {})
+        recipes.register_builtin_models()
+        register_builtin_tasks()
+        yield
+
+
+def train_real_run(out: Any) -> int:
+    from train.api import cli
+    from train.api.tasks import dino as task
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(task.MARGIN, "cifar10", -0.5)
+        return cli.main(["dino", *flatten_request(task_request(out, epochs=1, batch_size=16))])
+

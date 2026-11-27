@@ -37,13 +37,11 @@ import tensorflow as tf
 from PIL import Image
 
 from dl_techniques.datasets.vision.classification import get_spec
-from tests.classification_fakes import use_identity_cifar10
-from train.api import cli, exporting, predictor, recipes, registry
+from train.api import cli, exporting, predictor
 from train.api.errors import ConfigError
 from train.api.exporting import FORMATS, SUFFIX
-from train.api.tasks import register_builtin_tasks
 
-from ._dino_world import IMAGE, N_LOCAL, OUT_DIM, PATCH, flatten_request, task_request
+from ._dino_world import IMAGE, N_LOCAL, OUT_DIM, PATCH, identity_world, train_real_run  # noqa: F401
 from ._tokenizer_world import read_json
 from .test_export_roundtrip import read_back
 
@@ -56,28 +54,11 @@ KEYS = ("schema_version", "task", "model", "family", "variant", "input_size", "c
 
 
 @pytest.fixture(scope="module")
-def world():
-    """The identity fake of CIFAR-10 and an empty registry holding every built-in family and task (no real data is read)."""
-    with pytest.MonkeyPatch.context() as patch:
-        use_identity_cifar10(patch)
-        patch.setattr(registry, "MODELS", {})
-        patch.setattr(registry, "TASKS", {})
-        recipes.register_builtin_models()
-        register_builtin_tasks()
-        yield
-
-
-@pytest.fixture(scope="module")
-def run(world, tmp_path_factory):
-    """One finished 1-epoch run of the full ``dino_v1/tiny`` (the margin patched to the toy's reach, as ``test_dino_task`` does, for the exit code
-    only), shared by every test; the record is read by each test, so a missing one fails the test and not this fixture."""
-    from train.api.tasks import dino as task
-
+def run(identity_world, tmp_path_factory):
+    """One finished 1-epoch run of the full ``dino_v1/tiny`` (``_dino_world.train_real_run``), shared by every test; the record is read by each
+    test, so a missing one fails the test and not this fixture."""
     out = tmp_path_factory.mktemp("dino_record") / "run"
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setitem(task.MARGIN, "cifar10", -0.5)
-        code = cli.main(["dino", *flatten_request(task_request(out, epochs=1, batch_size=16))])
-    return SimpleNamespace(out=out, code=code)
+    return SimpleNamespace(out=out, code=train_real_run(out))
 
 
 @pytest.fixture(scope="module")

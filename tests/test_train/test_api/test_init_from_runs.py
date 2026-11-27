@@ -151,6 +151,13 @@ def pretrain_record(model: str = "et_mim/et_tiny", side: int = 32, patch: int = 
         std=[0.25] * 3, patch_size=patch, tokenizer=None if family == "et_mim" else "a" * 64)
 
 
+def dino_record(patch: int = 8, side: int = 32) -> Dict[str, Any]:
+    """The record of a tiny ``dino_v1/tiny`` run (2 local crops, a 64-wide head) at CIFAR-10's geometry, written by the real builder."""
+    return predictor.build_dino_record(
+        model="dino_v1/tiny", family="dino_v1", variant="tiny", input_size=[side, side], channels=3, mean=[0.5] * 3, std=[0.25] * 3,
+        patch_size=patch, n_local_crops=2, dino_out_dim=64, embedding_dim=192)
+
+
 def language_record(tokenizer: str = "ascii95", seq_len: int = 32) -> Dict[str, Any]:
     """A language-model record of the named tokenizer (a ``gpt2`` one holds its BPE file hashes)."""
     return predictor.build_language_model_record(
@@ -1606,7 +1613,7 @@ def test_record_a_fine_tuned_run_loads_predicts_and_exports_at_its_size_with_its
     np.testing.assert_allclose(again["scores"], answer["scores"], atol=1e-5)
 
 
-#: One record of each of the nine kinds, built by the predictor's own builders.
+#: One record of each of the ten kinds, built by the predictor's own builders.
 RECORD_KINDS = {
     "image_classification": classification_record,
     "image_segmentation": segmentation_record,
@@ -1620,6 +1627,7 @@ RECORD_KINDS = {
     "beit_tokenizer": lambda: predictor.build_tokenizer_record(
         model="vq_vae_rotation/small", family="vq_vae_rotation", variant="small", input_size=(32, 32), channels=3,
         mean=[0.49, 0.48, 0.45], std=[0.25, 0.24, 0.26], patch_size=4, num_embeddings=512),
+    "dino": dino_record,
 }
 
 
@@ -1901,7 +1909,7 @@ LANGUAGE_REFUSALS = {
     "language_into_classifier": (
         language_record, train_image_classification, CLASSIFIER,
         r"gpt2_lm \(language_model_pretraining\) cannot seed vit \(image_classification\); vit takes weights from vit "
-        r"\(image_classification\)$"),
+        r"\(image_classification\) or dino_v1 \(dino\)$"),
 }
 
 

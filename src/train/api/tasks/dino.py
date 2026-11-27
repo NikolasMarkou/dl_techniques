@@ -226,7 +226,8 @@ _CONFORMAL = f"a conformal prediction set is a set of classes, which a {TASK} ru
 
 _INIT_REFUSED = (
     "a dino run is no `init` target: its model holds a student and a teacher at the same weight paths, so a copy would need a teacher re-sync "
-    "that this task does not do, and epoch zero under `init` would call `model.evaluate`, which advances the loss's centre"
+    "that this task does not do, and epoch zero under `init` would call `model.evaluate`, which advances the loss's centre; a dino run can seed "
+    "a `vit` classification run of its own width and depth instead (model=vit/vit_tiny after dino_v1/tiny)"
 )
 
 
@@ -355,10 +356,10 @@ class DinoTrainer(TaskTrainer):
             variant_overrides=overrides_of_variant(table[context.variant], kwargs))
 
     def init_identity(self, config: DinoConfig, context: AutoContext) -> Dict[str, Any]:
-        # DECISION plan-2026-11-26T224507-e3381378/D-056
+        # DECISION plan-2026-11-26T224507-e3381378/D-056 (the clause naming the `vit` pair: D-071)
         # Refused for ANY source (D-013), before the claim. Do NOT build an identity "for later": the student and the teacher sit at the same weight
         # paths, so a copy needs a teacher re-sync nothing here does, and the sequence's epoch zero under `init` is `evaluate`, which moves the
-        # centre (the very call this task exists to avoid). A dino run is a SOURCE for other tasks (Step 8), never a target.
+        # centre (the very call this task exists to avoid). A dino run is a SOURCE for a `vit` classifier (the pair of recipes.VIT_TRANSFER, D-068), never a target.
         raise ConfigError(f"Invalid value for 'init': {_INIT_REFUSED}")
 
     def used_arguments(self, config: DinoConfig, context: AutoContext) -> Dict[str, Any]:

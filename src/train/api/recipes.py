@@ -934,6 +934,14 @@ _CLASSIFIER_HEAD = ("classification_head",)
 VIT_TRANSFER = TransferSpec(
     head=_CLASSIFIER_HEAD, resample={"pos_embed/pos_embedding": "vit_pos_bicubic"}, grow=r"transformer_layer_\d+",
     pinned=("patch_size",), fixed=("channels",),
+    # DECISION plan-2026-11-26T224507-e3381378/D-068
+    # A dino run seeds a vit by its STUDENT (the teacher is its running average and sits at the same paths, so `view` names the student), the
+    # projection head is dropped, and the library's `transformer_block_N` is the classifier's `transformer_layer_N`. The rename matches ANY
+    # number of digits (a 12-block backbone has blocks 10 and 11: a pattern for one digit leaves them unused). Do NOT point this row at the whole
+    # model (`_by_path` refuses two weights at a path), do NOT add the pair in the other direction (a dino target is refused, D-013), and do NOT
+    # write the rename as a prefix: only the block index changes.
+    sources={("dino", "dino_v1"): CrossTask(drop=("dino_projection_head",), rename=((r"transformer_block_(\d+)", r"transformer_layer_\1"),),
+                                            view="student")},
 )
 RESNET_TRANSFER = TransferSpec(
     head=_CLASSIFIER_HEAD, grow=r"stage\d+_block\d+", pinned=("stem_type",), fixed=("channels",),
