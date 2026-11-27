@@ -177,7 +177,7 @@ def test_a_recipe_key_that_is_no_field_is_named():
 
 
 @pytest.mark.parametrize("dataset", DATASETS)
-def test_the_recipe_notice_states_the_numbers_it_doubts_and_says_they_are_unmeasured(dataset):
+def test_the_recipe_notice_states_the_numbers_it_doubts_and_names_the_block_that_measured_them(dataset):
     notices = tm.recipe_notices_of(dataset)
     assert notices and all(level == "info" and text for level, text in notices)
     text = " ".join(text for _, text in notices)
@@ -186,9 +186,39 @@ def test_the_recipe_notice_states_the_numbers_it_doubts_and_says_they_are_unmeas
                   f"{optim['warmup_epochs']} warmup epochs", f"gradient clip of {optim['global_clipnorm']:g}",
                   f"patience {tm.PATIENCE}", f"{tm.EPOCHS} epochs"):
         assert words in text, words
-    assert "legacy" in text and "unmeasured" in text and "perplexity floor" in text and "the bar" in text, "whose numbers, and what judges"
-    # Only the dataset nobody has run says so (the 8,192-code recipe at 224 px), and it names its geometry.
+    assert "legacy" in text and "perplexity floor" in text and "the bar" in text, "whose numbers, and what judges"
+    # Only the dataset the legacy defaults were not run on before the gate says so (the 8,192-code recipe at 224 px), and it names its geometry.
     assert ("imagenette" in text and "8192" in text.replace(",", "")) is (dataset == "imagenette"), text
+
+
+@pytest.mark.parametrize("dataset", DATASETS)
+def test_the_recipe_notice_points_at_the_readme_block_and_states_no_gate_number(dataset):
+    """plan e3381378 D-015, D-036: the 4j gate measured what the notice called unmeasured, and a later gate rewrites the block.
+
+    The words that went stale are gone; the sentence names the block (a pointer that rots is checked against the README itself:
+    the heading and both markers exist, once each); and no figure of the gate is written in the notice, so the next gate cannot make it false.
+    """
+    import re
+
+    text = " ".join(text for _, text in tm.recipe_notices_of(dataset))
+    for stale in ("unmeasured", "first measurement", "no run in this repository"):
+        assert stale not in text.lower(), stale
+    assert "measured by the tokenizer gate" in text or "tokenizer gate has run them" in text
+    assert "src/train/README.md" in text and "Measured: the tokenizer gate" in text and "tokenizer-gate" in text
+    readme = (Path(tm.__file__).resolve().parents[1] / "README.md").read_text()
+    assert readme.count("<!-- tokenizer-gate:begin -->") == 1 and readme.count("<!-- tokenizer-gate:end -->") == 1
+    block = readme.split("<!-- tokenizer-gate:begin -->")[1].split("<!-- tokenizer-gate:end -->")[0]
+    assert "**Measured: the tokenizer gate**" in block, "the heading the notice names"
+    # Every number of the notice is one of the RECIPE's (the ones the first test pins) or a geometry of the dataset: none is the gate's.
+    optim = SPEC.defaults["optim_args"]
+    own = {f"{optim['lr']:g}", str(SPEC.defaults["batch_size"]), f"{optim['weight_decay']:g}", str(optim["warmup_epochs"]),
+           f"{optim['global_clipnorm']:g}", str(tm.PATIENCE), str(tm.EPOCHS)}
+    if dataset == "imagenette":
+        size, patch = pa.GEOMETRY[dataset]
+        own |= {str(size), str(patch), str(size // patch), f"{tm.CODEBOOK[dataset]:,}", str(tm.CODEBOOK[dataset])}
+    sentence_without_pointer = text.replace(tm.GATE_BLOCK, "")
+    numbers = set(re.findall(r"\d[\d,.]*\d|\d", sentence_without_pointer))
+    assert numbers <= own, f"a number that is not the recipe's or the geometry's: {sorted(numbers - own)}"
 
 
 # ---------------------------------------------------------------------

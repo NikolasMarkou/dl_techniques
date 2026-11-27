@@ -349,6 +349,15 @@ RECIPE: Dict[str, Any] = {
 }
 
 
+# DECISION plan-2026-11-26T224507-e3381378/D-036
+# The notice names WHERE the gate's numbers are and states none of them. A sentence that said "unmeasured" went false the night the gate
+# ran, and one that quoted the gate's figures would go stale at the next one. Do NOT write a number, a count or a date of the gate here, and
+# do NOT say the recipe is unmeasured or "a first measurement": the block is rewritten by every later gate, the pointer stays true.
+# `test_the_recipe_notice_points_at_the_readme_block_and_states_no_gate_number` pins the words and that the block exists.
+#: Where the tokenizer gate's numbers live: the block of ``src/train/README.md`` between the ``tokenizer-gate`` markers.
+GATE_BLOCK = "the README block 'Measured: the tokenizer gate' (src/train/README.md, between its tokenizer-gate markers)"
+
+
 def recipe_notices_of(dataset: str) -> List[Tuple[str, str]]:
     """Return the ``(level, text)`` lines on the recipe's numbers for ``dataset``; see the module contract."""
     optim = RECIPE["optim_args"]
@@ -356,16 +365,17 @@ def recipe_notices_of(dataset: str) -> List[Tuple[str, str]]:
         "info",
         f"{FAMILY}: the recipe is the legacy tokenizer trainer's (AdamW, lr {optim['lr']:g}, batch {BATCH_SIZE}, weight decay "
         f"{optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epochs, a global gradient clip of {optim['global_clipnorm']:g}, "
-        f"patience {PATIENCE}, {EPOCHS} epochs). Its effect with this task's decoder, a linear last layer, is unmeasured: whether the "
-        "codes reach the perplexity floor is the run's own verdict (the bar), not a promise of these numbers",
+        f"patience {PATIENCE}, {EPOCHS} epochs). Its effect with this task's decoder, a linear last layer, was measured by the "
+        f"tokenizer gate, at the epochs and the seed its block states: the numbers are in {GATE_BLOCK}, and they are the gate's runs, "
+        "no promise for yours (whether the codes reach the perplexity floor is this run's own verdict, the bar)",
     )]
     if dataset == "imagenette":
         size, patch = GEOMETRY[dataset]
         notices.append((
             "info",
             f"{dataset}: {size} px, patch {patch} (a {size // patch} x {size // patch} grid) and {CODEBOOK[dataset]:,} codes are the "
-            "legacy trainer's defaults for it, and no run in this repository has trained them: this run is their first measurement "
-            "(time, memory and whether the codes reach the floor)",
+            "legacy trainer's defaults for it, and the tokenizer gate has run them (at the epochs its block states): its time, its memory "
+            f"and whether its codes reached the floor are in {GATE_BLOCK}",
         ))
     return notices
 

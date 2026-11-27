@@ -740,9 +740,12 @@ def train_or_restore(run: Run) -> None:
             # a task that says nothing makes the call it always made (``test_the_sequence_seams_default_
             # to_nothing`` reads the keywords). Do NOT write ``steps_per_epoch=None`` for "no option":
             # Keras reads None as a value. ``_checked_fit_options`` has refused a name that collides.
+            # DECISION plan-2026-11-26T224507-e3381378/D-007: ``validation_data`` is what the TASK says
+            # (``validation_stream``, default ``data.select_ds``); the keywords of this call stay exactly these four
+            # plus ``run.fit_options``. Do NOT add a flag here: a task with no validation answers ``None`` in the hook.
             run.history = model.fit(
                 data.train_ds,
-                validation_data=data.select_ds,
+                validation_data=trainer.validation_stream(config, data),
                 epochs=epochs,
                 callbacks=callbacks,
                 verbose=1,
