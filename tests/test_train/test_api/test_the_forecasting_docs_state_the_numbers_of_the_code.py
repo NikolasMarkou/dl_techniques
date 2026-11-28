@@ -888,9 +888,9 @@ def test_the_dino_record_the_init_pair_and_the_pair_counts_are_the_codes(world):
     assert all(f"`{field.name}`" in spec_bullet for field in dataclasses.fields(registry.CrossTask)), [f.name for f in dataclasses.fields(registry.CrossTask)]
 
 
-def test_the_dino_gate_block_the_notices_name_exists_once_and_holds_no_number(world):
-    """Plan e3381378 step 9 (the Step 5 note): the recipe notices of ``dino_models`` point at a README block; it exists, once, with the heading the notice names, and until the
-    night has run it holds no measurement and no digit, so the pointer is never to an empty place and a number is never the notice's."""
+def test_the_dino_gate_block_the_notices_name_exists_once_and_holds_the_gates_numbers(world):
+    """Plan e3381378 steps 9 and 14 (the Step 5 note): the recipe notices of ``dino_models`` point at a README block; it exists, once, with the heading the notice names, and
+    since the night has run it holds the gate's own numbers and the HEAD they were measured on (the numbers themselves are read by the harness, as in the 4j plan)."""
     from train.api import dino_models as dm
 
     readme = README.read_text()
@@ -898,10 +898,10 @@ def test_the_dino_gate_block_the_notices_name_exists_once_and_holds_no_number(wo
     assert "Measured: the dino gate" in dm.GATE_BLOCK and "dino-gate" in dm.GATE_BLOCK and "src/train/README.md" in dm.GATE_BLOCK
     block = readme.split(DINO_GATE_BEGIN)[1].split(DINO_GATE_END)[0]
     assert "**Measured: the dino gate" in block, "the heading the notice names"
-    assert "Not run." in block and "is not yet run, so this block holds no measurement" in block and not re.search(r"\d", block), "no measurement, no digit"
+    assert "Not run." not in block and re.search(r"\d", block) and "Run on the code HEAD" in block, "the block is the gate's own: its numbers, the HEAD it ran on"
     assert readme.index(DINO_HEAD) < readme.index(DINO_GATE_BEGIN) < readme.index("**Keys**: `key=value` tokens"), "the block ends the section"
     section = dino_section()
-    assert "**its GPU gate is not yet run**" in section and "its GPU gate has run" not in section
+    assert "**its GPU gate has run**" in section and "its GPU gate is not yet run" not in section
 
 
 def test_every_test_the_agents_bullet_of_the_dino_task_names_exists():
@@ -917,20 +917,35 @@ def test_every_test_the_agents_bullet_of_the_dino_task_names_exists():
     assert missing == [], f"the AGENTS bullet names tests that do not exist: {missing}"
 
 
-def test_the_dino_status_lines_of_the_repo_map_and_the_roadmaps_say_the_code_is_done_and_the_gate_has_not_run(world):
-    """Plan e3381378 step 9: the three documents no other test reads state the tenth task and its status; a later night flips them in step 14, deliberately."""
+def test_the_dino_status_lines_of_the_repo_map_and_the_roadmaps_say_the_code_is_done_and_the_gate_has_run(world):
+    """Plan e3381378 steps 9 and 14: the three documents no other test reads state the tenth task and its status: the code is done and its GPU gate has run."""
     scripts = " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split())
     init = " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split())
     repo_map = " ".join((ROOT / "REPO_MAP.md").read_text().split())
-    assert "**Phase 4k: DINO. Code done, GPU gate not yet run**" in scripts and "its section of `src/train/README.md` follows the Phase 4k GPU gate" in repo_map
-    assert ("Phase 4k (plan e3381378, branch `train-api/phase-4k`: code done, its GPU gate is not yet run; the section `dino` of `src/train/README.md`) adds the DINO student as a source of "
-            "a `vit` classifier") in init
+    assert "**Phase 4k: DINO. Code done, GPU gate run**" in scripts and "its section of `src/train/README.md` holds the numbers of the Phase 4k GPU gate" in repo_map
+    assert ("Phase 4k (plan e3381378, branch `train-api/phase-4k`: code done, its GPU gate has run, numbers in `src/train/README.md` under \"Measured: the dino gate\") adds the DINO "
+            "student as a source of a `vit` classifier") in init
     assert "**Phase 4k (plan e3381378; D-NNN below are that plan's).**" in init and "A dino run is no `init` target" in init
     assert "src/train/README.md`, the `dino` section" in scripts and "(written after the gate)" not in scripts
     readme, agents = " ".join(README.read_text().split()), " ".join(AGENTS.read_text().split())
     sites = {"README init paragraph": readme[readme.index("`dino`, the tenth task, trains"):readme.index("`load_model`, `export`, `list_models`")], "scripts": scripts, "init": init,
              "AGENTS bullet": agents[agents.index("- **The `dino` task**"):agents.index("- **Per-task tables")], "repo map": repo_map[repo_map.index("The tenth task, `dino`"):]}
-    assert [name for name, text in sites.items() if "its GPU gate is not yet run" not in text] == [], "every status sentence uses the one phrase (D-115)"
+    assert [name for name, text in sites.items() if "its GPU gate has run" not in text] == [], "every status sentence uses the one phrase (D-115)"
+
+
+def test_no_document_says_the_dino_gate_has_not_run():
+    """Plan e3381378 step 14: the gate ran, so the documents that said it had not (the README's dino section and its block, the AGENTS bullet, both roadmaps, the repo map) say it has."""
+    texts = {"README": " ".join(README.read_text().split()), "AGENTS": " ".join(AGENTS.read_text().split()),
+             "scripts": " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split()),
+             "init": " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split()),
+             "repo map": " ".join((ROOT / "REPO_MAP.md").read_text().split())}
+    stale = ["its GPU gate is not yet run", "GPU gate not yet run", "**Measured: the dino gate.** Not run."]
+    found = [(name, phrase) for name, text in texts.items() for phrase in stale if phrase in text]
+    assert found == [], f"a document still says the dino gate has not run: {found}"
+    readme = texts["README"]
+    block = readme[readme.index(DINO_GATE_BEGIN):readme.index(DINO_GATE_END)]
+    assert block.startswith(f"{DINO_GATE_BEGIN} **Measured: the dino gate** (plan e3381378:") and "Run on the code HEAD" in block
+    assert "**its GPU gate has run**" in readme[readme.index(DINO_HEAD):] and "holds the numbers of its GPU gate in its own block" in texts["AGENTS"][texts["AGENTS"].index("- **The `dino` task**"):]
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

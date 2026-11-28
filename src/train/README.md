@@ -866,8 +866,7 @@ python -m train beit_tokenizer out=results/beit_tok_c10 model=vq_vae_rotation/sm
   `energy_transformer` classifiers a pretrain run seeds through `init`, are in the code and their GPU gate has run (Phase 4h,
   plan 5c6cc105, with the gate under "Measured: the Phase 4h gate" below). `language_model_pretraining` and `text_classification`, the
   two language tasks, are in the code and their GPU gate has run (Phase 4i, with the gate under "Measured: the language gate" below). `beit_tokenizer`, the ninth task, trains
-  the tokenizer that `beit_mim` reads: it is in the code and its GPU gate has run (Phase 4j, plan fa94f59c, with the gate under "Measured: the tokenizer gate" below). `dino`, the tenth task, trains the DINOv1 self-supervised ViT and seeds a `vit` classifier: it is in the code and its GPU gate is not yet run (Phase 4k, plan e3381378, its section below and its block
-  "Measured: the dino gate"). `load_model`, `export`, `list_models` and
+  the tokenizer that `beit_mim` reads: it is in the code and its GPU gate has run (Phase 4j, plan fa94f59c, with the gate under "Measured: the tokenizer gate" below). `dino`, the tenth task, trains the DINOv1 self-supervised ViT and seeds a `vit` classifier: it is in the code and its GPU gate has run (Phase 4k, plan e3381378, with the gate under "Measured: the dino gate" below). `load_model`, `export`, `list_models` and
   `list_tasks` were built in the earlier phases and stay on `train.api` (since plan 98c9aac5 `list_tasks` and `list_models` register the
   built-in tasks and families themselves, so they answer in a fresh process), and the repo map entry is `REPO_MAP.md`, section "Entry points".
 
@@ -1833,8 +1832,8 @@ position, and so does each of the four exported files. The gate added only `p4j_
 
 **`dino`** (plan e3381378, Phase 4k): trains a DINOv1 self-supervised ViT, the library `DINOTrainingModel` (a student, an EMA teacher, two projection heads and
 multi-crop views) against the library `DINOLoss` (which keeps its centre inside), on the images of CIFAR-10 or Imagenette, and judges it by a k-NN probe of its features. A
-label is read by the probe alone. `out`, `model` and `data.dataset` are required. It is built and tested on a CPU, and **its GPU gate is not yet run** (the block that ends this
-section holds no measurement).
+label is read by the probe alone. `out`, `model` and `data.dataset` are required. It is built and tested on a CPU, and **its GPU gate has run** (its numbers are in the block that ends this
+section).
 
 ```bash
 python -m train list_models task=dino
@@ -1947,7 +1946,92 @@ result = train_dino(out="auto", model="dino_v1/tiny", data={"dataset": "imagenet
   features a k-NN reads; it says nothing about a linear probe or a fine-tune. No `train_step`, no `validation_data` and no `evaluate` touch a DINO model, and the legacy trainer (`train/dino/train_dino.py`) is unchanged: the one change to its probe (`train/dino/knn_eval.py`) is an opt-in switch that is off by default.
 
 <!-- dino-gate:begin -->
-**Measured: the dino gate.** Not run. The GPU gate of `dino` (the Imagenette run of the tiny variant at the recipe, its controls, and a `vit` classifier from it and from scratch), run once at night on the final code of this phase, is not yet run, so this block holds no measurement: it is filled from the gate's own files by script when it has.
+**Measured: the dino gate** (plan e3381378: `dino` on Imagenette with the tiny variant at the recipe, a control run of one epoch
+(its teacher warmup typed at half an epoch, because the recipe's warmup of one epoch is refused for a one-epoch run), the main
+run and its repeat, a `vit` classifier from the student of the main run and the same classifier from scratch, and the refusal,
+`predict` and `export` on the CPU). Run on the code HEAD `41b07337d6e06ea197ce816a47861a1954642b07` of the branch
+`train-api/phase-4k` (the commits after it change under `src/` only `src/train/AGENTS.md` and `src/train/README.md`, and 1 file
+under `tests/`: `tests/test_train/test_api/test_the_forecasting_docs_state_the_numbers_of_the_code.py`), one job at a time, at
+the recipes' rates: no optimizer key and no batch key is on any command line, so the batch is 32 for dino and 128 for the vit
+pair. The test file `tests/test_train/test_api/test_the_forecasting_docs_state_the_numbers_of_the_code.py` differs only in that
+it pins the words of the documents that say the dino gate has not run, which the block's own commit changes to say it has. The
+runs ran on an NVIDIA GeForce RTX 4090 (`CUDA_VISIBLE_DEVICES=0`, no `--gpu`), the refusal, `predict` and `export` on the CPU.
+Each log names the HEAD and the worktree `src` as the origin of `dl_techniques` and `train`; the `best_model.keras` and the
+`final_model.keras` of `dino_main` kept their sha256 through every job. With none of the new rows used nothing changed: three
+CPU reference runs (API classification, the legacy convnext trainer, API segmentation) reproduce the runs recorded before Phase
+4g exactly (`GOLDEN: EXACT for api, convnext, seg`), the `checkpoint` key that Phase 4g renamed `init` aside. The night ran in
+two launches on that HEAD, the GPU phase first and alone, then the CPU phases, so the order of this paragraph is the reading's
+and not the clock's. The second launch ran this work's targeted tests on the CPU at that HEAD: 85 pytest commands, which
+overlap, so 5,943 test executions (5,938 passed, 0 failed, 5 skipped) of 5,691 distinct tests, of which 5,686 passed, 0 failed
+and 5 were skipped, and 129 of 129 planted mutants made their tests fail (0 survived, 0 specs stale, not run), so the Phase A
+verdict was PASS. Of the gate's claims, 93 hold, none misses and none lacks data (4 further checks, marked extra in
+`plans/plan-*-e3381378/scratch_gate/gate_numbers.md`, hold too); the predictions below were written before any run, the code
+ones are held to claims and the result ones are reported apart. Every number is read by script from the runs' own files and the
+night's logs.
+
+**The wall rule.** The epochs of the main run and its repeat were chosen by a rule written before any run, from the first run's
+own numbers: `dino_e1` measured a step of 119.5 ms and 77.0 s after the last step of an epoch (the k-NN probe, the
+best-checkpoint save, the log files), 117.9 s outside the epochs (the data and model build, the untrained probe, the test split
+scored four times, the analysis, one trace) and 225.0 s in all, so the projection of a run of 30 epochs is 3,382 s and of the
+whole of Phase C 9,988 s against the limit of 10,800 s: the main run took 30 epochs and the repeat ran. An epoch's 266 steps
+took 31.8 s, so the probe and the callbacks after them took more than the steps themselves. That is shorter than the 60 epochs
+of the record and of the recipe, so the result predictions about the main run are reported as unmeasured at that length: nothing
+between a few and the full number of epochs was measured for the improved arm at this protocol.
+
+| Arm | Run | Best `dino_knn_top1_k20` (epoch of) | Epoch zero | Best minus epoch zero | First part, second part | Verdict | Step | Peak memory | Wall |
+|---|---|---|---|---|---|---|---|---|---|
+| `dino_e1` | `dino_v1/tiny`, imagenette, 1 epoch: the control that should miss | 0.2833 (1 of 1) | 0.2696 | 0.0137 | missed, met | missed, exit 1 | 402.5 ms | 1,524.5 MiB | 225 s |
+| `dino_main` | the same command, 30 epochs, seed 42 | 0.3932 (22 of 30) | 0.2696 | 0.1237 | met, met | met, exit 0 | 91.6 ms | 1,524.5 MiB | 1,015 s |
+| `dino_repeat` | the same command, 30 epochs, seed 43 | 0.4006 (24 of 30) | 0.2791 | 0.1216 | met, met | met, exit 0 | 97.1 ms | 1,524.5 MiB | 1,070 s |
+
+| Arm | Run | Best selection accuracy (epoch of) | Test accuracy of the best checkpoint | Verdict | Step | Peak memory | Wall |
+|---|---|---|---|---|---|---|---|
+| `vit_from_dino` | `vit/vit_tiny`, imagenette, 10 epochs, `init` from `dino_main` | 0.4038 (10 of 10) | 0.4043 | met, exit 0 | 92.6 ms | 983.8 MiB | 521 s |
+| `vit_scratch` | the same command with no `init` | 0.4450 (9 of 10) | 0.4410 | met, exit 0 | 90.1 ms | 972.1 MiB | 501 s |
+
+**The bar.** It has two parts, both required: the best `dino_knn_top1_k20` of the selection window strictly above the larger of
+the constant-feature baseline and the untrained model's probe by a margin of 0.050 (a function of the spread of a random-init
+model's probe, `margin_of` in `train/api/tasks/dino.py`), AND at every epoch of the window the collapse flag clear and the
+teacher's entropy centred. `dino_main` met it (the first part met, the second met): its best 0.3932 against a threshold of
+0.3196 (the baseline of constant features 0.0920, the untrained model 0.2696), a gain of 0.1237 over the untrained model, where
+the record's improved arm, under another data protocol and another number of EMA steps, gained 0.1426 and 0.1693 over its own
+control: this is the first time the improved arm was run at this code's data protocol, so the record's gains are the comparison
+and were not the target. The independent recomputation of that best epoch from `best_model.keras` (`check_dino_run.py`: a fresh
+process, a numpy k-NN) gives 0.3932, 0.00 query votes from the CSV's value. The control run of one epoch, `dino_e1`, missed the
+bar (the first part missed, the second met): a best of 0.2833 against an untrained 0.2696, a gain of 0.0137, which the
+recomputation puts 0.00 query votes from the CSV's. The repeat `dino_repeat`, at the next seed, met the bar (the first part met,
+the second met): best 0.4006 against an untrained 0.2791, a gain of 0.1216, 1.00 query votes between its recomputation and its
+CSV; the two main seeds' gains differ by 0.0021.
+
+**Predictions** (written in `arms.sh` before any run, reported and never retuned). About the code, held to claims: `task.json`
+before `fit` held; the CSV with every probe key in every row and no `val_` column held; epoch zero inside the widened range of
+the control (its seeds and the draws on the shipped bank) held; the recomputed best epoch within one query vote of the CSV held;
+each exit code following the bar held; the `init` pair copying every backbone weight with the head reset held (150 copied, 2
+reset, 7 dropped, `cross_task`, `same_split`); the refusal of a dino run as an `init` target held; each export within its check
+held. About the results: `dino_e1` missing the bar with a gain under the margin held; `dino_main` meeting the bar was not
+measured at that length; its gain near the record's was not measured at that length; the maximum mean cosine of the features
+below the collapse bound (0.33 and, for the repeat, 0.39) held; the minimum normalised entropy of the teacher above its bound
+(0.812 and 0.819) held; the best over the mean of the last three epochs (0.0159 and 0.0028) held; the spread between the two
+seeds was not measured at that length; the classifier from DINO against the one from scratch missed.
+
+**The `init` pair.** `vit_from_dino` read `dino_main/best_model.keras` (its `task.json` names that file's sha256), copied 150
+weights, reset 2 (the classification head) and dropped 7 (the projection head): best selection accuracy 0.4038 against 0.4450
+for `vit_scratch`, the run from DINO below the scratch run by 0.0412, where the prediction was a gain of at least 0.03. That
+prediction MISSED: it is reported as it came out, with no retune and no second run. On the test split the best checkpoints score
+0.4043 and 0.4410. The two runs differ in `init` and nothing else. This is one pair at one seed: it says what this run did, not
+that a DINO start beats a scratch start in general.
+
+**On the CPU.** `dino_init_refused` (a dino run given a dino run as its `init`) exited 2 before any run directory existed, with
+the sentence that a dino run is no `init` target. `predict` and `export` of `dino_main` ran 5 commands and 7 checks, all
+holding: the embeddings of 8 Imagenette test images, at their native sizes, equal an independent forward of the student's
+feature model within a bound of 0.000447, and so does each of the four exported files, the largest difference being 1.43e-6. The
+gate added only `p4k_gate_<arm>_41b07337` run directories to `results/`, and nothing was removed: it held 35 entries before and
+40 after.
+
+**What the gate did not measure.** `cifar10` and the `small` variant were not trained (their rows are configurations and the
+`cifar10` margin comes from a random-init null alone), the run is one tiny model at one data scale and not the paper's, its main
+run is shorter than the record's length, a k-NN probe says nothing about a linear probe or a fine-tune beyond the one `vit` pair
+above, and the best of the epochs is optimistic by the gap to the last three printed above.
 <!-- dino-gate:end -->
 
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
