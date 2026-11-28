@@ -560,6 +560,7 @@ def report_data_free_run(
         model: keras.Model, analysis_sample: Any, history: Any, run_dir: Path, vis_dir: Path, experiment_name: str,
         *, run_analysis: Callable[..., Any], model_analysis: bool, eval_batch_size: int, last_weights: Any, data: Any,
         epochs_run: int, save_last: bool, load_sample: Optional[Any] = None, predict_batch_size: Optional[int] = None,
+        evaluate: Optional[Callable[[Any, Any], Dict[str, float]]] = None,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, float]], Any, Optional[Dict[str, Any]]]:
     """Report the best weights, then swap in the last epoch's and report those; the reporting both data-free tasks share.
 
@@ -577,10 +578,17 @@ def report_data_free_run(
         (``finalize_last_epoch(sample=)``).
     :param predict_batch_size: the load check's ``predict`` batch (``finalize_last_epoch(predict_batch_size=)``); ``None`` keeps
         the cap every caller had.
+    :param evaluate: the ``(model, dataset) -> {metric: float}`` seam that scores the last epoch's weights on ``data.test_ds``;
+        ``None`` (every caller that existed before it) is ``classification_run.evaluate_dict``, ``model.evaluate``. A model whose
+        loss must not see a batch outside training (the ``dino`` task: its loss moves a centre in ``call``) passes its own.
     :return: ``(analysis, test_metrics_final, load_check, load_detail)``; ``load_detail`` is ``None`` when empty.
     """
     from train.common import classification_run  # imported here: classification_run imports this module
 
+    # DECISION plan-2026-11-26T224507-e3381378/D-052
+    # `evaluate` is the ONE keyword a model whose loss must not see a batch outside training (the dino task: its loss moves a centre inside `call`) needs:
+    # the last epoch's weights are scored by the caller's seam, never by `model.evaluate`. `None` is every earlier caller's call, unchanged. Do NOT copy
+    # this function into the task, and do NOT default the keyword to anything but the old seam.
     _, analysis = classification_run.report_best_weights(
         model, analysis_sample, history, run_dir, vis_dir, experiment_name, model_analysis,
         run_analysis=run_analysis, name_failed_analyses=True, figures=False,
@@ -595,7 +603,8 @@ def report_data_free_run(
         analysis["status"] = PARTIAL_ANALYSIS_STATUS
     load_detail: Dict[str, Any] = {}
     test_final, load_check = classification_run.finalize_last_epoch(
-        model, last_weights, data, run_dir, history, epochs_run, evaluate=classification_run.evaluate_dict,
+        model, last_weights, data, run_dir, history, epochs_run,
+        evaluate=classification_run.evaluate_dict if evaluate is None else evaluate,
         save=save_last, atomic=True, eval_batch_size=eval_batch_size, exact_reload=True, load_detail=load_detail,
         sample=load_sample, predict_batch_size=predict_batch_size,
     )

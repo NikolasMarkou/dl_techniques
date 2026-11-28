@@ -53,7 +53,7 @@ from train.api import recipes, registry, tokenizer_models
 from train.api.args import AutoContext, OptimArgs
 from train.api.errors import ConfigError
 from train.api.forecast_models import FAMILIES as FORECAST_FAMILIES
-from train.api.init_from import GEOMETRY_NAMES, _by_path, check, plan_transfer
+from train.api.init_from import GEOMETRY_NAMES, _by_path, check, plan_transfer, source_view
 from train.api.pretrain_args import BEIT as BEIT_MIM, ET as ET_MIM, GEOMETRY
 
 from ._text_world import ASCII_VOCAB, SEQ_LEN, TINY_MODEL_ARGS
@@ -70,6 +70,7 @@ TEXT_CLASSIFICATION = "text_classification"
 #: The tokenizer task has one family, ``vq_vae_rotation`` (plan-2026-11-25T124419-fa94f59c): censused at the end of the file, as the pretrain
 #: and language rows are.
 TOKENIZER, TOKENIZER_FAMILY = "beit_tokenizer", "vq_vae_rotation"
+DINO_TASK = "dino"
 #: The tasks that take ``init``.
 INIT_TASKS = (CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING, DEPTH)
 
@@ -80,8 +81,10 @@ VARIANT = {
     "convnext_seg": "cifar10", "bfcnn": "tiny", "bfunet": "tiny", "bfconvunext": "tiny", "convunext_biased": "tiny",
     "scunet": "tiny", "nbeats": "tiny", "prism": "tiny", "tirex": "tiny", "xlstm": "tiny", "ets": "ANN",
     "timestral": "5M", "mdn": "tiny", "depth_anything": "vit_s", "beit": "beit_tiny", "energy_transformer": "et_tiny",
-    BEIT_MIM: "beit_tiny", ET_MIM: "et_tiny", GPT2_LM: "tiny", TOKENIZER_FAMILY: "small",
+    BEIT_MIM: "beit_tiny", ET_MIM: "et_tiny", GPT2_LM: "tiny", TOKENIZER_FAMILY: "small", "dino_v1": "tiny",
 }
+#: The variant of a row a cross-task source seeds, where it is not the census's smallest (a DINO tiny is 12 blocks of 192, and ``vit_pico`` is 6).
+CROSS_TARGET = {"dino_v1": "vit_tiny"}
 #: The geometry a source of each task is built at.
 SOURCE = {
     CLASSIFICATION: {"image_size": 32, "channels": 3, "classes": 10},
@@ -92,6 +95,7 @@ SOURCE = {
     PRETRAIN: {"image_size": GEOMETRY["cifar10"][0], "channels": 3},
     LANGUAGE_MODEL: {"seq_len": SEQ_LEN, "vocab": ASCII_VOCAB},
     TOKENIZER: {"image_size": 32, "channels": 3, "patch": 4},
+    DINO_TASK: {"image_size": 32, "channels": 3, "patch": 4},
 }
 #: The changes the census makes, one key at a time: the key and its new value.
 CHANGES = {
@@ -108,14 +112,15 @@ HEAD_KEYS = {CLASSIFICATION: ("classes",), SEGMENTATION: ("classes",), DENOISING
 GROWN = {"vit": "vit_tiny", "resnet": "resnet34", "resnet_seg": "resnet34"}
 #: The dataset name a task's builds resolve their recipe for.
 DATASET = {CLASSIFICATION: "cifar10", SEGMENTATION: "folder", DENOISING: "folder", FORECASTING: "builtin",
-           DEPTH: "megadepth", PRETRAIN: "cifar10", LANGUAGE_MODEL: "synthetic", TOKENIZER: "cifar10"}
+           DEPTH: "megadepth", PRETRAIN: "cifar10", LANGUAGE_MODEL: "synthetic", TOKENIZER: "cifar10", DINO_TASK: "cifar10"}
 #: The tokenizer codebook a ``beit_mim`` source is built with; its decoder head is dropped by the classifier pair.
 VOCAB = 64
 #: A tokenizer the CPU builds in a third of a second: 64 codes of 8 numbers, 16 wide, one residual block (35 weights).
 TOKENIZER_ARGS = {"num_embeddings": 64, "embedding_dim": 8, "hidden_channels": 16, "num_res_blocks": 1}
 #: ``model_args`` a row is built with: depth from scratch (no official weights read); a resnet classifier at
 #: 32 px resolves the cifar stem, which resnet_seg never builds, so its cross-task source asks for the other.
-MODEL_ARGS = {"depth_anything": {"pretrained": False}, GPT2_LM: TINY_MODEL_ARGS, TOKENIZER_FAMILY: TOKENIZER_ARGS}
+#: A DINO source is built with a 64-wide projection head (the recipe's 4096 outputs weigh 100 MB and change no path).
+MODEL_ARGS = {"depth_anything": {"pretrained": False}, GPT2_LM: TINY_MODEL_ARGS, TOKENIZER_FAMILY: TOKENIZER_ARGS, "dino_v1": {"dino_out_dim": 64}}
 CROSS_SOURCE_ARGS = {"resnet": {"stem_type": "imagenet"}}
 
 _BUILT: Dict[Tuple[Any, ...], Tuple[keras.Model, Dict[str, Any]]] = {}
@@ -145,6 +150,8 @@ def build(family: str, variant: str, geometry: Mapping[str, Any],
         kwargs = {**kwargs, "vocab_size": geometry["vocab"]}
     if task == TOKENIZER:  # what the tokenizer task adds (tasks/beit_tokenizer.py build_model): the patch the encoder's stride is
         kwargs = {**kwargs, "patch_size": geometry["patch"]}
+    if task == DINO_TASK:  # what the dino task adds (tasks/dino.py _model_kwargs): the patch and the local views the model is built with
+        kwargs = {**kwargs, "patch_size": geometry["patch"], "n_local_crops": 2}
     if task == FORECASTING:
         kwargs = {**kwargs, "horizon": geometry["horizon"]}
         if FORECAST_FAMILIES[family].static_batch:
@@ -210,13 +217,17 @@ def undeclared(specs: Mapping[str, registry.ModelSpec]) -> List[str]:
 
 
 def test_every_row_declares_a_spec():
-    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL, TEXT_CLASSIFICATION, TOKENIZER}
+    assert {task_of(family) for family in registry.MODELS} <= {*INIT_TASKS, PRETRAIN, LANGUAGE_MODEL, TEXT_CLASSIFICATION, TOKENIZER, DINO_TASK}
     assert all(len(spec.tasks) == 1 for spec in registry.MODELS.values())
     assert undeclared(registry.MODELS) == []
     assert sum(task_of(family) == PRETRAIN for family in registry.MODELS) == 2
     assert sum(task_of(family) == LANGUAGE_MODEL for family in registry.MODELS) == 1
     assert sum(task_of(family) == TEXT_CLASSIFICATION for family in registry.MODELS) == 2
     assert sum(task_of(family) == TOKENIZER for family in registry.MODELS) == 1
+    # A dino run is no `init` target (plan-2026-11-26T224507-e3381378 D-013): its row declares nothing, and its census is the pair it SEEDS (the
+    # `vit` row's cross source, at the end of this file).
+    assert sum(task_of(family) == DINO_TASK for family in registry.MODELS) == 1
+    assert registry.MODELS["dino_v1"].transfer == registry.TransferSpec()
 
 
 def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():
@@ -227,7 +238,7 @@ def test_a_row_without_a_spec_is_found_and_no_row_carries_a_reason_instead():
 
 def test_the_census_covers_every_row_and_measures_every_declaration():
     families = init_families()
-    assert sorted(set(VARIANT) - {BEIT_MIM, ET_MIM, GPT2_LM, TOKENIZER_FAMILY}) == families
+    assert sorted(set(VARIANT) - {BEIT_MIM, ET_MIM, GPT2_LM, TOKENIZER_FAMILY, "dino_v1"}) == families
     # 23 rows before plan 5c6cc105 Step 5, which adds the beit and energy_transformer classifiers.
     assert len(families) == 25
     assert sorted(GROWN) == sorted(f for f in families if registry.MODELS[f].transfer.grow)
@@ -333,13 +344,14 @@ def cross_pairs() -> List[Tuple[str, str, str]]:
 @pytest.mark.parametrize("family,task,source_family", cross_pairs(), ids=[f"{s}-to-{f}" for f, _, s in cross_pairs()])
 def test_a_declared_cross_task_pair_fills_the_target_and_resets_its_head(family, task, source_family):
     source, _ = source_of(source_family, SOURCE[task], CROSS_SOURCE_ARGS.get(source_family))
-    target, _ = build(family, VARIANT[family], SOURCE[task_of(family)])
+    target, _ = build(family, CROSS_TARGET.get(source_family, VARIANT[family]), SOURCE[task_of(family)])
     judge_cross(family, task, source_family, source, target)
 
 
 def judge_cross(family: str, task: str, source_family: str, source: Any, target: keras.Model) -> None:
     spec = registry.MODELS[family].transfer
     relation = spec.sources[(task, source_family)]
+    source = source_view(source, relation)  # the production function: a dino training model's student, as ``transfer`` takes it
     got, plan, message = verdict(family, f"from {source_family} ({task})", source, target, spec, relation=relation)
     assert got == "PASS", message
     assert len(plan.copied) == plan.n_source - len(plan.dropped) and len(plan.dropped) > 0
@@ -438,8 +450,8 @@ def test_production_order_a_deeper_vit_grows_its_new_blocks(archives):
 
 @pytest.mark.parametrize("family,task,source_family", cross_pairs(), ids=[f"{s}-to-{f}" for f, _, s in cross_pairs()])
 def test_production_order_a_declared_cross_task_pair_fills_the_target(family, task, source_family, archives):
-    loaded, target = loaded_beside(family, VARIANT[family], SOURCE[task_of(family)], {}, archives, source_family,
-                                   SOURCE[task])
+    loaded, target = loaded_beside(family, CROSS_TARGET.get(source_family, VARIANT[family]), SOURCE[task_of(family)], {}, archives,
+                                   source_family, SOURCE[task])
     judge_cross(family, task, source_family, loaded, target)
 
 
@@ -723,3 +735,42 @@ def test_production_order_a_commitment_cost_has_no_weight_so_every_weight_is_cop
     got, plan, message = verdict(TOKENIZER_FAMILY, "commitment_cost changed, production order", loaded, target,
                                  registry.MODELS[TOKENIZER_FAMILY].transfer)
     assert got == "PASS" and len(plan.copied) == plan.n_source == plan.n_target > 0, message
+
+
+# --- a dino run seeds a vit (plan-2026-11-26T224507-e3381378 Step 8, D-068, D-070) --------------------------------------------------------
+
+
+def dino_into_vit(archives, variant: str = "vit_tiny"):
+    """``(plan or the refusal, source weights, dropped paths)`` of a DINO tiny student loaded from its archive beside a ``vit`` of ``variant``."""
+    spec = registry.MODELS["vit"].transfer
+    relation = spec.sources[(DINO_TASK, "dino_v1")]
+    loaded, target = loaded_beside("vit", variant, SOURCE[CLASSIFICATION], {}, archives, "dino_v1", SOURCE[DINO_TASK])
+    student = source_view(loaded, relation)
+    return verdict("vit", f"from dino_v1 tiny into {variant}, production order", student, target, spec, relation=relation), student
+
+
+def test_production_order_a_dino_student_seeds_a_vit_with_every_backbone_weight_and_only_the_heads_apart(archives):
+    (got, plan, message), student = dino_into_vit(archives)
+    assert got == "PASS", message
+    heads = [path for path in _by_path(plan_target(archives), "target") if path.startswith("classification_head/")]
+    projection = [path for path in _by_path(student, "source") if path.startswith("dino_projection_head/")]
+    assert sorted(plan.reset) == sorted(heads) and sorted(plan.dropped) == sorted(projection) and heads and projection
+    assert (len(plan.missing), len(plan.unused), len(plan.resampled), len(plan.grown)) == (0, 0, 0, 0)
+    assert len(plan.copied) == plan.n_source - len(projection) == plan.n_target - len(heads)
+    assert {path.split("/")[0] for path in plan.copied if path.startswith("transformer_layer_")} == {f"transformer_layer_{i}" for i in range(12)}
+
+
+def plan_target(archives) -> keras.Model:
+    """The ``vit_tiny`` target the pair test planned into: built once more, in the same way."""
+    return loaded_beside("vit", "vit_tiny", SOURCE[CLASSIFICATION], {}, archives, "dino_v1", SOURCE[DINO_TASK])[1]
+
+
+#: The words of each refusal: six blocks leave the student's other six unused; another width cannot take the position table.
+OTHER_VARIANT = {"vit_pico": "neither used nor dropped by a declared rule", "vit_small": "(1, 65, 192) cannot become (1, 65, 384)"}
+
+
+@pytest.mark.parametrize("variant", sorted(OTHER_VARIANT))
+def test_production_order_a_dino_student_into_a_vit_of_another_variant_is_refused_at_the_weight_level(variant, archives):
+    (got, plan, message), _ = dino_into_vit(archives, variant)
+    assert got == "REFUSE", f"a {variant} took a DINO tiny student: {plan}"
+    assert OTHER_VARIANT[variant] in message, message

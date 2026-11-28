@@ -131,6 +131,17 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     image is held to the record's size (:func:`train.api.tokenizer_predictor.check_output`). A resume compares ``input_size``,
     ``channels``, ``normalize``, ``mean``, ``std`` and ``patch_size``: the codebook is the model's and ``output`` is how the predictor answers.
 
+``input_size``, ``channels``, ``normalize``, ``mean``, ``std``, ``patch_size``, ``n_local_crops``, ``dino_out_dim``, ``embedding_dim``, ``output`` (dino)
+    A dino record has the pretrain record's geometry and scaling (``input_size`` is ``[side, side]`` every view is rendered at, ``channels`` 3,
+    ``normalize`` ``"standardize"`` with the streams' ``mean`` and ``std``, ``patch_size`` a positive int dividing the side) and no ``tokenizer``
+    file hash. ``n_local_crops`` is the number of local crops per image, so the training model takes ``2 + n_local_crops`` views;
+    ``dino_out_dim`` is the projection head's width and ``embedding_dim`` the backbone's CLS feature width (each a positive int); ``output``
+    is ``"cls_embeddings"`` (:data:`DINO_OUTPUTS`: the student's post-final-norm CLS token, never the head's output). ``load_model`` refuses,
+    before the model is called on a view set, a record whose view count, size, channels, patch, head width or embedding width is not the
+    model's own (:func:`train.api.dino_predictor.check_built_model`), and one whose packed output of a zero view set is not the record's
+    (:func:`train.api.dino_predictor.check_output`). A resume compares the seven keys ``input_size`` to ``n_local_crops``: the head's width and
+    the embedding's are the model's and ``output`` is how the predictor answers.
+
 ``seq_len``, ``encoding``, ``n_vocab``, ``vocab_size``, ``eot_id``, ``pad_id``, ``tokenizer``, ``tokenizer_files``, ``output`` (language model)
     A language-model record has no ``class_names``, input size or statistics: the model takes ``seq_len`` token ids and returns the
     next-token logits ``(seq_len, vocab_size)`` (``output`` is ``"next_token_logits"``, :data:`LANGUAGE_OUTPUTS`). ``encoding`` is the
@@ -164,11 +175,11 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)`` / ``build_language_model_record(...)`` / ``build_text_classification_record(...)`` / ``build_tokenizer_record(...)``
+``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)`` / ``build_depth_record(...)`` / ``build_pretrain_record(...)`` / ``build_language_model_record(...)`` / ``build_text_classification_record(...)`` / ``build_tokenizer_record(...)`` / ``build_dino_record(...)``
     :return: the record for a finished data load (not checked; see their docstrings). The first
         writes a classification record, the second a segmentation record, the third a denoising one, the fourth a forecasting
         one, the fifth a depth one, the sixth a pretrain one, the seventh a language-model one, the eighth a text-classification one,
-        the ninth a tokenizer one.
+        the ninth a tokenizer one, the tenth a dino one.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
@@ -223,7 +234,8 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
         :class:`~train.api.pretrain_predictor.PretrainPredictor`, a ``language_model_pretraining`` one a
         :class:`~train.api.text_predictor.LanguageModelPredictor`, a ``text_classification`` one a
         :class:`~train.api.text_predictor.TextClassifierPredictor`, a ``beit_tokenizer`` one a
-        :class:`~train.api.tokenizer_predictor.TokenizerPredictor`.
+        :class:`~train.api.tokenizer_predictor.TokenizerPredictor`, a ``dino`` one a
+        :class:`~train.api.dino_predictor.DinoPredictor`.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -248,17 +260,19 @@ starting weights came from, is checked key by key: :data:`INIT_KEYS`).
     forecasting and pretrain only, :data:`CLASSIFICATION_EXPORT_REFUSALS`,
     :data:`train.api.denoising_predictor.EXPORT_REFUSALS`,
     :data:`train.api.forecast_predictor.EXPORT_REFUSALS`, :data:`train.api.pretrain_predictor.EXPORT_REFUSALS`) and,
-    for forecasting, depth, pretrain, the two text tasks and the tokenizer, for a traced shape that is not the record's (a depth model exports
+    for forecasting, depth, pretrain, the two text tasks, the tokenizer and dino, for a traced shape that is not the record's (a depth model exports
     every format at its trained size only, :func:`train.api.depth_predictor.check_export`, and so do a pretrain model,
     :func:`train.api.pretrain_predictor.check_export`, a language model or a text classifier, :func:`train.api.text_predictor.check_export`,
-    and a tokenizer, :func:`train.api.tokenizer_predictor.check_export`, which refuses no cell of the table: all four formats were measured), and
-    ``note(record)`` is the sentence logged beside an export.
+    and a tokenizer, :func:`train.api.tokenizer_predictor.check_export`, which refuses no cell of the table: all four formats were measured;
+    a dino export is the DERIVED feature model, image to CLS embedding, at the trained size only, :func:`train.api.dino_predictor.check_export`,
+    which refuses no cell either), and ``note(record)`` is the sentence logged beside an export.
     ``served`` is ``None`` for the other image tasks (the file is the model), for forecasting the layer that
     standardizes a raw window, runs the model, decodes and de-standardizes
     (:class:`train.common.forecast_run.ServedForecaster`), and for pretrain a functional model over the run's backbone
     that returns the patch-token embeddings (:func:`train.api.pretrain_predictor.served`), and for a language model or a text classifier the
     model with ``training=False`` (:func:`train.api.text_predictor.served`: a rule with no served function is written with no tflite check
-    at all), and for a tokenizer the layer that returns the int32 code grid (:class:`train.common.tokenizer_data.TokenizerCodes`);
+    at all), and for a tokenizer the layer that returns the int32 code grid (:class:`train.common.tokenizer_data.TokenizerCodes`), and for dino the
+    functional feature model run with ``training=False`` (:func:`train.api.dino_predictor.served`);
     the rank of ``shape_of(record)`` is the rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster, 1 for
     a text model). ``sample`` is the two text tasks' check batch of seeded ids (:func:`train.api.text_predictor.sample_ids`) and
     ``None`` for every other task. A row in every table of :data:`TASK_TABLES`, this one included.
@@ -327,6 +341,7 @@ from .pretrain_args import TASK as PRETRAIN
 from .recipes import ET_CLASSIFIER
 from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 from .text_args import CLASSIFICATION_TASK as TEXT_CLASSIFICATION, TASK as LANGUAGE_MODEL
+from .dino_args import TASK as DINO
 from .text_tokenizer import ASCII95, TOKENIZERS, tokenizer_spec
 from .tokenizer_args import TASK as BEIT_TOKENIZER
 
@@ -469,6 +484,25 @@ RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
         "num_embeddings",
         "output",
     ),
+    # The pretrain record's geometry and scaling (the two tasks read the same image streams), then what makes a view set and a feature: the
+    # local crops (the model takes ``2 + n_local_crops`` views of one image), the projection head's width and the embedding's width.
+    DINO: (
+        "schema_version",
+        "task",
+        "model",
+        "family",
+        "variant",
+        "input_size",
+        "channels",
+        "normalize",
+        "mean",
+        "std",
+        "patch_size",
+        "n_local_crops",
+        "dino_out_dim",
+        "embedding_dim",
+        "output",
+    ),
 }
 
 #: What ``output`` may say in a segmentation record.
@@ -498,6 +532,10 @@ PRETRAIN_CHANNELS = 3
 #: streams, so its ``normalize`` word, its channels and its geometry rules are the pretrain record's (:data:`PRETRAIN_NORMALIZE`,
 #: :data:`PRETRAIN_CHANNELS`, ``_pretrain_geometry``).
 TOKENIZER_OUTPUTS = ("code_ids",)
+
+#: What ``output`` may say in a ``dino`` record: the student's CLS feature (the post-final-norm token, ``embedding_dim`` wide), never the
+#: projection head's output. The task reads the pretrain streams, so its ``normalize`` word, channels and geometry rules are the pretrain record's.
+DINO_OUTPUTS = ("cls_embeddings",)
 
 #: What ``output`` may say in a language-model record: the logits over the vocabulary at every position of the window (the row of
 #: position ``i`` is the distribution of the id after the ``i``-th).
@@ -902,6 +940,54 @@ def build_tokenizer_record(
             "patch_size": int(patch_size),
             "num_embeddings": int(num_embeddings),
             "output": TOKENIZER_OUTPUTS[0],
+        },
+        variant_overrides,
+    )
+
+
+def build_dino_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    input_size: Sequence[int],
+    channels: int,
+    mean: Sequence[float],
+    std: Sequence[float],
+    patch_size: int,
+    n_local_crops: int,
+    dino_out_dim: int,
+    embedding_dim: int,
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a ``dino`` run; see the module contract.
+
+    :param input_size: ``(side, side)`` every view is rendered at (the global and the local crops alike).
+    :param channels: the model's input channels (3).
+    :param mean, std: the per-channel statistics the streams standardized with.
+    :param patch_size: the side of a patch. :param n_local_crops: local crops per image, so the model takes ``2 + n_local_crops`` views.
+    :param dino_out_dim: the projection head's width. :param embedding_dim: the backbone's CLS feature width.
+    :return: the record; ``normalize`` is :data:`PRETRAIN_NORMALIZE` and ``output`` the first of :data:`DINO_OUTPUTS`. It is NOT checked
+        (:func:`check_record` does that).
+    """
+    return _record_of(
+        DINO,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "task": DINO,
+            "model": model,
+            "family": family,
+            "variant": variant,
+            "input_size": [int(side) for side in input_size],
+            "channels": int(channels),
+            "normalize": PRETRAIN_NORMALIZE,
+            "mean": [float(v) for v in mean],
+            "std": [float(v) for v in std],
+            "patch_size": int(patch_size),
+            "n_local_crops": int(n_local_crops),
+            "dino_out_dim": int(dino_out_dim),
+            "embedding_dim": int(embedding_dim),
+            "output": DINO_OUTPUTS[0],
         },
         variant_overrides,
     )
@@ -1447,6 +1533,18 @@ def _tokenizer_tail_problems(record: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _dino_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``normalize`` (a known word other than :data:`PRETRAIN_NORMALIZE`), the three counts and ``output``."""
+    lines = _streams_normalize_problems(record)
+    for key in ("n_local_crops", "dino_out_dim", "embedding_dim"):
+        value = record[key]
+        if not (_is_whole(value) and value > 0):
+            lines.append(f"{key!r} must be a positive int, got {value!r}")
+    if record["output"] not in DINO_OUTPUTS:
+        lines.append(f"'output' must be one of {', '.join(DINO_OUTPUTS)}, got {record['output']!r}")
+    return lines
+
+
 def _text_geometry(record: Mapping[str, Any], id_keys: Sequence[str]) -> Tuple[List[str], Optional[int]]:
     """Return ``(lines, None)`` for ``seq_len``, the vocabulary and the ``id_keys`` ids in it (a text record has no channels)."""
     lines = [
@@ -1651,6 +1749,9 @@ DATA_KEYS: Dict[str, Tuple[str, ...]] = {
     # A tokenizer resume compares the geometry, the scaling and the patch: the images and the cells a code describes are functions of them.
     # NOT the codebook (the model's: the request comparison has held it) and not ``output`` (how the predictor answers) (D-044).
     BEIT_TOKENIZER: ("input_size", "channels", "normalize", "mean", "std", "patch_size"),
+    # A dino resume compares the geometry, the scaling, the patch and the number of local crops: the views are functions of them. NOT the head's
+    # width or the embedding's (the model's: the request comparison has held them) and not ``output``.
+    DINO: ("input_size", "channels", "normalize", "mean", "std", "patch_size", "n_local_crops"),
 }
 
 
@@ -1730,6 +1831,11 @@ def _segmentation_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
 
 def _forecast_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
     return (record["lookback"], record["channels"])
+
+
+def _dino_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
+    """The rank-5 input of the TRAINING model a ``dino`` run saves: ``(2 + n_local_crops, height, width, channels)`` (a view set)."""
+    return (2 + record["n_local_crops"], *record["input_size"], record["channels"])
 
 
 def input_shape_of(record: Mapping[str, Any]) -> Tuple[int, ...]:
@@ -2298,6 +2404,18 @@ def _pretrain_output_check(output: Any, record: Mapping[str, Any]) -> None:
     check_output(output, record)
 
 
+def _dino_model_check(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> None:
+    from .dino_predictor import check_built_model
+
+    check_built_model(model, record, model_file, task_file)
+
+
+def _dino_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    from .dino_predictor import check_output
+
+    check_output(output, record)
+
+
 def _tokenizer_model_check(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> None:
     from .tokenizer_predictor import check_built_model
 
@@ -2376,6 +2494,12 @@ def _pretrain_predictor(model: Any, record: Mapping[str, Any]) -> Any:
     from .pretrain_predictor import PretrainPredictor
 
     return PretrainPredictor(model, record)
+
+
+def _dino_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    from .dino_predictor import DinoPredictor
+
+    return DinoPredictor(model, record)
 
 
 def _tokenizer_predictor(model: Any, record: Mapping[str, Any]) -> Any:
@@ -2539,6 +2663,24 @@ def _pretrain_export_note(record: Mapping[str, Any]) -> str:
     return export_note(record)
 
 
+def _dino_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    from .dino_predictor import check_export
+
+    check_export(record, format, shape)
+
+
+def _dino_served(model: Any, record: Mapping[str, Any]) -> Any:
+    from .dino_predictor import served
+
+    return served(model, record)
+
+
+def _dino_export_note(record: Mapping[str, Any]) -> str:
+    from .dino_predictor import export_note
+
+    return export_note(record)
+
+
 def _tokenizer_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
     from .tokenizer_predictor import check_export
 
@@ -2602,6 +2744,7 @@ GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Option
     LANGUAGE_MODEL: _language_model_geometry,
     TEXT_CLASSIFICATION: _text_classification_geometry,
     BEIT_TOKENIZER: _pretrain_geometry,
+    DINO: _pretrain_geometry,
 }
 
 #: The keys only one task holds (classification's ``eval_transform``, segmentation's void,
@@ -2616,6 +2759,7 @@ TAIL_CHECKS: Dict[str, Callable[[Mapping[str, Any]], List[str]]] = {
     LANGUAGE_MODEL: _language_model_tail_problems,
     TEXT_CLASSIFICATION: _text_classification_tail_problems,
     BEIT_TOKENIZER: _tokenizer_tail_problems,
+    DINO: _dino_tail_problems,
 }
 
 #: A denoiser's own input is flexible, so its row gives the zero image it is probed with.
@@ -2629,12 +2773,14 @@ INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
     LANGUAGE_MODEL: _text_input_shape,
     TEXT_CLASSIFICATION: _text_input_shape,
     BEIT_TOKENIZER: _segmentation_input_shape,
+    DINO: _dino_input_shape,
 }
 
 #: The record key that holds the input geometry, per task (a denoiser's is its channel count).
 INPUT_KEY: Dict[str, str] = {
     CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels", FORECASTING: "lookback",
     DEPTH: "input_size", PRETRAIN: "input_size", LANGUAGE_MODEL: "seq_len", TEXT_CLASSIFICATION: "seq_len", BEIT_TOKENIZER: "input_size",
+    DINO: "input_size",
 }
 
 #: What a loaded model says of itself against its record, run BEFORE the model is called (D-042): a forecaster's built
@@ -2653,6 +2799,9 @@ MODEL_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any], Path, Path], None]] = 
     # A tokenizer's size, patch and codebook are held to the model's own config, and its code grid is proved by running it on a zero image
     # (the output of ``load_model``'s own call is the RECONSTRUCTION, which shows no grid): D-044.
     BEIT_TOKENIZER: _tokenizer_model_check,
+    # A dino file is the TRAINING model: its view count, size, patch, head and embedding widths are held to the record before the model is called
+    # on a view set the record could make fail (D-028).
+    DINO: _dino_model_check,
 }
 
 OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
@@ -2665,6 +2814,7 @@ OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
     LANGUAGE_MODEL: _language_model_output_check,
     TEXT_CLASSIFICATION: _text_classification_output_check,
     BEIT_TOKENIZER: _tokenizer_output_check,
+    DINO: _dino_output_check,
 }
 
 PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
@@ -2677,6 +2827,7 @@ PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
     LANGUAGE_MODEL: _language_model_predictor,
     TEXT_CLASSIFICATION: _text_classification_predictor,
     BEIT_TOKENIZER: _tokenizer_predictor,
+    DINO: _dino_predictor,
 }
 
 #: What ``export`` does per task (see :class:`ExportRule`). Classification and segmentation trace at the record's
@@ -2718,6 +2869,12 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     # so. Do NOT add a `sample`: the shared check batch reaches 6 to 32 codes, and a mistranslated op of this graph (a wrong axis, a
     # transposed grid) changes nearly every one of its 128 positions (a test plants one).
     BEIT_TOKENIZER: ExportRule(_segmentation_input_shape, _tokenizer_export_check, _tokenizer_export_note, _tokenizer_served),
+    # DECISION plan-2026-11-26T224507-e3381378/D-028
+    # A dino export is the DERIVED feature model, image to CLS embedding, at the trained size (the loaded file is the training model, which takes
+    # a view set): `shape_of` is the record's `(side, side, channels)`, NOT `INPUT_SHAPE_OF`'s rank-5 view set; `served` is the functional student
+    # feature model; `check` refuses another size and no cell (P6: keras, saved_model, tflite and onnx all converted and matched, 8 of 8). Do NOT
+    # reuse `INPUT_SHAPE_OF` here and do NOT export the training model: it holds a teacher, a head and a loss-shaped output.
+    DINO: ExportRule(_segmentation_input_shape, _dino_export_check, _dino_export_note, _dino_served),
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of

@@ -321,8 +321,9 @@ def test_a_list_command_accepts_every_help_word(command, word, cwd):
         # family (depth_anything: vit_s, vit_b, vit_l); 109 + the 7 of the beit (4) and energy_transformer (3) classifiers
         # (plan 5c6cc105 Step 5), the 5 of the one language-model family (gpt2_lm: large, medium, small, tiny, xl) and the 9 of the
         # two text-classification families (plan 7806a290 Step 10: bert 4, gpt2 5) and the 1 of the tokenizer family
-        # (plan-2026-11-25T124419-fa94f59c Step 6: vq_vae_rotation, small).
-        assert len(result.stdout.split()) == 131
+        # (plan-2026-11-25T124419-fa94f59c Step 6: vq_vae_rotation, small) and the 2 of the dino family (plan-2026-11-26T224507-e3381378
+        # Step 6: dino_v1, small and tiny).
+        assert len(result.stdout.split()) == 133
 
 
 # A task that raises a DLTrainError of its own is a user-fixable failure, not a

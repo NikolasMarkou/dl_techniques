@@ -152,7 +152,7 @@ trainer's own `train(config)`; the shipped design is a `TaskTrainer` sequence wi
 | `src/train/api/init_from.py` | `init`: start a run from an earlier run's weights (Phase 4g). |
 | `src/train/api/convert.py` | `python -m train convert`: ADE20K and COCO as index masks and listings. |
 
-Config fields every task has (from `python -m train <task> help` of all nine; a task adds its own, such as `loss_args`
+Config fields every task has (from `python -m train <task> help` of all ten; a task adds its own, such as `loss_args`
 or `jit_compile`):
 
 | Field | Type | Default |
@@ -220,7 +220,7 @@ whose body takes an argparse `Namespace` (e.g. `cliffordnet.train_model(args)`),
 
 **Phase 4: other tasks, one pattern at a time** in the order approved in Phase 0. Exemplars per `src/train/AGENTS.md`.
 (As shipped, with no Phase 0 inventory, Section 9: `image_segmentation`, `image_denoising`, `pretrain`,
-`time_series_forecasting`, `depth_estimation`, `language_model_pretraining` and `text_classification` (Phase 4i) and `beit_tokenizer` (Phase 4j), in that order; no
+`time_series_forecasting`, `depth_estimation`, `language_model_pretraining` and `text_classification` (Phase 4i), `beit_tokenizer` (Phase 4j) and `dino` (Phase 4k), in that order; no
 detection task.)
 
 **Phase 4g: start from trained weights. Code done, GPU gate run** (branch `train-api/phase-4g`; the gate's numbers are
@@ -271,6 +271,9 @@ image and the untrained model, and a codebook perplexity over every selection po
 (all four formats), and `init` from its own family. The auto decoder's last layer is linear now (the sigmoid could not reach a standardized image). `beit_mim` takes the `best_model.keras`
 of a tokenizer run and holds its `task.json` to its own patch, size and statistics before the claim. The tokenizer of the 4h `beit_mim` rows is lost and its figures are not
 reproduced. The GPU gate has run on the final code (its numbers are in `src/train/README.md`, "Measured: the tokenizer gate"). User-facing rules: `src/train/README.md`, the `beit_tokenizer` section.
+
+**Phase 4k: DINO. Code done, GPU gate run** (branch `train-api/phase-4k`, plan e3381378; one task). `dino` is the tenth task, one family `dino_v1`
+(the library `DINOTrainingModel` on stock `fit`, with no validation data and no `train_step`): a bar of two parts (the best k-NN accuracy above the larger of the constant-feature and the untrained model's plus a margin, and a clear collapse flag and a centred teacher entropy at every epoch), the tenth record kind with `predict` (a float32 CLS embedding per image) and `export` (all four formats), and `init`: a `dino` run seeds a `vit` classifier by its student (the eighth declared cross-task pair) and is refused as a target. The recipe is the improved arm of the measurement record with its EMA warmup counted in epochs; `cifar10` and the `small` variant are offered and not gate-measured. User-facing rules: `src/train/README.md`, the `dino` section (its GPU gate has run, and its numbers are in the block "Measured: the dino gate" that ends the section).
 
 **Phase 5: `load_model`, `export`, `list_models`, `list_tasks`. Done** (plan 98c9aac5, branch `train-api/phase-5-6`):
 built inside Phases 1 to 4h (`api/predictor.py`, `api/exporting.py`, `api/registry.py`, `api/cli.py`), on `train.api`

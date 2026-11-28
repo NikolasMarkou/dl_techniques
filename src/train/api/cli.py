@@ -76,6 +76,11 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     ``{"path", "file", "shape"}`` per image (:func:`train.api.tokenizer_predictor.write_predictions`). Two images with one stem are
     refused before the model is loaded.
 
+    For a DINO run ``out`` is a new DIRECTORY: one ``<stem>.npy`` per image, the float32 ``(embedding_dim,)`` CLS embedding of the student
+    (the post-final-norm token the k-NN probe scores, never the projection head's output; the image is resized to the trained side and
+    standardized as the evaluation stream does), and, written last, ``index.json`` with one ``{"path", "file", "shape"}`` per image
+    (:func:`train.api.dino_predictor.write_predictions`). Two images with one stem are refused before the model is loaded.
+
     For a LANGUAGE-MODEL run ``data`` is one ``.txt`` file (one document per line) or one ``.jsonl`` file (a ``{"text": ...}``
     object per line), and ``out`` is a new JSON file with one ``{"index", "n_tokens", "mean_nll", "perplexity", "next_tokens"}``
     per document (:func:`train.api.text_predictor.write_predictions`); a file that cannot be read as documents is refused before the
@@ -201,7 +206,7 @@ from .config import (
 from .errors import ConfigError, ConfigValidationError, DLTrainError
 from .forecast_predictor import FLAT_WINDOW_EXPORT_NOTE
 from .predictor import (
-    BEIT_TOKENIZER, CLASSIFICATION, CLASSIFICATION_EXPORT_REFUSALS, DENOISING, DEPTH, FORECASTING, LANGUAGE_MODEL, PRETRAIN,
+    BEIT_TOKENIZER, CLASSIFICATION, CLASSIFICATION_EXPORT_REFUSALS, DENOISING, DEPTH, DINO, FORECASTING, LANGUAGE_MODEL, PRETRAIN,
     SEGMENTATION, TEXT_CLASSIFICATION, known_tasks_line, record_beside,
 )
 from .pretrain_predictor import EXPORT_REFUSALS as PRETRAIN_EXPORT_REFUSALS
@@ -386,11 +391,19 @@ EXPORT_NOTES = (
     "gave Keras's code at every position measured; a position whose two nearest codes are within float32 rounding of each other can take the",
     "other one in a file, which is the limit of an argmin, not of a format. The .keras file holds a layer of the train package (the wheel does",
     "not ship it), so it loads only where train is importable.",
+    "",
+    "a dino model takes float32 images (batch, height, width, 3) at the input_size in <out>.task.json only (another size is refused in every",
+    "format, keras included; the batch is free), scaled to [0, 1] and standardized with the mean and std there, (x - mean) / std, after a",
+    "bilinear resize of the picture to that size. It returns the student's CLS embedding (batch, embedding_dim), the vector the k-NN probe scores:",
+    "not the projection head's output, and no teacher. Every format is written, and each file differs from Keras by at most 1e-4 of the larger of 1",
+    "and the largest embedding value on the images the export checks. The .keras file holds library layers only, so it loads without the train",
+    "package; a SavedModel (and the directory beside a tflite file) also holds the training model's weights, the teacher's and the heads', so it is",
+    "several times the size of the other files.",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
     Option("data", "an image file, or a directory of images (searched recursively); a forecasting model takes a csv file or a .npy or .npz array of windows; a language model or a text-classification model a .txt file (one document per line) or a .jsonl file (a {\"text\": ...} object per line)"),
-    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts; a depth model a directory of float32 .npy relative-disparity maps and an index.json; a pretrain model a directory of float32 .npy patch-token embeddings (N, width) and an index.json; a tokenizer a directory of int32 .npy code grids (the code of each patch cell, row-major) and an index.json; a language model one JSON file with n_tokens, mean_nll, perplexity and the five most likely next tokens of each document; a text-classification model one JSON list of the class names and scores of each document)"),
+    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts; a depth model a directory of float32 .npy relative-disparity maps and an index.json; a pretrain model a directory of float32 .npy patch-token embeddings (N, width) and an index.json; a tokenizer a directory of int32 .npy code grids (the code of each patch cell, row-major) and an index.json; a dino model a directory of float32 .npy CLS embeddings (width,) and an index.json; a language model one JSON file with n_tokens, mean_nll, perplexity and the five most likely next tokens of each document; a text-classification model one JSON list of the class names and scores of each document)"),
 )
 
 
@@ -652,6 +665,19 @@ def _predict_codes(model_path: Path, record: Mapping[str, Any], files: List[Path
     return 0
 
 
+def _predict_features(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the CLS embeddings of ``files`` as ``.npy`` arrays and an index into the new directory ``out``."""
+    from .depth_predictor import ARRAY_SUFFIX
+    from .dino_predictor import write_predictions
+    from .predictor import load_model
+    from .segmentation_predictor import mask_names
+
+    mask_names(files, ARRAY_SUFFIX)  # two images with one stem are refused before the model is loaded
+    write_predictions(load_model(model_path), files, out)
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
 def _text_files(data: Path) -> List[Path]:
     """Return ``[data]``: a ``.txt`` or a ``.jsonl`` file; a directory or another suffix is refused by name."""
     from .text_predictor import list_data
@@ -694,6 +720,7 @@ DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
     LANGUAGE_MODEL: _text_files,
     TEXT_CLASSIFICATION: _text_files,
     BEIT_TOKENIZER: _image_files,
+    DINO: _image_files,
 }
 
 #: What ``predict`` writes, per task: ``writer(model_path, record, files, out) -> exit code``. A task
@@ -710,6 +737,7 @@ PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path],
     LANGUAGE_MODEL: _predict_documents,
     TEXT_CLASSIFICATION: _predict_labelled_documents,
     BEIT_TOKENIZER: _predict_codes,
+    DINO: _predict_features,
 }
 
 

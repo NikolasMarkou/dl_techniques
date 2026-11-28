@@ -71,6 +71,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.beit_tokenizer:train_beit_tokenizer",
         summary="train the BEiT stage-0 tokenizer, a discrete VQ autoencoder, scored against the constant image and a codebook-usage floor",
     ),
+    registry.TaskSpec(
+        name="dino",
+        config_class="train.api.tasks.dino:DinoConfig",
+        function="train.api.tasks.dino:train_dino",
+        summary="train a DINOv1 self-supervised ViT (a student, an EMA teacher, multi-crop views), scored by a k-NN probe against constant and untrained features",
+    ),
 )
 
 

@@ -89,6 +89,10 @@ _LAZY: Dict[str, str] = {
     "load_tokenizer_data_config": ".tokenizer_args",
     "BeitTokenizerConfig": ".tasks.beit_tokenizer",
     "train_beit_tokenizer": ".tasks.beit_tokenizer",
+    "DinoData": ".dino_args",
+    "load_dino_data_config": ".dino_args",
+    "DinoConfig": ".tasks.dino",
+    "train_dino": ".tasks.dino",
 }
 
 __all__ = sorted(_LAZY)

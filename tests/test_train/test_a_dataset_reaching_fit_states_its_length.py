@@ -152,6 +152,8 @@ OTHER_LENGTH_LOSING_SITES: Dict[str, str] = {
         "after repeat(): an infinite stream; fit passes steps_per_epoch and validation_steps",
     "src/train/capsnet/train_capsnet.py::_head::unbatch":
         "the first n rows for the reconstruction figures (take n); never reaches fit",
+    "src/train/common/dino_data.py::load_dino_batches::unbatch":
+        "the first selection batch only (take 1) put through the multi-crop map for the epoch-zero loss; never reaches fit",
     "src/train/common/denoising_data.py::_train_pipeline::unbatch":
         "the patches_per_image crops of one decode become examples; load_denoising_data states the count "
         "(files * patches_per_image) with assert_cardinality in _batched, and the test reads cardinality() "

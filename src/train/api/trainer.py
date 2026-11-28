@@ -275,6 +275,15 @@ Hooks (override in a task)
     ``settle_backup`` read it), a plain int; a ``train_ds`` of infinite or unknown cardinality
     with no ``steps_per_epoch`` is a ``ConfigError`` at ``load_data`` and not a hang. Called once,
     after ``input_check``. Default: ``{}``, and the call is the one every earlier task made (D-003).
+``validation_stream(config, data)``
+    What ``fit`` gets as ``validation_data``: the stream Keras evaluates after each epoch, and the one
+    stream whose batches reach the loss and the metrics again. Default: ``data.select_ds``, the very
+    object the sequence passed before the hook existed. ``None`` runs no validation: ``fit`` is called
+    with ``validation_data=None``, the history and the CSV hold no ``val_`` key, and a decaying schedule
+    builds no ``ReduceLROnPlateau`` (it would watch a ``val_loss`` nothing writes). A task answers
+    ``None`` when its loss keeps state that a validation batch would move (DINO's centre, a loss that
+    moves its centre inside ``call``), and then names a monitor that is not a ``val_`` metric. It is
+    asked once, by the one ``fit`` call; the keywords of that call do not change (D-007).
 ``resume_stream(config, data, completed_steps)``
     The data a RESUMED run trains on, when the stream the fresh run built would replay: ``fit``
     starts a new iterator, and a stream keyed on a counter starts it at 0. Called once, only by a
@@ -703,6 +712,23 @@ class TaskTrainer:
             ``initial_epoch``, and its ``steps_per_epoch``, if any, is ``data.steps_per_epoch``.
         """
         return {}
+
+    def validation_stream(self, config: StrictConfig, data: Any) -> Optional[Any]:
+        """Return the stream ``fit`` validates on; default ``data.select_ds``, ``None`` for no validation.
+
+        :param data: what :meth:`build_data` returned.
+        :return: the ``validation_data`` of the one ``fit`` call: an object Keras accepts there, or ``None``
+            for a task whose loss must not see a batch outside training (the history then holds no ``val_``
+            key, so the task names a monitor that is not one, and ``fit_kwargs`` gives no ``validation_steps``).
+        """
+        # DECISION plan-2026-11-26T224507-e3381378/D-007
+        # The default is the very object the sequence passed to ``fit`` before this hook existed, ``data.select_ds``
+        # (identity, not a copy or a rebuilt stream): ``test_the_validation_stream_seam`` pins it, and the goldens
+        # read the bytes. Do NOT change the keyword set of the ``fit`` call to say "no validation" (a guard pins
+        # ``{validation_data, epochs, callbacks, verbose}``; ``validation_data=None`` is Keras' own "none"), and do NOT test a
+        # ``validates_in_fit``-style flag in the sequence: this hook is the one place a task opts out, so a second switch
+        # would be a second place to disagree. A task that opts out also overrides ``_callbacks`` for its own monitor (D-008).
+        return data.select_ds
 
     def resume_stream(self, config: StrictConfig, data: Any, completed_steps: int) -> Optional[Any]:
         """Return the data a resumed run trains on instead of ``data``, or ``None`` for ``data``.

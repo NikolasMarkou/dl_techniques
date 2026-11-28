@@ -840,6 +840,141 @@ class TestEvaluateSplit:
             knn.evaluate_split(_labelled_dataset(55), 0)
 
 
+class _Counting:
+    """A callable that counts its EXECUTIONS and delegates (the teacher's forward passes are the cost under test).
+
+    The count is a variable the call adds to, so it counts what runs in a graph too: a Python counter would read
+    one call for a ``tf.function`` that ran on every batch (it counts traces).
+    """
+
+    def __init__(self, fn: Any) -> None:
+        self.fn = fn
+        self.executions = keras.Variable(0, dtype="int32", trainable=False, name="executions")
+
+    @property
+    def calls(self) -> int:
+        return int(self.executions.numpy())
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.executions.assign_add(1)
+        return self.fn(*args, **kwargs)
+
+
+class _CountingModel:
+    """What the callback reads from its model: the student and a counted teacher."""
+
+    def __init__(self, model: Any) -> None:
+        self.student = model.student
+        self.teacher = _Counting(model.teacher)
+
+
+def _fresh_dino_model(seed: int = 20261127) -> keras.Model:
+    """A model of this file's own: a test below changes its weights, the module's must stay as it is."""
+    keras.utils.set_random_seed(seed)
+    model = create_dino_training_model(
+        "tiny", image_size=IMAGE_SIZE, patch_size=PATCH_SIZE, n_local_views=1, dino_out_dim=OUT_DIM)
+    model.build((None, model.n_views, IMAGE_SIZE, IMAGE_SIZE, 3))
+    return model
+
+
+class TestCompiledSwitch:
+    """``KNNEvalCallback(compiled=True)``: the probe of plan e3381378 (Phase 4k), opt-in, same numbers.
+
+    P3 measured it on real rows (3.4 times faster, the k-NN accuracies equal, the other keys within 1e-4);
+    these guards hold the three claims a faster probe can silently break: the DEFAULT is still the eager probe
+    (call for call), the compiled numbers equal the eager ones (the teacher forward skipped for the bank
+    is the one the probe discards, so the entropy columns come from the query logits alone), and the graph
+    traces once and reads the weights as they are now, not as they were at its first call.
+    """
+
+    N_BATCHES = 2
+
+    def _callbacks(self, model: Any, uneven: bool = False) -> Tuple[KNNEvalCallback, KNNEvalCallback]:
+        loss = DINOLoss(out_dim=OUT_DIM)
+        n = BATCH * self.N_BATCHES + (BATCH // 2 if uneven else 0)
+        pair = []
+        for compiled in (False, True):
+            callback = KNNEvalCallback(
+                _separable_labelled_dataset(61, n), _separable_labelled_dataset(62, n),
+                bank_batches=self.N_BATCHES + (1 if uneven else 0),
+                query_batches=self.N_BATCHES + (1 if uneven else 0),
+                dino_loss=loss, num_classes=N_CLASSES, compiled=compiled)
+            callback.set_model(model)
+            pair.append(callback)
+        return pair[0], pair[1]
+
+    def test_the_default_is_the_eager_probe_that_builds_no_graph(self, dino_model: keras.Model) -> None:
+        knn = KNNEvalCallback(_separable_labelled_dataset(61), _separable_labelled_dataset(62),
+                              bank_batches=2, query_batches=2)
+        assert knn.compiled is False
+        knn.set_model(dino_model)
+        knn._evaluate_once()
+        assert knn._feature_fn is None and knn._teacher_fn is None
+
+    def test_the_default_runs_the_teacher_on_the_bank_batches_and_the_compiled_switch_does_not(
+            self, dino_model: keras.Model) -> None:
+        counts = {}
+        for compiled in (False, True):
+            proxy = _CountingModel(dino_model)
+            knn = KNNEvalCallback(
+                _separable_labelled_dataset(61), _separable_labelled_dataset(62),
+                bank_batches=2, query_batches=2, compiled=compiled)
+            knn.set_model(proxy)
+            knn._evaluate_once()
+            counts[compiled] = proxy.teacher.calls
+        assert counts[False] == 2 + 2, "eager: the teacher sees every bank batch and every query batch"
+        assert counts[True] == 2, "compiled: the query batches only"
+
+    def test_the_compiled_numbers_equal_the_eager_ones(self, dino_model: keras.Model) -> None:
+        eager, compiled = self._callbacks(dino_model)
+        want, got = eager._evaluate_once()[0], compiled._evaluate_once()[0]
+        assert list(got) == list(want) == list(eager.log_keys)
+        for key in ("dino_knn_top1_k10", "dino_knn_top1_k20", "dino_teacher_entropy_is_centered", "dino_collapse_flag"):
+            assert got[key] == want[key], key
+        for key in ("dino_feat_mean_cos", "dino_teacher_entropy", "dino_teacher_entropy_norm"):
+            assert got[key] == pytest.approx(want[key], rel=1e-4, abs=1e-6), key
+        assert got["dino_teacher_entropy_is_centered"] == 1.0
+        assert np.isfinite(got["dino_teacher_entropy"]), "the entropy columns come from the query teacher logits"
+
+    def test_the_compiled_evaluate_split_equals_the_eager_one(self, dino_model: keras.Model) -> None:
+        eager, compiled = self._callbacks(dino_model)
+        other = _separable_labelled_dataset(63)
+        want, got = eager.evaluate_split(other, 2), compiled.evaluate_split(other, 2)
+        assert got["dino_knn_top1_k20"] == want["dino_knn_top1_k20"]
+        assert got["dino_teacher_entropy"] == pytest.approx(want["dino_teacher_entropy"], rel=1e-4)
+
+    def test_the_graphs_trace_once_across_batch_sizes_and_repeated_probes(self) -> None:
+        model = _fresh_dino_model()
+        _, compiled = self._callbacks(model, uneven=True)  # batches of 4, 4 and 2 images
+        compiled._evaluate_once()
+        compiled._evaluate_once()
+        assert compiled._feature_fn.experimental_get_tracing_count() == 1
+        assert compiled._teacher_fn.experimental_get_tracing_count() == 1
+
+    def test_the_compiled_probe_reads_the_weights_as_they_are_now(self) -> None:
+        """A graph that froze the weights of its first call would score the old model: it must follow an update."""
+        model = _fresh_dino_model()
+        eager, compiled = self._callbacks(model)
+        first = compiled._evaluate_once()[0]
+        weight = next(w for w in model.student.trainable_weights if "kernel" in w.path)
+        weight.assign(weight + 0.5)
+        after_compiled, after_eager = compiled._evaluate_once()[0], eager._evaluate_once()[0]
+        assert after_compiled["dino_feat_mean_cos"] != first["dino_feat_mean_cos"], "the update must show"
+        assert after_compiled["dino_feat_mean_cos"] == pytest.approx(after_eager["dino_feat_mean_cos"], rel=1e-4)
+        assert after_compiled["dino_knn_top1_k20"] == after_eager["dino_knn_top1_k20"]
+
+    def test_a_model_with_no_teacher_still_gives_nan_entropy_when_compiled(self) -> None:
+        class StudentOnly:
+            def __init__(self, model: Any) -> None:
+                self.student = model.student
+
+        knn = KNNEvalCallback(_separable_labelled_dataset(61), _separable_labelled_dataset(62),
+                              bank_batches=2, query_batches=2, compiled=True)
+        knn.set_model(StudentOnly(_fresh_dino_model()))
+        metrics = knn._evaluate_once()[0]
+        assert np.isnan(metrics["dino_teacher_entropy"]) and knn._teacher_fn is None
+
+
 class TestZeroStepControl:
     """PROBE (vi): the run must produce its OWN random-init baseline.
 

@@ -418,7 +418,9 @@ train, and the TEST split never selects.
   0-based row position of the pass, int64, the same on every pass; each is refused beside `element_map_fn`, and absent they leave
   the stream a plain `(image, label)` batch). `stream_seed=None` is the seed of the train shuffle and the train augmentation only
   (`ImagenetteConfig.stream_seed` likewise): `None` means `seed`, `0` is a seed (`is None`, never truthiness), and the split, the
-  selection rows and the test rows always come from `seed` (the mask-key rule under `pretrain` below says why). They use
+  selection rows and the test rows always come from `seed` (the mask-key rule under `pretrain` below says why). `shuffle_train=False` (default `True`, refused with
+  `augment`; `ImagenetteConfig.shuffle` likewise) leaves the train rows in the split's seeded order, a function of `seed` alone where a shuffle also follows TensorFlow's global
+  seed: the `dino` probe's bank reads it (plan e3381378 D-095). They use
   `add_selection_arguments(parser, imagenet=False, figures=False)`.
   DINO's per-epoch k-NN probe queries the selection slice, and `KNNEvalCallback.evaluate_split`
   scores the test split once after training (`knn_test.json`).
@@ -539,8 +541,8 @@ an exemption to green a newly dead field.
 
 `src/train/api/` is a key=value command line and a Python function over strict configs, beside the
 per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
-[`README.md`](README.md)). It has nine tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain`,
-`time_series_forecasting`, `depth_estimation`, `language_model_pretraining`, `text_classification` and `beit_tokenizer` (`python -m train list_tasks` prints them), each
+[`README.md`](README.md)). It has ten tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain`,
+`time_series_forecasting`, `depth_estimation`, `language_model_pretraining`, `text_classification`, `beit_tokenizer` and `dino` (`python -m train list_tasks` prints them), each
 a `TaskTrainer` subclass in `api/tasks/` (`api/trainer.py:TaskTrainer` holds the hooks and the shared sequence). The
 classification task calls the same `train.common.classification_run` helpers as `train.convnext.common` in the same order.
 
@@ -587,8 +589,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   (`api/forecast_models.py:builtin_forecast_models`) and the one depth family
   (`api/depth_models.py:builtin_depth_models`) and the one language-model family
   (`api/text_models.py:builtin_text_models`, which also builds the two text-classification families, `bert` and `gpt2`) and the one tokenizer
-  family (`api/tokenizer_models.py:builtin_tokenizer_models`), so a guard that walks
-  `registry.MODELS` meets 31 families (8 + 4 + 5 + 2 + 7 + 1 + 1 + 2 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  family (`api/tokenizer_models.py:builtin_tokenizer_models`) and the one dino family (`api/dino_models.py:builtin_dino_models`), so a guard that walks
+  `registry.MODELS` meets 32 families (8 + 4 + 5 + 2 + 7 + 1 + 1 + 2 + 1 + 1, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
   classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
   layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
   changed once with another session's commits; a test fails when the head gains a knob).
@@ -607,7 +609,9 @@ classification task calls the same `train.common.classification_run` helpers as 
   language model's with `cls_id`, `class_names`, `layout` (`cls_head_pad`: `[CLS]`, the head of the document, pad) and `output` (`logits`),
   and a resume compares the same four and `class_names`; a tokenizer record (the ninth kind, plan fa94f59c D-044) is the pretrain record's geometry and
   scaling with `num_embeddings` in place of the tokenizer's hash and `output` (`code_ids`), and a resume compares `input_size`, `channels`,
-  `normalize`, `mean`, `std` and `patch_size` (not the codebook, which the request holds). A new task is a new row of both tables and a
+  `normalize`, `mean`, `std` and `patch_size` (not the codebook, which the request holds); a dino record (the tenth kind, plan e3381378) is the tokenizer's geometry and scaling with
+  `n_local_crops`, `dino_out_dim` and `embedding_dim` in place of the codebook and `output` (`cls_embeddings`), and a resume compares `input_size`, `channels`, `normalize`, `mean`, `std`, `patch_size`
+  and `n_local_crops` (not the head's width or the embedding's, which the variant and the request hold). A new task is a new row of both tables and a
   builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
   `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`
   (`tests/test_train/test_api/test_task_json_schema_v2.py`::`test_a_record_of_version_1_with_every_key_valid_is_still_refused_there_is_no_reader`).
@@ -705,10 +709,10 @@ classification task calls the same `train.common.classification_run` helpers as 
   `check_data_unchanged` were made against the original. `TaskTrainer.resume_order` (a class variable, default `None`) is the clause
   that says what a resume does to the data order, for the summary's resume note and, through `config.resume_help(order=)`, the help of
   `resume_interrupted`: the default text is the older tasks' ("replays epoch 0's"), a task whose `resume_stream` trains on another
-  stream sets it (`pretrain`, `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `language_model_pretraining` and `text_classification` do). `resume_help(backup=)` is the
+  stream sets it (`pretrain`, `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `dino`, `language_model_pretraining` and `text_classification` do). `resume_help(backup=)` is the
   help's clause on `checkpoint_args.backup_every_steps`: the default (`config.BACKUP_HELP`) says the key bounds the lost
-  work, and `depth_estimation`, which refuses the key, passes a clause saying so. Both hooks have six users today, `pretrain`,
-  `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `language_model_pretraining` and `text_classification`, the last two of which continue
+  work, and `depth_estimation`, which refuses the key, passes a clause saying so. Both hooks have seven users today, `pretrain`,
+  `time_series_forecasting`, `depth_estimation`, `beit_tokenizer`, `dino`, `language_model_pretraining` and `text_classification`, the last two of which continue
   the stream at the settled step instead of deriving a seed. `TaskTrainer.resume_stream_exact` (a class variable, default `False`) says that a
   resume from a copy taken inside an epoch reads the batches the unkilled run reads next, because `resume_stream` returns the SAME stream
   at the settled step; two tasks set it today, `language_model_pretraining` and `text_classification`, and a task that derives another stream or replays epoch 0
@@ -743,8 +747,9 @@ classification task calls the same `train.common.classification_run` helpers as 
     `et_pos_refused`, which only refuses; plan 5c6cc105 D-005), `grow` (a regex of the depth-indexed blocks a
     deeper variant adds), `pinned` (factory arguments the target takes from the source's `used.model_args`, or from a source of
     another task the keys its record holds, plan 5c6cc105 D-036), `fixed` (`channels`, `lookback`, `horizon`, `input_size`,
-    `patch_size`, `vocab_size`, `tokenizer`, `num_embeddings`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask` of a target
-    prefix and the dropped source head), `positional` (top-level components whose weights pair by order, xlstm only, D-031) and `policy` (`{key: reason}` for the keys of `fixed` a
+    `patch_size`, `vocab_size`, `tokenizer`, `num_embeddings`: refused before the claim), `sources` (`(task, family)` of another task to a `CrossTask`: the target `prefix`, the dropped source head `drop`, the `rename` (`(regex, replacement)` pairs applied to a kept
+    source path after the drop and before the prefix: a dino block is a vit layer, plan e3381378 D-069) and the `view` (the attribute of the loaded source whose weights ARE the source: a dino training
+    model holds a student and a teacher at every path, so its view is `student`, D-068)), `positional` (top-level components whose weights pair by order, xlstm only, D-031) and `policy` (`{key: reason}` for the keys of `fixed` a
     family holds although every weight would copy, the tokenizer's image size: the refusal then says "holds <key> to the source's by policy" and gives the reason, plan fa94f59c D-066).
     `transfer_reason` is gone (plan 5c6cc105 D-011), and a `None` spec, left
     to test fixtures, gets one generic refusal. `ModelSpec` does not enforce the declaration (Adapter rules above)
@@ -933,6 +938,35 @@ classification task calls the same `train.common.classification_run` helpers as 
   size and statistics before the claim, reading it beside the file's resolved path (D-052, D-068: `test_beit_mim_reads_a_tokenizer_run.py`). Tests, in `tests/test_train/test_api/`:
   `test_beit_tokenizer_{task,resume,families,predictor_and_export,init}.py` and `test_common_tokenizer_data.py`, sharing `_tokenizer_world.py`. The user-facing description is in
   [`README.md`](README.md), which holds the numbers of its GPU gate in its own block.
+- **The `dino` task** (plan e3381378, Phase 4k; the D-NNN below are that plan's): `DinoTrainer` (`api/tasks/dino.py`) supplies hooks and no stage and overrides `fit_kwargs`, `validation_stream`,
+  `resume_stream` and `_callbacks`. One family, `dino_v1` (`tiny` and `small`): `api/dino_models.py` holds the adapter `create_dino_model` (the library `DINOTrainingModel`, built with its rank-5 input
+  and its views and grid PROVED by two forward passes), the flat tables `ALLOWED`, `REFUSED` and `SUPPLIED` (held to the three constructors' signatures by `signature_census`), `RECIPE`, `observe_dino` and
+  `builtin_dino_models`; `api/dino_args.py` the groups (`DinoData`, `DinoTransformArgs`, `DinoMetricArgs`) and the geometry rule; `api/dino_predictor.py` the predictor and the export row;
+  `common/dino_data.py` the batches (the multi-crop train stream and the cached probe streams) and `common/dino_run.py` the callbacks (`CompiledTeacherEMA`, `CentreFile`) and the probe wiring. Rules a change must
+  keep: the task adds no `train_step`, and a run passes no `validation_data` and calls no `evaluate` (`DINOLoss` moves its centre inside `call`; the one shared hook is
+  `TaskTrainer.validation_stream`, whose default returns the very `select_ds`) (D-003, D-007, D-022: `test_the_task_adds_no_train_step_and_no_stage`,
+  `test_the_task_validates_on_nothing_and_a_run_has_no_validation_steps`, `test_the_default_returns_the_very_selection_stream_object`,
+  `test_the_centre_advances_exactly_steps_per_epoch_times_per_epoch_and_no_evaluate_touches_the_dino_model`, `test_a_dino_shaped_fit_advances_the_centre_exactly_once_per_training_step`);
+  epoch zero runs the frozen networks and a THROWAWAY loss, never the run's (D-022: `test_epoch_zero_leaves_the_centre_the_weights_the_step_and_the_random_state_alone`); the bar is two
+  parts read through the one pure function `judge`, each strict, with a margin that is a function of two measured spreads and never a typed number (D-004, D-026, D-055:
+  `test_the_margin_is_a_function_of_the_two_measured_spreads_and_its_two_outputs_are_pinned`, `test_a_run_that_meets_one_part_misses_and_the_text_names_the_other`,
+  `test_the_bar_needs_both_parts_over_the_real_numbers`, and a baseline or epoch-zero term that is not a number is a miss, never a dropped term (D-096:
+  `test_the_verdict_has_no_threshold_for_a_term_that_is_not_a_number_and_misses_part_one_saying_which`)); the probe's bank is the first fit rows in the split's seeded order and a function of `seed` alone, never a shuffle
+  (D-095: `test_the_bank_is_a_function_of_the_seed_alone_the_first_fit_rows_in_their_seeded_order_whatever_the_global_seed`); the task's four callback values (the EMA warmup in steps, the cosine
+  horizon, the teacher temperature from `teacher_temp` to `teacher_temp_final`, the `k20` column of the bar's terms) are held to the legacy trainer's functions (D-097: `test_dino_task_wiring.py`), a
+  `model_args.ema_warmup_epochs` not below the run's epochs is refused before the claim, and one that rounds to every step of the run after the data loads and before the model is built (D-100, D-109: `test_a_warmup_that_rounds_to_every_step_of_the_run_is_refused_though_its_epochs_are_below_the_run`), a `debug_args.smoke` run exempt from both (it is one epoch with no bar, so the recipe's warmup of one epoch leaves its teacher frozen), a NaN student ends the run through its loss alone (D-102), and a resume that only reports restores the centre first (D-103);
+  the probe sits before the stopper and the CSV logger and writes every key every epoch (D-008:
+  `test_the_csv_has_every_probe_key_each_epoch_and_no_val_column_and_the_probe_sits_before_the_csv_logger`); the teacher's EMA is compiled with its decay a TENSOR argument and its step read from
+  `optimizer.iterations` (D-009, D-024: `test_the_compiled_update_equals_the_legacy_eager_update_bit_for_bit_after_every_update`); the centre is written atomically at each epoch end, and
+  `backup_every_steps` is refused (D-010, D-050: `test_a_resume_restores_the_centre_exactly_and_a_fresh_run_reads_no_file`,
+  `test_resume_stream_returns_a_stream_that_is_not_the_fresh_one_and_keeps_what_the_sequence_checks`); the constants offered as keys are only those the measurement record names a value for
+  (D-002, D-044: `test_the_census_classifies_every_parameter_of_the_constructors_in_both_directions`); a SavedModel carries the training model's weights and the `.keras` export needs no
+  `train` package (D-063, D-066: `test_the_limit_the_export_note_states_is_still_real_a_savedmodel_carries_the_training_models_weights`,
+  `test_an_exported_keras_file_holds_library_layers_only_and_loads_where_the_train_package_cannot_be_imported`); a dino run seeds a `vit` by its student and is no `init` target (D-013, D-068, D-069:
+  `test_the_unit_plan_of_a_dino_student_into_a_vit_pairs_every_backbone_weight_and_leaves_nothing_over`, `test_init_naming_any_run_is_refused_before_the_claim_with_the_reason`). The recipe
+  notices state what the gate covers and name the README block, never a figure of it (D-015, D-049). Tests, in `tests/test_train/test_api/`: `test_dino_{task,task_wiring,resume,families,predictor_and_export,init}.py`,
+  `test_common_dino_data.py`, `test_dino_run_callbacks.py` and `test_the_validation_stream_seam.py`, sharing `_dino_world.py`. The user-facing description is in [`README.md`](README.md); its GPU gate has run, and the README holds the numbers of its GPU gate in its own block
+  ("Measured: the dino gate").
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `MODEL_CHECKS`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served, sample)`: the shape `export` traces, the cells it refuses, the
@@ -942,12 +976,14 @@ classification task calls the same `train.common.classification_run` helpers as 
   of the first table it is missing from, and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
   only for a task whose `RECORD_KEYS` hold those keys. A record kind is a row in each of the 10 tables of `TASK_TABLES` plus one in each of the
   2 cli tables, `PREDICT_WRITERS` and `DATA_LISTERS`;
-  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. All nine tasks write a record, `pretrain`
+  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. All ten tasks write a record, `pretrain`
   the sixth (plan 5c6cc105 D-009; its predictor, served function and export check are `api/pretrain_predictor.py`, D-013),
   `language_model_pretraining` the seventh (plan 7806a290: `api/text_predictor.py`), `text_classification` the eighth (the same
   module, whose two predictors share a base class and the language model's export functions) and `beit_tokenizer` the ninth (plan fa94f59c
   D-044 to D-047: `api/tokenizer_predictor.py`, whose served function is the registered layer `TokenizerCodes` of `common/tokenizer_data.py`,
-  D-045; its `MODEL_CHECKS` row proves the code grid by running the model, and its family has an `observe`): do
+  D-045; its `MODEL_CHECKS` row proves the code grid by running the model, and its family has an `observe`) and `dino` the tenth (plan e3381378:
+  `api/dino_predictor.py`, whose served function is the derived feature model of the student; its `INPUT_SHAPE_OF` row is the rank-5 view set the
+  training model takes, its `MODEL_CHECKS` row holds the views, size, patch and widths to the record before the model is called): do
   not write a partial record for a new task, a record that exists makes `load_model` dispatch on the task's rows. Do not add an `elif task ==` to
   `load_model`, `input_shape_of`, `_run_on_zeros` or the predict command. The help text of `cli.PREDICT_OPTIONS` and
   `cli.EXPORT_NOTES` names every task's output; `test_export_per_family.py` pins phrases of it.

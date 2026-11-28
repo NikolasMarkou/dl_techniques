@@ -492,6 +492,15 @@ class KNNEvalCallback(keras.callbacks.Callback):
             ``0`` disables it even when ``control_json_path`` is given. Each repeat
             RE-EXTRACTS; whether that actually redraws is measured, not assumed (see
             the module docstring and ``repeats_are_independent`` in the JSON).
+        compiled: ``False`` (the default) is the eager probe every earlier run used, call
+            for call. ``True`` runs the student feature model and the teacher through
+            ``tf.function`` with a ``(None, H, W, C)`` signature (one trace, whatever the
+            batch size), and skips the teacher forward on the BANK batches, whose teacher
+            output :meth:`_evaluate_once` throws away. Same numbers, measured on real
+            Imagenette rows (plan e3381378 probe P3): the k-NN accuracies equal to the
+            vote, the other five keys within 1e-4 (the compiled graph reorders float32 sums,
+            so ``dino_feat_mean_cos`` moved in the 8th digit), and a probe call 3.4 times
+            faster than the eager one. The legacy trainer never passes it.
 
     Raises:
         ValueError: For a non-positive ``every_n_epochs`` / batch count / temperature,
@@ -528,6 +537,7 @@ class KNNEvalCallback(keras.callbacks.Callback):
             num_classes: Optional[int] = None,
             control_json_path: Optional[Union[str, Path]] = None,
             random_init_repeats: int = 2,
+            compiled: bool = False,
     ) -> None:
         super().__init__()
 
@@ -563,7 +573,11 @@ class KNNEvalCallback(keras.callbacks.Callback):
             None if control_json_path is None else Path(control_json_path))
         self.random_init_repeats = int(random_init_repeats)
 
+        self.compiled = bool(compiled)
+
         self._feature_model: Optional[keras.Model] = None
+        self._feature_fn: Optional[Any] = None
+        self._teacher_fn: Optional[Any] = None
         self._warned: Set[str] = set()
 
     # -- keys -------------------------------------------------------------
@@ -637,10 +651,47 @@ class KNNEvalCallback(keras.callbacks.Callback):
             )
         return keras.Model(inputs=student.inputs[0], outputs=head.input)
 
+    def _compiled_calls(self) -> Tuple[Any, Optional[Any]]:
+        """Return ``(feature_fn, teacher_fn)``, the two networks as ``tf.function`` s, built once.
+
+        Interface contract:
+            Parameters: none (reads ``self._feature_model`` and ``self.model``).
+            Returns: two callables mapping an image batch to numpy-convertible
+                tensors; ``teacher_fn`` is ``None`` when the model exposes no ``teacher``.
+            Failure mode: none of its own; a model whose input shape is not
+                ``(None, H, W, C)`` fails when the signature is built.
+
+        The signature is ``(None, *student.input_shape[1:])``, so the functions trace
+        ONCE whatever the batch size (the last batch of a dataset is shorter). Both
+        read their weights by reference: they see every update of the run, nothing is
+        frozen at the first call.
+        """
+        if self._feature_fn is None:
+            import tensorflow as tf  # a graph is the point; keras has no per-call compile
+
+            feature_model = self._feature_model
+            teacher = getattr(self.model, "teacher", None)
+            spec = [tf.TensorSpec(
+                [None, *feature_model.inputs[0].shape[1:]], feature_model.inputs[0].dtype)]
+
+            @tf.function(input_signature=spec)
+            def feature_fn(images):
+                return feature_model(images, training=False)
+
+            @tf.function(input_signature=spec)
+            def teacher_fn(images):
+                return teacher(images, training=False)
+
+            self._feature_fn = feature_fn
+            self._teacher_fn = None if teacher is None else teacher_fn
+        return self._feature_fn, self._teacher_fn
+
     def _extract(
             self,
             dataset: Iterable[Any],
             n_batches: int,
+            *,
+            with_teacher: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """Run the frozen networks over ``n_batches`` and return numpy arrays.
 
@@ -648,6 +699,9 @@ class KNNEvalCallback(keras.callbacks.Callback):
             Parameters:
                 dataset: Batched ``(image, label)`` iterable.
                 n_batches: How many batches to consume.
+                with_teacher: ``False`` skips the teacher forward (``teacher_logits``
+                    is then ``None``). Only :meth:`_evaluate_once` passes it, and
+                    only under ``compiled``, for the bank batches.
             Returns:
                 ``(features, labels, teacher_logits)`` -- ``teacher_logits`` is
                 ``None`` when the model exposes no ``teacher``.
@@ -662,17 +716,37 @@ class KNNEvalCallback(keras.callbacks.Callback):
             self._feature_model = self._build_feature_model()
 
         teacher = getattr(self.model, "teacher", None)
+        if self.compiled:
+            # DECISION plan-2026-11-26T224507-e3381378/D-034
+            # Opt-in and OFF by default: the legacy trainer, the older guards of this file
+            # and every earlier run read the eager branch, call for call. Do NOT
+            # make `compiled` the default or delete the eager branch "because the
+            # compiled one is faster": a graph reorders float32 sums (feature_mean_cos
+            # moved in the 8th digit, P3), so a number from one branch is compared with
+            # a number from the other only within that band, never bit for bit. Do NOT
+            # compile only the student: the teacher forward on the QUERY batches is the
+            # other half of the probe's cost (c1 in P3: 2.5x, c: 3.4x). The teacher
+            # forward on the BANK batches is skipped, not compiled: `_evaluate_once`
+            # discards it (P3 variant b: every key bitwise equal to the legacy probe).
+            feature_fn, teacher_fn = self._compiled_calls()
+        else:
+            def feature_fn(images):
+                return self._feature_model(images, training=False)
+
+            teacher_fn = None if teacher is None else (
+                lambda images: teacher(images, training=False))
+        if not with_teacher:
+            teacher_fn = None
 
         features, labels, teacher_logits = [], [], []
         for index, batch in enumerate(dataset):
             if index >= n_batches:
                 break
             images, batch_labels = batch[0], batch[1]
-            features.append(
-                np.asarray(self._feature_model(images, training=False)))
+            features.append(np.asarray(feature_fn(images)))
             labels.append(np.asarray(batch_labels).reshape(-1))
-            if teacher is not None:
-                teacher_logits.append(np.asarray(teacher(images, training=False)))
+            if teacher_fn is not None:
+                teacher_logits.append(np.asarray(teacher_fn(images)))
 
         if not features:
             raise ValueError(
@@ -816,8 +890,11 @@ class KNNEvalCallback(keras.callbacks.Callback):
         that needs it is the zero-step control's ``repeats_are_independent`` field,
         which must MEASURE whether repeats redrew instead of asserting it in prose.
         """
+        # The keyword is passed ONLY when compiled: the default call is `_extract(dataset, n_batches)`, as it always was
+        # (a test patches `_extract` with that signature, and so may a subclass).
         bank_features, bank_labels, _ = self._extract(
-            self.bank_dataset, self.bank_batches)
+            self.bank_dataset, self.bank_batches,
+            **({"with_teacher": False} if self.compiled else {}))
         query_features, query_labels, teacher_logits = self._extract(
             self.query_dataset if query_dataset is None else query_dataset,
             self.query_batches if query_batches is None else query_batches)

@@ -47,13 +47,22 @@ Interface contract
     :param target_model: the target model.
     :param spec: the target family's :class:`TransferSpec`.
     :param relation: ``None`` for a source of the same family and task; for a cross-task source,
-        the :class:`CrossTask` entry of ``spec.sources``, whose head is always reset.
+        the :class:`CrossTask` entry of ``spec.sources``, whose head is always reset. A source path is read as the source
+        holds it (``drop``), then renamed (``rename``, ``re.sub`` pair by pair), then prefixed (``prefix``).
     :param head_reset: same task only: reset the target's head and drop the source's.
     :param name: what the refusal calls the target (``family/variant``).
     :return: a :class:`TransferPlan`. Nothing is assigned; values are read only to resample.
-    :raises ConfigError: a variable path held twice on one side, a target path two ``resample`` keys
-        match, or a resample rule refusing the shapes (a smaller or non-square grid; any change of
-        the Energy Transformer position table).
+    :raises ConfigError: a variable path held twice on one side, two source paths a ``rename`` sends to one path (both
+        named), a target path two ``resample`` keys match, or a resample rule refusing the shapes (a smaller or
+        non-square grid; any change of the Energy Transformer position table).
+
+``source_view(model, relation)``
+    :param model: the loaded source model.
+    :param relation: the :class:`CrossTask` of the pair, or ``None`` for a same-task source.
+    :return: ``model`` itself, or ``getattr(model, relation.view)`` when the relation names a view (a DINO training model's
+        ``student``: the whole model holds a student and a teacher at every path, which :func:`plan_transfer` refuses).
+        :func:`transfer` applies it before planning; a test that plans by hand applies it too.
+    :raises ConfigError: the model has no attribute of that name.
 
 ``check(plan)``
     :raises ConfigError: when a target weight has no source weight of its shape and dtype and no
@@ -234,6 +243,24 @@ def _pair_by_position(source: Dict[str, Any], target: Dict[str, Any], patterns: 
             source.update({b: source.pop(a) for a, b in pairs})
 
 
+def source_view(model: Any, relation: Optional[CrossTask]) -> Any:
+    """Return the model whose weights are the source: ``model``, or its ``relation.view`` attribute (contract in the module docstring)."""
+    if relation is None or not relation.view:
+        return model
+    view = getattr(model, relation.view, None)
+    if view is None:
+        raise _refuse_init(f"the loaded source model has no attribute {relation.view!r}, which the pair names as the model whose "
+                           "weights are the source")
+    return view
+
+
+def _renamed(path: str, relation: Optional[CrossTask]) -> str:
+    """``path`` through every ``(regex, replacement)`` of ``relation.rename``, in order."""
+    for pattern, replacement in (relation.rename if relation is not None else ()):
+        path = re.sub(pattern, replacement, path)
+    return path
+
+
 def plan_transfer(source_model: Any, target_model: Any, spec: TransferSpec,
                   relation: Optional[CrossTask] = None, head_reset: bool = False,
                   name: str = "the target model") -> TransferPlan:
@@ -248,7 +275,19 @@ def plan_transfer(source_model: Any, target_model: Any, spec: TransferSpec,
     reset_heads = spec.head if (relation is not None or head_reset) else ()
     raw = _by_path(source_model, "source")
     dropped = tuple(path for path in raw if _under(path, drop))
-    source = {prefix + path: (path, var) for path, var in raw.items() if not _under(path, drop)}
+    # DECISION plan-2026-11-26T224507-e3381378/D-069
+    # `drop` reads the paths AS THE SOURCE HOLDS THEM, and `rename` acts only on the paths that survive it. Do NOT rename first: a rename
+    # that moves a dropped weight out of its prefix would turn a declared drop into an unused weight (refused), and a dropped head would
+    # then need its drop written in the target's words. Do NOT let two paths meet silently: the dict below would keep the last one.
+    source: Dict[str, Tuple[str, Any]] = {}
+    for path, var in raw.items():
+        if _under(path, drop):
+            continue
+        key = prefix + _renamed(path, relation)
+        if key in source:
+            raise _refuse_init(f"the rename of the pair sends two source weights, {source[key][0]} and {path}, to the same path {key}; "
+                               "a rename must keep every weight of the source apart")
+        source[key] = (path, var)
     target = _by_path(target_model, "target")
     _pair_by_position(source, target, spec.positional)
     source_blocks = {_block(spec.grow, path) for path in source} - {None}
@@ -736,7 +775,7 @@ def transfer(source: Source, model: Any, task: str, family: str, variant: str,
 
     loaded = load_model(source.path).model
     reset = source.relation is None and head_differs(task, source.record, record)
-    plan = plan_transfer(loaded, model, registry.MODELS[family].transfer, source.relation, reset,
+    plan = plan_transfer(source_view(loaded, source.relation), model, registry.MODELS[family].transfer, source.relation, reset,
                          name=f"{family}/{variant}")
     apply(plan)
     block = block_of(source, plan)

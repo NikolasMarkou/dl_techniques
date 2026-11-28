@@ -17,7 +17,8 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
   :class:`~train.api.tasks.pretrain.PretrainConfig` and its ``PretrainData``, step 7 of plan 7806a290
   :class:`~train.api.tasks.language_model_pretraining.LanguageModelPretrainingConfig` and its ``TextData``, step 13 the
   :class:`~train.api.tasks.text_classification.TextClassificationConfig` (``TextData`` again), step 9 of plan fa94f59c the
-  :class:`~train.api.tasks.beit_tokenizer.BeitTokenizerConfig` and its ``TokenizerData``: the lists below name the
+  :class:`~train.api.tasks.beit_tokenizer.BeitTokenizerConfig` and its ``TokenizerData``, step 9 of plan e3381378 the
+  :class:`~train.api.tasks.dino.DinoConfig` and its ``DinoData``: the lists below name the
   tasks, so a task the lists do not name has every ``data.<field>`` of its own refused as "not a field of a task config" and its
   fenced commands are never parsed); a backticked ``<name>_args`` alone must be a group; a ``<group>``
   that is not a group is refused; digits count in a field name;
@@ -96,8 +97,10 @@ from train.api.depth_args import DepthData
 from train.api.forecast_args import TimeSeriesData
 from train.api.pretrain_args import PretrainData
 from train.api.tokenizer_args import TokenizerData
+from train.api.dino_args import DinoData
 from train.api.segmentation_args import BuiltinSegData, CsvSegData, FolderSegData
 from train.api.tasks.beit_tokenizer import BeitTokenizerConfig, BeitTokenizerTrainer
+from train.api.tasks.dino import DinoConfig, DinoTrainer
 from train.api.tasks.depth_estimation import DepthEstimationConfig, DepthEstimationTrainer
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
 from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoisingTrainer
@@ -127,6 +130,7 @@ CLASSES = {
     "DepthEstimationTrainer": DepthEstimationTrainer,
     "LanguageModelPretrainingTrainer": LanguageModelPretrainingTrainer,
     "BeitTokenizerTrainer": BeitTokenizerTrainer,
+    "DinoTrainer": DinoTrainer,
     "AnalysisArgs": AnalysisArgs,
     "LoggerArgs": LoggerArgs,
     "ImageClassificationConfig": ImageClassificationConfig,
@@ -137,6 +141,7 @@ CLASSES = {
     "DepthEstimationConfig": DepthEstimationConfig,
     "LanguageModelPretrainingConfig": LanguageModelPretrainingConfig,
     "BeitTokenizerConfig": BeitTokenizerConfig,
+    "DinoConfig": DinoConfig,
 }
 #: Module aliases the docs use for ``module.function``; a ``train.`` or ``dl_techniques.`` path is
 #: imported as written.
@@ -164,7 +169,7 @@ KEY = re.compile(
 GROUP_ONLY = re.compile(r"`((?:[a-z]+_)+args)`")
 SUMMARY = re.compile(r"`summary\.analyzer\.([A-Za-z0-9_]+)`")
 HOOK = re.compile(
-    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer|LanguageModelPretrainingTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
+    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer|LanguageModelPretrainingTrainer|DinoTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
 )
 DOTTED = re.compile(r"`([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)(?:\([^`]*\))?`")
 PATH = re.compile(r"\b((?:src|tests)/[\w/.\-]+\.(?:py|md|json))\b")
@@ -187,13 +192,13 @@ ANALYZER_BLOCK_KEYS = set(skipped_analysis_status()) | {"failed_analyses"}
 #: writes must exist in at least one task, and a value it writes after ``=`` must be valid there.
 CONFIGS = (
     ImageClassificationConfig, ImageSegmentationConfig, ImageDenoisingConfig, PretrainConfig, TimeSeriesForecastingConfig,
-    DepthEstimationConfig, LanguageModelPretrainingConfig, TextClassificationConfig, BeitTokenizerConfig,
+    DepthEstimationConfig, LanguageModelPretrainingConfig, TextClassificationConfig, BeitTokenizerConfig, DinoConfig,
 )
 
 #: Every data class of those configs, in the order of :data:`CONFIGS`.
 DATA_CLASSES = (
     BuiltinImageData, FolderImageData, CsvImageData, BuiltinSegData, FolderSegData, CsvSegData, DenoisingData,
-    PretrainData, TimeSeriesData, DepthData, TextData, TokenizerData,
+    PretrainData, TimeSeriesData, DepthData, TextData, TokenizerData, DinoData,
 )
 
 
@@ -479,6 +484,7 @@ TASK_CONFIGS = {
     "language_model_pretraining": LanguageModelPretrainingConfig,
     "text_classification": TextClassificationConfig,
     "beit_tokenizer": BeitTokenizerConfig,
+    "dino": DinoConfig,
 }
 
 
@@ -666,7 +672,7 @@ def _reference_problems(region: str) -> List[str]:
             continue
         if token.split(".")[0] in (
             "TaskTrainer", "ImageClassificationTrainer", "ImageSegmentationTrainer", "ImageDenoisingTrainer", "PretrainTrainer",
-            "TimeSeriesForecastingTrainer", "DepthEstimationTrainer", "LanguageModelPretrainingTrainer",
+            "TimeSeriesForecastingTrainer", "DepthEstimationTrainer", "LanguageModelPretrainingTrainer", "DinoTrainer",
         ):
             continue  # the hook rule below owns these, with or without parentheses
         if token.rsplit(".", 1)[1] in FILE_SUFFIXES:
@@ -680,7 +686,7 @@ def _reference_problems(region: str) -> List[str]:
             found.append(f"`{cls_name}.{name}` is not a method of {cls_name}")
     # With parentheses, the parameter names must be the real ones (without them only the name is).
     for cls_name, name, params in re.findall(
-        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer|LanguageModelPretrainingTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
+        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer|TimeSeriesForecastingTrainer|DepthEstimationTrainer|LanguageModelPretrainingTrainer|DinoTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
     ):
         real = _hook_params(CLASSES[cls_name], name)
         shown = [p.strip() for p in params.split(",") if p.strip()]

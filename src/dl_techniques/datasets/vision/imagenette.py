@@ -163,6 +163,9 @@ class ImagenetteConfig:
     :param max_images: Smoke-run cap on the train pool (the test split is never capped).
     :param tfds_data_dir: The TFDS data directory; ``None`` inherits ``$TFDS_DATA_DIR``.
     :param num_parallel_calls: ``tf.data`` parallelism of the decode.
+    :param shuffle: ``False`` reads the ``train`` split in the seeded-permutation order of its rows instead of shuffling it (a stream that is
+        a function of ``seed`` alone, whatever TensorFlow's global seed is); ``True`` (the default) reshuffles on every pass. No other split reads it.
+        ``False`` is refused with ``augment`` on the ``train`` split (an augmented stream is always shuffled).
     """
 
     image_size: int = 224
@@ -177,6 +180,7 @@ class ImagenetteConfig:
     max_images: Optional[int] = None
     tfds_data_dir: Optional[str] = None
     num_parallel_calls: int = tf.data.AUTOTUNE
+    shuffle: bool = True
 
 
 class ImagenetteData(NamedTuple):
@@ -212,19 +216,28 @@ def imagenette_examples(
 
     The rows come from the seeded permutation of the TRAIN records (selection first) and,
     for ``"test"``, an independent seeded order of the validation records. ``"train"`` is
-    shuffled (the encoded rows, so the buffer holds bytes) and reshuffles on every pass;
+    shuffled (the encoded rows, so the buffer holds bytes) and reshuffles on every pass, unless
+    ``config.shuffle`` is ``False`` (the seeded order of the split's rows, refused with ``augment``);
     nothing is batched or repeated, so a caller can map per example before it batches.
 
     :param split: ``"train"``, ``"select"`` or ``"test"``.
     :param config: The pipeline settings (``batch_size`` is not used here).
     :return: ``(dataset, n)``: ``float32`` images normalized per ``config.normalize`` and
         ``int32`` labels, and the number of examples.
-    :raises ValueError: A bad ``split`` or setting, or a selection slice holding out zero rows.
+    :raises ValueError: A bad ``split`` or setting (``shuffle=False`` with ``augment`` on the train split), or a selection slice holding out zero rows.
     :raises FileNotFoundError: The TFDS records are not prepared.
     """
     if split not in _SPLITS:
         raise ValueError(f"split must be one of {_SPLITS}, got {split!r}")
     _check_config(config)
+    # DECISION plan-2026-11-26T224507-e3381378/D-110
+    # `shuffle=False` is the train rows in the split's seeded order, a function of `seed` alone, for a probe. An augmented stream draws another crop of a
+    # row on every pass, so the pair is refused, as `load_image_streams` refuses `shuffle_train=False` with `augment`. Do NOT refuse it for the other
+    # splits (they never read `shuffle` or `augment`) and do NOT default `shuffle` to False.
+    if split == "train" and not config.shuffle and config.augment:
+        raise ValueError(
+            "shuffle=False needs augment=False: an unshuffled train split is the fixed-order rows of a probe, and an augmented one would draw a "
+            "different crop of each on every pass")
 
     images, labels = read_imagenette_records(_TFDS_SPLIT[split], config.tfds_data_dir)
     # The split rows come from the seeded permutation of the TRAIN records (selection first)
@@ -250,7 +263,7 @@ def imagenette_examples(
 
     dataset = tf.data.Dataset.from_tensor_slices(
         (tf.constant(images[rows]), tf.constant(labels[rows])))
-    if training:
+    if training and config.shuffle:
         # Shuffle the encoded rows: the buffer holds bytes, not decoded floats.
         dataset = dataset.shuffle(len(rows), seed=stream, reshuffle_each_iteration=True)
 
@@ -294,7 +307,7 @@ def load_imagenette(split: str, config: ImagenetteConfig) -> ImagenetteData:
     :param split: ``"train"``, ``"select"`` or ``"test"``.
     :param config: The pipeline settings.
     :return: The batched ``(image, label)`` dataset (``float32`` images, ``int32`` labels)
-        and its counts. The train pipeline reshuffles every epoch and drops the ragged
+        and its counts. The train pipeline reshuffles every epoch (unless ``config.shuffle`` is ``False``) and drops the ragged
         last batch; the others keep every row. All three are finite and do not repeat.
     :raises ValueError: A bad ``split`` or setting, or a selection slice holding out zero rows.
     :raises FileNotFoundError: The TFDS records are not prepared.

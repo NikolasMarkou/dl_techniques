@@ -72,7 +72,7 @@ def test_the_family_count_and_its_split_over_the_tasks_are_the_registrys(world):
 
 
 def test_the_number_of_tasks_is_the_registrys_in_both_documents(world):
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
     sentence = f"It has {words[len(registry.TASKS)]} tasks"
     assert FORECASTING in registry.TASKS
     assert sentence in README.read_text() and sentence in AGENTS.read_text()
@@ -87,8 +87,8 @@ def test_every_other_n_tasks_phrase_counts_the_tasks_of_the_registry_but_one(wor
 
     The denoising section kept "the other three tasks" after the pretrain and forecasting tasks were added; no test read it.
     """
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
-    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight|nine) tasks?\b")
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven|eight|nine|ten) tasks?\b")
     found = pattern.findall(README.read_text()) + pattern.findall(AGENTS.read_text())
     assert len(found) >= 3, "the control: the README names the other tasks in the denoising, pretrain and forecasting sections"
     assert set(found) == {words[len(registry.TASKS) - 1]}, found
@@ -681,19 +681,21 @@ def test_the_lost_tokenizers_sha256_is_quoted_in_full_once():
 
 def test_the_repo_map_and_the_roadmaps_count_the_tasks_the_registry_has(world):
     """Plan fa94f59c step 9: three documents no other test reads say how many tasks there are and which is the newest (a stale count stayed in the roadmap)."""
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
     names = [spec.name for spec in BUILTIN_TASKS]
     newest = names[-1]
-    ordinal = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth")[len(names) - 1]
-    assert newest == "beit_tokenizer" and len(names) == len(registry.TASKS)
+    ordinal = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")[len(names) - 1]
+    assert newest == "dino" and names[-2] == "beit_tokenizer" and len(names) == len(registry.TASKS)
     repo_map = " ".join((ROOT / "REPO_MAP.md").read_text().split())
     scripts = " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split())
     init = " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split())
-    assert f"The {ordinal} task, `{newest}`, trains the BEiT tokenizer that a `beit_mim` run reads" in repo_map
-    assert f"`python -m train <task> help` of all {words[len(names)]};" in scripts and f"and `{newest}` (Phase 4j), in that order" in scripts
-    assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Phase 4j: the BEiT tokenizer. Code done, GPU gate run**" in scripts
+    assert "The ninth task, `beit_tokenizer`, trains the BEiT tokenizer that a `beit_mim` run reads" in repo_map
+    assert f"The {ordinal} task, `{newest}`, trains a DINOv1 self-supervised ViT" in repo_map
+    assert f"`python -m train <task> help` of all {words[len(names)]};" in scripts and f"`beit_tokenizer` (Phase 4j) and `{newest}` (Phase 4k), in that order" in scripts
+    assert f"`beit_tokenizer` is the ninth task, one family `{registry.MODELS['vq_vae_rotation'].family}`" in scripts and "Phase 4j: the BEiT tokenizer. Code done, GPU gate run**" in scripts
+    assert f"`{newest}` is the {ordinal} task, one family `{registry.MODELS['dino_v1'].family}`" in scripts and "Phase 4k: DINO." in scripts
     assert ("Phase 4j (plan fa94f59c, branch `train-api/phase-4j`: code done, its GPU gate run, numbers in `src/train/README.md` under "
-            "\"Measured: the tokenizer gate\")") in init and f"`{newest}` in Phase 4j" in init
+            "\"Measured: the tokenizer gate\")") in init and "`beit_tokenizer` in Phase 4j" in init and f"`{newest}` in Phase 4k" in init
     # Review pass 2, N4: both roadmaps state what the code does: the bar's two floors, and the two entries of the family row that lift the size refusal of `init`
     from train.common import pretrain_run, tokenizer_data as td
 
@@ -720,6 +722,230 @@ def test_no_document_says_the_tokenizer_gate_has_not_run():
     assert "and **its GPU gate has run** (its numbers are in the block that ends this section)" in readme[readme.index("**`beit_tokenizer`** (plan fa94f59c"):]
     agents = texts["AGENTS"]
     assert "[`README.md`](README.md), which holds the numbers of its GPU gate in its own block." in agents[agents.index("**The `beit_tokenizer` task**"):]
+
+
+# ---------------------------------------------------------------------
+# The dino documents (plan e3381378, step 9)
+# ---------------------------------------------------------------------
+
+DINO_HEAD = "**`dino`** (plan e3381378, Phase 4k)"
+DINO_GATE_BEGIN, DINO_GATE_END = "<!-- dino-gate:begin -->", "<!-- dino-gate:end -->"
+
+
+def dino_section() -> str:
+    """The README's ``dino`` section, whitespace-normalised, from its heading to the end of its gate block."""
+    text = " ".join(README.read_text().split())
+    start = text.index(DINO_HEAD)
+    return text[start:text.index(DINO_GATE_END, start)]
+
+
+def dino_refusal_cases():
+    """``[live message]``: what the code raises for each row of the README's refusal table of the ``dino`` section, in the table's order."""
+    from train.api import dino_args as da, dino_models as dm, init_from
+    from train.api.errors import ConfigError
+    from train.api.tasks import dino as dino_task
+
+    def raised(call):
+        with pytest.raises(ConfigError) as caught:
+            call()
+        return str(caught.value)
+
+    sources = init_from._declared_sources("image_classification", "resnet", registry.MODELS["resnet"].transfer)
+    return [
+        raised(lambda: registry.parse_model_name("vit/vit_tiny", task="dino")),
+        raised(lambda: da.check_geometry(3, 96)),
+        dm.problems_of({"student_temp": 0.2})[0],
+        dm.problems_of({"teacher_temp": 0.04, "teacher_temp_final": 0.03})[0],
+        dm.warmup_problems(60, 60)[0],
+        dm.precision_problems("mixed_float16")[0],
+        dm.schedule_problems("constant")[0],
+        dm.backup_problems(100)[0],
+        f"Invalid value for 'init': {dino_task._INIT_REFUSED}",
+        f"Invalid value for 'init': dino_v1 (dino) cannot seed resnet (image_classification); resnet takes weights from {sources}",
+    ]
+
+
+def test_the_dino_section_states_the_numbers_of_the_code(world):
+    """Plan e3381378 step 9: the variants, the model keys, the recipe, the geometry, the margin and where it comes from, the probe, the record file and the four
+    refusals of the ``dino`` section are the code's, derived here and never typed."""
+    from train.api import dino_args as da, dino_models as dm, recipes
+    from train.api.tasks import dino as dino_task
+    from train.dino.knn_eval import DEFAULT_KS
+
+    section = dino_section()
+    tiny, small = dm.VARIANTS["tiny"], dm.VARIANTS["small"]
+    size, patch = da.GEOMETRY["imagenette"]
+    crops, out = dm.RECIPE["data"]["n_local_crops"], dm.RECIPE["model_args"]["dino_out_dim"]
+    model = recipes.build_model(registry.MODELS[da.FAMILY], "tiny", None, (size, size, 3), {"patch_size": patch, "n_local_crops": crops, "dino_out_dim": out})
+    assert (f"{model.count_params():,} parameters in {len(model.weights)} weights, the student's {len(model.student.weights)} and the teacher's "
+            f"{len(model.teacher.weights)}") in section
+    assert (f"`tiny` ({tiny['embed_dim']} wide, {tiny['depth']} blocks, {tiny['num_heads']} heads) and `small` "
+            f"({small['embed_dim']} wide, {small['depth']} blocks, {small['num_heads']} heads)") in section
+    offered = ", ".join(f"`{key}`" for key in dm.ALLOWED[:-1]) + f", `{dm.ALLOWED[-1]}`"
+    assert f"Four `model_args` are offered ({offered}), {len(dm.SUPPLIED)} are given by the task and {len(dm.REFUSED)} more are refused" in section and len(dm.ALLOWED) == 4
+    optim, values = dm.RECIPE["optim_args"], dm.RECIPE["model_args"]
+    assert (f"AdamW at {optim['lr']:.0e}".replace("e-0", "e-") + f", weight decay {optim['weight_decay']:g}, {optim['warmup_epochs']} warmup epochs, cosine decay over the "
+            f"whole run to {optim['min_lr_ratio']:g} of the peak, a global gradient clip of {optim['global_clipnorm']:.1f}, batch {dm.BATCH_SIZE}, {dm.EPOCHS} epochs, "
+            f"patience {dm.PATIENCE}, a {out:,}-wide head, {crops} local crops, the teacher temperature held at {values['teacher_temp']:g} and the teacher's EMA "
+            f"warmed up over {values['ema_warmup_epochs']:g} epoch") in section
+    assert " and ".join(f"`{name}` is {side} px at patch {cell} (grid {side // cell} x {side // cell})" for name, (side, cell) in da.GEOMETRY.items()) in section
+    # the bar: both margins, and the two quantities each is the larger of (derived by `margin_of`, so the sentence cannot say another)
+    for name in ("imagenette", "cifar10"):
+        sd, null = dino_task.CONTROL_SD[name], dino_task.NULL_P99[name]
+        assert dino_task.MARGIN[name] == dino_task.margin_of(sd, null)
+        assert f"{dino_task.SD_MULTIPLE * 2 ** 0.5 * sd:.4f}" in section and f"{sd:.4f}" in section and f"{null:.4f}" in section, name
+    assert f"{dino_task.MARGIN['imagenette']:.3f} for Imagenette and {dino_task.MARGIN['cifar10']:.3f} for cifar10" in section
+    assert "ceil_to_0.005" not in section and "`margin_of`" in section
+    # the probe: its estimator, its keys, its two values of k, the file the centre rides in
+    assert (f"{dm.FIXED['knn_bank_batches']} bank batches and up to {dm.FIXED['knn_query_batches']} query batches" in section
+            and f"k = {' and '.join(str(k) for k in DEFAULT_KS)}" in section)
+    assert all(f"`{key}`" in section for key in dino_task.PROBE_KEYS) and len(dino_task.PROBE_KEYS) == 7
+    assert f"`{dino_task.CENTRE_FILE}`" in section and "`best_model.keras`" in section and "`final_model.keras`" in section
+    # the file `predict` and `export` read is the one the verdict judged (the loader's own path), and the section names that file as the one they derive the feature model from
+    from train.common.callbacks import best_checkpoint_path
+
+    assert Path(best_checkpoint_path("/run")).name == "best_model.keras"
+    assert "**`best_model.keras` is the whole training model.**" in section and "`predict` and `export` DERIVE the feature model from it at every load" in section
+    assert "`final_model.keras` is the last epoch's" in section and "from `final_model.keras`" not in section
+    assert "`checkpoint_args.backup_every_steps` is refused by name" in section and "`resume_stream_exact`" in section
+    # the table of refusals: every cell is the message the code raises (equal, or abbreviated at `<run>`, `<out>` or `...`)
+    rows = dino_refusal_rows()
+    live = dino_refusal_cases()
+    assert len(rows) == len(live), [case for case, _ in rows]
+    for number, ((case, cell), message) in enumerate(zip(rows, live), 1):
+        # a message that holds a backtick is quoted in a double-backtick span; both sides are compared with the backtick read as an apostrophe
+        quoted = cell[2:-2].strip() if cell.startswith("``") else cell[1:-1]
+        assert is_the_message("`" + quoted.replace("`", "'") + "`", message.replace("`", "'")), f"row {number} ({case}): the table quotes {cell}, the code raises {message}"
+    assert "a message quoted with `<run>`, `<out>` or `...` is abbreviated there" in section
+    # fix round 11.1 (review-iter-1): what the corrections say, each sentence read against the code or the test that holds it
+    from ._dino_world import CLAIM_LEAVES
+
+    assert dm.warmup_problems(1.0, 1) and dm.warmup_problems(1.0, 1, smoke=True) == [], "the refusal and its smoke exemption are the code's"
+    assert ("`model_args.ema_warmup_epochs` that is not below the run's `epochs`" in section and "except under `debug_args.smoke`" in section
+            and "for a fresh run and a resume alike" in section)
+    assert "the bank is the first fit rows in the split's seeded order and not a shuffle" in section and "does not reach it" in section
+    assert dino_task.non_finite_terms(0.1, float("nan")) == ["epoch zero nan"] and dino_task.non_finite_terms(float("inf"), 0.1) == ["baseline inf"]
+    assert ("An `epoch zero` term that is not a finite number (it is read from `fit_state.json`" in section and "a `baseline` term that is not (it is computed from the real labels" in section
+            and "the report is refused before any scoring" in section and "a miss of part 1" in section and "damaged `fit_state.json`) or a `baseline`" not in section)
+    # fix round 11.2: the warmup that rounds to every step, the smoke exemption in both documents and the Imagenette flag AGENTS says is refused with `augment`
+    assert dm.warmup_steps_problems(59.999, 60, 266) and dm.warmup_steps_problems(59.999, 60, 266, smoke=True) == [] and "is 15,960 warmup steps of 15,960" in section
+    agents = " ".join(AGENTS.read_text().split())
+    assert "one that rounds to every step of the run after the data loads and before the model is built" in agents and "a `debug_args.smoke` run exempt from both" in agents
+    from dl_techniques.datasets.vision.imagenette import ImagenetteConfig, imagenette_examples
+
+    with pytest.raises(ValueError, match="shuffle=False needs augment=False"):
+        imagenette_examples("train", ImagenetteConfig(shuffle=False, augment=True))
+    assert "refused with `augment`; `ImagenetteConfig.shuffle` likewise" in agents
+    assert "the 60-draw null was not repeated on it" in section and "measured on the probe bank's first construction" in section
+    assert "A diverged student is caught by its loss, not by the probe" in section and "ends the run as `diverged`, exit 1, with no bar applied" in section
+    assert "The centre file carries no epoch stamp" in section and "A resume that only reports (training had finished) restores the centre from the file before it scores the test split" in section
+    assert ", ".join(f"`{name}`" for name in CLAIM_LEAVES[:-1]) + f" and `{CLAIM_LEAVES[-1]}` only" in section and "`vit/vit_small` after `dino_v1/tiny`" in section
+
+
+def dino_refusal_rows():
+    """``[(case, message cell)]``: the rows of the README's refusal table of the ``dino`` section, in its order."""
+    text = README.read_text()
+    start = text.index("* **What is refused, and the message.**", text.index(DINO_HEAD))
+    block = text[start:text.index("* **Limits.**", start)]
+    rows = [line.strip()[2:-2].split(" | ", 1) for line in block.splitlines() if line.startswith("| ") and not line.startswith(("| Case", "|---"))]
+    return [(case.strip(), message.strip()) for case, message in rows]
+
+
+def test_the_dino_record_the_init_pair_and_the_pair_counts_are_the_codes(world):
+    """Plan e3381378 step 9: the tenth record kind's keys and the keys a resume compares (README and AGENTS); the counts of the ``dino`` into ``vit`` pair at the geometry
+    the section documents, built and planned here; the number of declared cross-task pairs; and the refusal sentence that now names the second source of ``vit``."""
+    from train.api import dino_args as da, dino_models as dm, init_from, recipes
+
+    text, agents = dino_section(), " ".join(AGENTS.read_text().split())
+    assert list(predictor.RECORD_KEYS).index("dino") == 9, "the tenth kind"
+    keys = [key for key in predictor.RECORD_KEYS["dino"] if key not in ("schema_version", "task", "model", "family", "variant")]
+    own = ", ".join(f"`{key}`" for key in keys[:-1]) + f" and `{keys[-1]}`"
+    assert f"writes `task.json` (schema version 2, the tenth record kind) before its first epoch: {own} (`{predictor.DINO_OUTPUTS[0]}`)" in text
+    compared = predictor.DATA_KEYS["dino"]
+    assert f"a resume compares the {('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight')[len(compared)]} from `{compared[0]}` to `{compared[-1]}`" in text
+    assert "a dino record (the tenth kind" in agents and "`" + "`, `".join(compared[:-1]) + f"` and `{compared[-1]}`" in agents[agents.index("a dino record (the tenth kind"):]
+    # the pair, at the documented geometry
+    size, patch = da.GEOMETRY["imagenette"]
+    dino = recipes.build_model(registry.MODELS[da.FAMILY], "tiny", None, (size, size, 3), {"patch_size": patch, "n_local_crops": 4, "dino_out_dim": dm.RECIPE["model_args"]["dino_out_dim"]})
+    vit = recipes.build_model(registry.MODELS["vit"], "vit_tiny", 10, (size, size, 3), {"patch_size": patch})
+    if not vit.built:
+        vit.build((None, size, size, 3))
+    relation = recipes.VIT_TRANSFER.sources[("dino", "dino_v1")]
+    plan = init_from.plan_transfer(init_from.source_view(dino, relation), vit, recipes.VIT_TRANSFER, relation=relation, name="vit/vit_tiny")
+    init_from.check(plan)
+    assert (relation.view, relation.drop, relation.rename) == ("student", ("dino_projection_head",), ((r"transformer_block_(\d+)", r"transformer_layer_\1"),))
+    assert (f"`vit/vit_tiny` after `dino_v1/tiny` at {size} px and patch {patch} copies {len(plan.copied)}, resets {len(plan.reset)} (the classification head) and drops "
+            f"{len(plan.dropped)} (the projection head)") in text
+    assert "`transformer_block_N` renamed `transformer_layer_N`" in text
+    readme = " ".join(README.read_text().split())
+    assert (f"`dino_v1/tiny` into `vit/vit_tiny` at {size} px and patch {patch} copies {len(plan.copied)}, resets the {len(plan.reset)} weights of `classification_head` and drops "
+            f"the {len(plan.dropped)} of `dino_projection_head`") in readme, "the init section's count of the pair (the count of declared pairs is the classification test's)"
+    declared = init_from._declared_sources("image_classification", "vit", registry.MODELS["vit"].transfer)
+    assert declared == "vit (image_classification) or dino_v1 (dino)"
+    assert (f"`Invalid value for 'init': gpt2_lm (language_model_pretraining) cannot seed vit (image_classification); vit takes weights from {declared}`") in readme
+    # AGENTS: both fields of `CrossTask` are named where the row's fields are described
+    spec_bullet = agents[agents.index("**`TransferSpec` per family.**"):][:2600]
+    assert all(f"`{field.name}`" in spec_bullet for field in dataclasses.fields(registry.CrossTask)), [f.name for f in dataclasses.fields(registry.CrossTask)]
+
+
+def test_the_dino_gate_block_the_notices_name_exists_once_and_holds_the_gates_numbers(world):
+    """Plan e3381378 steps 9 and 14 (the Step 5 note): the recipe notices of ``dino_models`` point at a README block; it exists, once, with the heading the notice names, and
+    since the night has run it holds the gate's own numbers and the HEAD they were measured on (the numbers themselves are read by the harness, as in the 4j plan)."""
+    from train.api import dino_models as dm
+
+    readme = README.read_text()
+    assert readme.count(DINO_GATE_BEGIN) == 1 and readme.count(DINO_GATE_END) == 1 and readme.index(DINO_GATE_BEGIN) < readme.index(DINO_GATE_END)
+    assert "Measured: the dino gate" in dm.GATE_BLOCK and "dino-gate" in dm.GATE_BLOCK and "src/train/README.md" in dm.GATE_BLOCK
+    block = readme.split(DINO_GATE_BEGIN)[1].split(DINO_GATE_END)[0]
+    assert "**Measured: the dino gate" in block, "the heading the notice names"
+    assert "Not run." not in block and re.search(r"\d", block) and "Run on the code HEAD" in block, "the block is the gate's own: its numbers, the HEAD it ran on"
+    assert readme.index(DINO_HEAD) < readme.index(DINO_GATE_BEGIN) < readme.index("**Keys**: `key=value` tokens"), "the block ends the section"
+    section = dino_section()
+    assert "**its GPU gate has run**" in section and "its GPU gate is not yet run" not in section
+
+
+def test_every_test_the_agents_bullet_of_the_dino_task_names_exists():
+    """Plan e3381378 step 9: a rule line of the ``dino`` bullet names the test that holds it; a name that is no test is a rule held by nothing."""
+    agents = AGENTS.read_text()
+    start = agents.index("- **The `dino` task**")
+    bullet = agents[start:agents.index("\n- **", start + 10)]
+    names = re.findall(r"`(test_[a-z0-9_]+)(\.py)?`", bullet)
+    assert len(names) >= 8, names
+    directory = ROOT / "tests" / "test_train" / "test_api"
+    source = defined_tests()
+    missing = [name + suffix for name, suffix in names if not ((directory / f"{name}.py").is_file() if suffix else f"def {name}(" in source)]
+    assert missing == [], f"the AGENTS bullet names tests that do not exist: {missing}"
+
+
+def test_the_dino_status_lines_of_the_repo_map_and_the_roadmaps_say_the_code_is_done_and_the_gate_has_run(world):
+    """Plan e3381378 steps 9 and 14: the three documents no other test reads state the tenth task and its status: the code is done and its GPU gate has run."""
+    scripts = " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split())
+    init = " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split())
+    repo_map = " ".join((ROOT / "REPO_MAP.md").read_text().split())
+    assert "**Phase 4k: DINO. Code done, GPU gate run**" in scripts and "its section of `src/train/README.md` holds the numbers of the Phase 4k GPU gate" in repo_map
+    assert ("Phase 4k (plan e3381378, branch `train-api/phase-4k`: code done, its GPU gate has run, numbers in `src/train/README.md` under \"Measured: the dino gate\") adds the DINO "
+            "student as a source of a `vit` classifier") in init
+    assert "**Phase 4k (plan e3381378; D-NNN below are that plan's).**" in init and "A dino run is no `init` target" in init
+    assert "src/train/README.md`, the `dino` section" in scripts and "(written after the gate)" not in scripts
+    readme, agents = " ".join(README.read_text().split()), " ".join(AGENTS.read_text().split())
+    sites = {"README init paragraph": readme[readme.index("`dino`, the tenth task, trains"):readme.index("`load_model`, `export`, `list_models`")], "scripts": scripts, "init": init,
+             "AGENTS bullet": agents[agents.index("- **The `dino` task**"):agents.index("- **Per-task tables")], "repo map": repo_map[repo_map.index("The tenth task, `dino`"):]}
+    assert [name for name, text in sites.items() if "its GPU gate has run" not in text] == [], "every status sentence uses the one phrase (D-115)"
+
+
+def test_no_document_says_the_dino_gate_has_not_run():
+    """Plan e3381378 step 14: the gate ran, so the documents that said it had not (the README's dino section and its block, the AGENTS bullet, both roadmaps, the repo map) say it has."""
+    texts = {"README": " ".join(README.read_text().split()), "AGENTS": " ".join(AGENTS.read_text().split()),
+             "scripts": " ".join((ROOT / "research" / "roadmap" / "2026_train_scripts.md").read_text().split()),
+             "init": " ".join((ROOT / "research" / "roadmap" / "20261117_train_api_init_from.md").read_text().split()),
+             "repo map": " ".join((ROOT / "REPO_MAP.md").read_text().split())}
+    stale = ["its GPU gate is not yet run", "GPU gate not yet run", "**Measured: the dino gate.** Not run."]
+    found = [(name, phrase) for name, text in texts.items() for phrase in stale if phrase in text]
+    assert found == [], f"a document still says the dino gate has not run: {found}"
+    readme = texts["README"]
+    block = readme[readme.index(DINO_GATE_BEGIN):readme.index(DINO_GATE_END)]
+    assert block.startswith(f"{DINO_GATE_BEGIN} **Measured: the dino gate** (plan e3381378:") and "Run on the code HEAD" in block
+    assert "**its GPU gate has run**" in readme[readme.index(DINO_HEAD):] and "holds the numbers of its GPU gate in its own block" in texts["AGENTS"][texts["AGENTS"].index("- **The `dino` task**"):]
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

@@ -37,27 +37,28 @@ import pytest
 
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.utils.logger import logger
-from train.api import init_from
+from train.api import init_from, recipes
 from train.api.errors import ConfigError
 from train.api.init_from import apply, check, plan_transfer
 from train.api.registry import CrossTask, TransferSpec
 
 from ...test_models.test_dino.dinov2_numpy_reference import torch_bicubic_2d
+from ._dino_world import IMAGE, PATCH, make_model
 
 TABLE = "pos_embed/pos_embedding"
 VIT = TransferSpec(head=("head",), resample={TABLE: "vit_pos_bicubic"}, grow=r"block_\d+")
 
 
 def classifier(seed: int, blocks: int = 2, width: int = 4, classes: int = 3, head: str = "head",
-               extra: bool = False) -> keras.Model:
-    """``stem``, ``norm`` (BatchNorm), ``drop`` (Dropout), ``block_<i>`` dense blocks, a head."""
+               extra: bool = False, block: str = "block") -> keras.Model:
+    """``stem``, ``norm`` (BatchNorm), ``drop`` (Dropout), ``<block>_<i>`` dense blocks, a head."""
     keras.utils.set_random_seed(seed)
     inputs = keras.Input((5,))
     x = keras.layers.Dense(width, name="stem")(inputs)
     x = keras.layers.BatchNormalization(name="norm")(x)
     x = keras.layers.Dropout(0.1, name="drop")(x)
     for i in range(blocks):
-        x = keras.layers.Dense(width, name=f"block_{i}")(x)
+        x = keras.layers.Dense(width, name=f"{block}_{i}")(x)
     if extra:
         x = keras.layers.Dense(width, name="extra")(x)
     model = keras.Model(inputs, keras.layers.Dense(classes, name=head)(x))
@@ -642,6 +643,173 @@ def test_an_energy_transformer_grid_change_is_refused_naming_both_grids_and_noth
                        "cannot become (1, 256, 8) (16x16 patches): no reference rule resamples it (the Energy "
                        "Transformer paper describes no fine-tuning at another resolution); train this run at the "
                        "source's grid (its image_size and patch_size)")
+
+
+# --- rename and view (plan-2026-11-26T224507-e3381378 Step 8, D-068 to D-070) -----------------------------------
+
+
+BLOCKS_TO_LAYERS = CrossTask(drop=("head",), rename=((r"block_(\d+)", r"layer_\1"),))
+
+
+def renamed_pair(source_blocks: int, relation: CrossTask) -> tuple:
+    """``(plan, source, target)`` of a trunk of ``block_<i>`` into one of ``layer_<i>``, the same width and head."""
+    source, target = classifier(1, blocks=source_blocks), classifier(2, blocks=source_blocks, block="layer")
+    spec = TransferSpec(head=("head",))
+    return plan_transfer(source, target, spec, relation=relation), source, target
+
+
+@pytest.mark.parametrize("blocks", [3, 12])
+def test_a_rename_pairs_every_source_path_with_its_renamed_target_path_whatever_the_digits(blocks):
+    plan, source, target = renamed_pair(blocks, BLOCKS_TO_LAYERS)
+    check(plan)
+    apply(plan)
+    assert (plan.missing, plan.unused) == ((), ())
+    assert plan.dropped == ("head/kernel", "head/bias") and plan.reset == ("head/kernel", "head/bias")
+    assert plan.copied == tuple(v.path for v in target.weights if not v.path.startswith("head/"))
+    assert len(plan.copied) == len(source.weights) - 2
+    assert f"layer_{blocks - 1}/kernel" in plan.copied  # two digits from 12 blocks: block_10 and block_11 rename too
+    want = values(source)
+    for path in plan.copied:
+        np.testing.assert_array_equal(values(target)[path], want[path.replace("layer_", "block_")], err_msg=path)
+
+
+def test_a_rename_that_matches_one_digit_leaves_the_two_digit_blocks_unpaired():
+    # The pattern a careless row would write: anchored on one digit, it renames block_0 to block_9 and no other.
+    plan, _, _ = renamed_pair(12, CrossTask(drop=("head",), rename=((r"block_(\d)/", r"layer_\1/"),)))
+    assert sorted({entry.partition("/")[0] for entry in plan.unused}) == ["block_10", "block_11"]
+    assert sorted({entry.partition("/")[0] for entry in plan.missing}) == ["layer_10", "layer_11"]
+    with pytest.raises(ConfigError, match="have no source weight of their shape"):
+        check(plan)
+
+
+def test_the_drop_names_source_paths_and_the_rename_acts_only_on_what_it_leaves():
+    # A rename that would move a dropped weight out of its drop prefix: the drop is read on the paths as the source holds them.
+    source, target = classifier(1, head="classification_head"), classifier(2, classes=3)
+    relation = CrossTask(drop=("classification_head",), rename=((r"^classification_head", "neck"),))
+    plan = plan_transfer(source, target, TransferSpec(head=("head",)), relation=relation)
+    assert plan.dropped == ("classification_head/kernel", "classification_head/bias")
+    assert plan.unused == () and plan.reset == ("head/kernel", "head/bias")
+    check(plan)
+
+
+def test_the_rename_acts_before_the_prefix_is_put_on():
+    # `^stem` matches the source's own path (stem/kernel); read after the prefix (backbone/stem/kernel) it would match nothing and pair.
+    source, target = classifier(1, blocks=2, head="classification_head"), segmenter(2)
+    relation = CrossTask(prefix="backbone/", drop=("classification_head",), rename=((r"^stem", "first"),))
+    plan = plan_transfer(source, target, TransferSpec(head=("segmentation_head",)), relation=relation)
+    assert sorted(entry.partition(":")[0] for entry in plan.missing) == ["backbone/stem/bias", "backbone/stem/kernel"]
+    assert sorted(entry.partition(" ")[0] for entry in plan.unused) == ["stem/bias", "stem/kernel"]
+
+
+def test_two_source_paths_renamed_onto_one_are_refused_naming_both_and_nothing_is_assigned():
+    source, target = classifier(1, blocks=3), classifier(2, blocks=3)
+    relation = CrossTask(rename=((r"block_\d+", "block_0"),))
+    message = refuse(source, target, TransferSpec(head=("head",)), relation=relation)
+    assert "block_0/kernel" in message and "block_1/kernel" in message and "same path" in message, message
+
+
+@pytest.mark.parametrize("rename,words", [
+    (((r"block_(\d+", "layer_\\1"),), "is not a regex"),
+    (((r"block_(\d+)", r"layer_\2"),), "replacement"),
+    (((r"block_(\d+)",),), "pair"),
+    (((1, "layer"),), "pair"),
+    (r"block_(\d+)", "pair"),
+])
+def test_a_bad_rename_is_a_spec_error_naming_the_rule(rename, words):
+    with pytest.raises(ValueError, match="CrossTask.rename") as raised:
+        CrossTask(rename=rename)
+    assert words in str(raised.value)
+
+
+def test_a_view_that_is_not_a_name_is_a_spec_error():
+    with pytest.raises(ValueError, match="CrossTask.view"):
+        CrossTask(view="student/teacher")
+
+
+def pair_model(seed: int) -> types.SimpleNamespace:
+    """A model that holds a ``student`` and a ``teacher`` of one architecture, so every path occurs twice (a dino training model)."""
+    student, teacher = classifier(seed), classifier(seed + 100)
+    return types.SimpleNamespace(name="pair", weights=[*student.weights, *teacher.weights], student=student, teacher=teacher)
+
+
+def test_the_view_names_the_attribute_whose_weights_are_the_source_and_the_whole_model_is_refused():
+    pair, target = pair_model(1), classifier(2)
+    relation = CrossTask(view="student")
+    with pytest.raises(ConfigError, match="the source holds two weights at stem/kernel"):
+        plan_transfer(pair, target, TransferSpec(), relation=relation)  # the whole model: a student and a teacher at every path
+    view = init_from.source_view(pair, relation)
+    assert view is pair.student
+    plan = plan_transfer(view, target, TransferSpec(), relation=relation)
+    apply(plan)
+    want = values(pair.student)
+    for path, value in values(target).items():
+        np.testing.assert_array_equal(value, want[path], err_msg=path)
+    assert init_from.source_view(pair, CrossTask()) is pair and init_from.source_view(pair, None) is pair
+
+
+def test_a_view_the_loaded_model_does_not_have_is_refused_naming_it():
+    with pytest.raises(ConfigError, match="no attribute 'student'"):
+        init_from.source_view(classifier(1), CrossTask(view="student"))
+
+
+def registered_cross_rows() -> Dict[tuple, CrossTask]:
+    """``{(target family, (source task, source family)): row}`` over every built-in family, in an empty registry."""
+    from train.api import registry
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(registry, "MODELS", {})
+        recipes.register_builtin_models()
+        return {(family, pair): row for family, spec in registry.MODELS.items() for pair, row in spec.transfer.sources.items()}
+
+
+def test_the_cross_task_rows_that_exist_before_the_dino_row_take_no_rename_and_no_view():
+    rows = registered_cross_rows()
+    dino = ("vit", ("dino", "dino_v1"))
+    assert dino in rows
+    others = {key: row for key, row in rows.items() if key != dino}
+    assert sorted(others) == [
+        ("beit", ("pretrain", "beit_mim")), ("convnext_seg", ("image_classification", "convnext_v1")),
+        ("convunext", ("image_denoising", "convunext_biased")), ("convunext_biased", ("image_segmentation", "convunext")),
+        ("energy_transformer", ("pretrain", "et_mim")), ("gpt2", ("language_model_pretraining", "gpt2_lm")),
+        ("resnet_seg", ("image_classification", "resnet"))]
+    for key, row in others.items():
+        assert (row.rename, row.view) == ((), ""), key
+
+
+def test_the_dino_row_of_the_vit_spec_is_the_one_the_plan_describes():
+    row = recipes.VIT_TRANSFER.sources[("dino", "dino_v1")]
+    assert row.drop == ("dino_projection_head",) and row.view == "student" and row.prefix == ""
+    assert row.rename == ((r"transformer_block_(\d+)", r"transformer_layer_\1"),)
+
+
+def vit_of(variant: str = "vit_tiny") -> Any:
+    spec = next(s for s in recipes.builtin_models() if s.family == "vit")
+    keras.backend.clear_session()
+    model = recipes.build_model(spec, variant, 10, (IMAGE, IMAGE, 3), {"patch_size": PATCH, "kernel_regularizer": None})
+    if not model.built:
+        model.build((None, IMAGE, IMAGE, 3))
+    return model
+
+
+def test_the_unit_plan_of_a_dino_student_into_a_vit_pairs_every_backbone_weight_and_leaves_nothing_over():
+    dino = make_model(depth=12)
+    vit = vit_of()
+    relation = recipes.VIT_TRANSFER.sources[("dino", "dino_v1")]
+    student = init_from.source_view(dino, relation)
+    plan = plan_transfer(student, vit, recipes.VIT_TRANSFER, relation=relation, name="vit/vit_tiny")
+    check(plan)
+    heads = [path for path in init_from._by_path(vit, "target") if path.startswith("classification_head/")]
+    projection = [path for path in init_from._by_path(student, "source") if path.startswith("dino_projection_head/")]
+    logger.info(f"UNIT PLAN dino student into vit_tiny: source {plan.n_source} target {plan.n_target} copied {len(plan.copied)} "
+                f"reset {len(plan.reset)} dropped {len(plan.dropped)}")
+    assert (plan.missing, plan.unused, plan.resampled, plan.grown) == ((), (), (), ())
+    assert plan.n_source == len(student.weights) and plan.n_target == len(vit.weights)
+    assert sorted(plan.reset) == sorted(heads) and len(heads) > 0
+    assert sorted(plan.dropped) == sorted(projection) and len(projection) > 0
+    assert len(plan.copied) == plan.n_target - len(heads) == plan.n_source - len(projection)
+    layers = {path.split("/")[0] for path in plan.copied if path.startswith("transformer_layer_")}
+    assert layers == {f"transformer_layer_{index}" for index in range(12)}  # blocks 10 and 11 are renamed as well
+    assert not any(path.startswith("transformer_block_") for path in plan.copied)
 
 
 def test_init_from_imports_no_tensorflow_keras_numpy_or_scipy_at_module_scope():

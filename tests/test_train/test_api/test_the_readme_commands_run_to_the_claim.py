@@ -38,10 +38,11 @@ from typing import List, Tuple
 
 import pytest
 
-from train.api import cli, predictor, registry, trainer
+from train.api import cli, data_args, predictor, registry, trainer
 from train.api import text_models
 from train.api.config import validate
 from train.api.tasks.beit_tokenizer import BeitTokenizerConfig, BeitTokenizerTrainer
+from train.api.tasks.dino import DinoConfig, DinoTrainer
 from train.api.text_args import CLASS_NAMES
 from train.api.forecast_models import HORIZON, LOOKBACK
 from train.api.text_tokenizer import tokenizer_spec
@@ -52,6 +53,7 @@ ROOT = Path(__file__).resolve().parents[3]
 DOCUMENTS = [ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "src" / "train" / "README.md", ROOT / "src" / "train" / "AGENTS.md"]
 FORECASTING, LANGUAGE, CLASSIFICATION = "time_series_forecasting", "language_model_pretraining", "text_classification"
 TOKENIZER, PRETRAIN = "beit_tokenizer", "pretrain"
+DINO, CLASSIFIER = "dino", "image_classification"
 #: The recipe's 128 batch needs 21,600 rows of a csv at the default window; the csv the README names is written at this length.
 CSV_ROWS = 25_000
 OUT, INIT = re.compile(r"(?:^|\s)out=(\S+)"), re.compile(r"(?:^|\s)init=(\S+)")
@@ -82,6 +84,11 @@ FOUND_TOKENIZER = documented(TOKENIZER)
 #: The ``pretrain`` commands that read a tokenizer run (the others, and the sentences that say a pretrain request is refused, are not run here).
 FOUND_PRETRAIN = [(source, tail) for source, tail in documented(PRETRAIN) if CHECKPOINT.search(tail)]
 FOUND_TOKENIZER_COMMANDS = [(TOKENIZER, source, tail) for source, tail in FOUND_TOKENIZER] + [(PRETRAIN, source, tail) for source, tail in FOUND_PRETRAIN]
+FOUND_DINO = documented(DINO)
+DINO_OUTS = {out.group(1) for _, tail in FOUND_DINO if (out := OUT.search(tail))}
+#: The ``vit`` pair: the classification commands whose ``init=`` is the ``out`` of a documented ``dino`` command.
+FOUND_VIT_PAIR = [(source, tail) for source, tail in documented(CLASSIFIER) if (init := INIT.search(tail)) and init.group(1) in DINO_OUTS]
+FOUND_DINO_COMMANDS = [(DINO, source, tail) for source, tail in FOUND_DINO] + [(CLASSIFIER, source, tail) for source, tail in FOUND_VIT_PAIR]
 
 
 def a_documented_source(name: str, root: Path) -> Path:
@@ -289,3 +296,68 @@ def test_a_documented_tokenizer_command_passes_the_cli_up_to_the_claim(task, sou
     error = capsys.readouterr().err
     assert code in (0, None), f"{source}: `python -m train {task} {tail}` exited {code}:\n{error[-1500:]}"
     assert code == 0 or len(claimed) == 1, "a command that is not help reaches the claim exactly once, and the claim is never made"
+
+
+def a_documented_dino_run(name: str, root: Path) -> Path:
+    """The stand-in of the run the documented ``dino`` command with ``out=name`` trains, written under ``root``.
+
+    The record is the one the task writes for THAT command (parsed by the real command line, resolved by the real trainer): the classifier's
+    pre-claim read of a dino source holds its own patch, its size and its statistics to it, and the archive is hashed there, never loaded.
+    """
+    # DECISION plan-2026-11-26T224507-e3381378/D-075
+    # Same rule as the tokenizer's stand-in (plan fa94f59c D-056): the record is written by the real task for the documented command, never built
+    # by hand from the geometry table, so the `init` pair is judged against the record a run writes. Do NOT stand in a placeholder that satisfies
+    # the path check alone, and do NOT name a run no documented command trains: that fails here, by name.
+    trained = [tail for _, tail in FOUND_DINO if (out := OUT.search(tail)) and out.group(1) == name]
+    assert trained, f"{name} names a dino run no documented command trains (no `python -m train dino` command has out={name})"
+    config_path, raw = cli.parse_task_arguments(DinoConfig, shlex.split(trained[0]))
+    config = validate(DinoConfig, cli.layer_command_line(DinoConfig, config_path, raw))
+    run = DinoTrainer(config)
+    family, variant = registry.parse_model_name(config.model, task=run.task)
+    resolved, context = run._resolve(run.describe_data(config), family, variant)
+    side = resolved.transform_args.image_size
+    source = root / "dino" / Path(name).name
+    source.mkdir(parents=True)
+    (source / "task.json").write_text(json.dumps(run.task_record(resolved, context, SimpleNamespace(input_shape=(side, side, 3)))))
+    (source / "config.json").write_text(json.dumps({"model": config.model, "used": {"model_args": {}}}))
+    (source / "best_model.keras").write_bytes(b"a stand-in archive: hashed before the claim, never loaded")
+    return source
+
+
+def test_the_documents_hold_the_dino_commands_to_run():
+    """Vacuity guard: the bare command, a cifar10 smoke run, an Imagenette run, and a ``vit`` pair command whose ``init`` is a documented dino ``out``;
+    no command line of the legacy trainer is printed (the command that trains DINO is ``python -m train dino``)."""
+    tails = [tail for _, tail in FOUND_DINO]
+    assert "" in tails
+    assert any("data.dataset=cifar10" in tail and "debug_args.smoke=true" in tail for tail in tails)
+    assert any("data.dataset=imagenette" in tail and "model=dino_v1/tiny" in tail for tail in tails)
+    assert DINO_OUTS and FOUND_VIT_PAIR, "the init section's pair: a vit classification command whose init is the out of a documented dino command"
+    assert all("model=vit/" in tail for _, tail in FOUND_VIT_PAIR)
+    assert not any("python -m train.dino.train_dino" in document.read_text() for document in DOCUMENTS if document.is_file()), (
+        "a document prints a command line of the legacy DINO trainer: the command that trains DINO is `python -m train dino`")
+
+
+@pytest.mark.parametrize("task, source, tail", FOUND_DINO_COMMANDS, ids=[f"{task}:{source}:{tail[:60] or 'bare'}" for task, source, tail in FOUND_DINO_COMMANDS])
+def test_a_documented_dino_command_passes_the_cli_up_to_the_claim(task, source, tail, world, tmp_path, monkeypatch, capsys):
+    claimed: List[Path] = []
+    records: List[str] = []
+
+    def open_run(run_dir, resume):
+        claimed.append(run_dir)
+        raise Claimed(str(run_dir))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(trainer, "open_run", open_run)
+    # A fresh checkout has no TFDS directory: the check is stood in for, and an Imagenette command must reach it (the dino and the classifier read it alike).
+    monkeypatch.setattr(data_args, "_check_imagenette_records", lambda: records.append("imagenette"))
+    if init := INIT.search(tail):
+        tail = tail.replace(f"init={init.group(1)}", f"init={a_documented_dino_run(init.group(1), tmp_path)}")
+    try:
+        code = cli.main([task, *shlex.split(tail)])
+    except Claimed:
+        code = None
+    error = capsys.readouterr().err
+    assert code in (0, None), f"{source}: `python -m train {task} {tail}` exited {code}:\n{error[-1500:]}"
+    assert code == 0 or len(claimed) == 1, "a command that is not help reaches the claim exactly once, and the claim is never made"
+    if code is None:
+        assert bool(records) == ("data.dataset=imagenette" in tail), "an Imagenette command reaches the records check and no other does"

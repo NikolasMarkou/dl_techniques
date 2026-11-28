@@ -61,8 +61,9 @@ Interface contract
 
     :raises ValueError: for a ``resample`` rule name that ``init_from.RULES`` does not hold, a ``resample``
         key that is not a regex (a key must match a whole weight path), a ``positional`` entry that is
-        not a regex of one top-level path component (it holds a ``/``), or a ``policy`` key that is not in
-        ``fixed`` or has no reason.
+        not a regex of one top-level path component (it holds a ``/``), a ``policy`` key that is not in
+        ``fixed`` or has no reason, a ``CrossTask.rename`` pair that is no ``(regex, replacement)`` of text
+        (or whose replacement names a group the regex lacks), or a ``CrossTask.view`` that is no attribute name.
 
 ``load_attr(path)``
     :param path: ``"module:attr"`` or ``"module:Class.attr"``.
@@ -129,10 +130,43 @@ def _require_attr_path(owner: str, field_name: str, text: str) -> None:
 
 @dataclass(frozen=True)
 class CrossTask:
-    """How a source of another task maps onto a family: a target prefix and the dropped source head."""
+    """How a source of another task maps onto a family: a target prefix, the dropped source head, a path rename and a view.
+
+    :param prefix: put before every kept source path (a classifier's trunk under a segmenter's ``backbone/``).
+    :param drop: source paths (and everything under them) that no target weight takes.
+    :param rename: ``(regex, replacement)`` pairs applied in order, with ``re.sub``, to every kept source path
+        (after ``drop``, before ``prefix``): the source's names for the target's (a DINO block is a ViT layer).
+    :param view: the attribute of the loaded source model whose weights are the source; empty for the model itself
+        (a DINO training model holds a student and a teacher at every path, so its ``student`` is the source).
+    """
 
     prefix: str = ""
     drop: Tuple[str, ...] = ()
+    rename: Tuple[Tuple[str, str], ...] = ()
+    view: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.rename, tuple) or any(
+                not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) for part in pair) for pair in self.rename):
+            raise ValueError(f"CrossTask.rename is a tuple of (regex, replacement) pairs of text, got {self.rename!r}")
+        for pattern, replacement in self.rename:
+            try:
+                # sub over the empty text parses the replacement as it will be read (a group the pattern lacks is an error)
+                re.compile(pattern).sub(replacement, "")
+            except re.error as exc:
+                what = "is not a regex" if not _compiles(pattern) else "is not a replacement of that regex"
+                raise ValueError(f"CrossTask.rename ({pattern!r}, {replacement!r}) {what} ({exc}); a pair is applied to every source "
+                                 "path with re.sub") from exc
+        if self.view and not self.view.isidentifier():
+            raise ValueError(f"CrossTask.view names an attribute of the loaded model, got {self.view!r}")
+
+
+def _compiles(pattern: str) -> bool:
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
